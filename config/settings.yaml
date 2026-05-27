@@ -1,0 +1,20 @@
+mode: backtest
+exchange:
+  api_key: ${OKX_API_KEY}
+  secret: ${OKX_SECRET}
+  passphrase: ${OKX_PASSPHRASE}
+backtest:
+  initial_capital: 100000
+  fee_rate: 0.0005
+  slippage: 0.001
+  data_cache_dir: ./data
+risk:
+  max_daily_loss_pct: 0.05
+  max_drawdown_pct: 0.15
+  max_total_position_pct: 0.8
+notify:
+  telegram_bot_token: ${TG_BOT_TOKEN}
+  telegram_chat_id: ${TG_CHAT_ID}
+web:
+  host: 0.0.0.0
+  port: 8080
