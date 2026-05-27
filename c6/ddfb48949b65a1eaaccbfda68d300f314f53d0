@@ -1,0 +1,23 @@
+docs/superpowers/specs/2026-05-27-okx-quant-bot-design.md
+  s_12928cb25bf2c7::t_3bfba9760aebf5 447-448,461-471,473-478
+  s_12928cb25bf2c7::t_d360fd0c6ae567 250-257,260
+  s_12928cb25bf2c7::t_c0433793032657 1-89,91-249,258-259,261-446,449-460,472,479-507
+  s_12928cb25bf2c7::t_7b32b8bfbf4562 90
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.12",
+  "base_commit_sha": "c6ddfb48949b65a1eaaccbfda68d300f314f53d0",
+  "prompts": {},
+  "logical_commit_id": "c6ddfb48949b65a1eaaccbfda68d300f314f53d0",
+  "sessions": {
+    "s_12928cb25bf2c7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "58408415-a25c-4361-8c20-f7551003efaf",
+        "model": "mimo-v2.5-pro"
+      },
+      "human_author": "Zane <zane@bigo.sg>"
+    }
+  }
+}
