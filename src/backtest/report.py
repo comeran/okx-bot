@@ -6,9 +6,9 @@ from typing import Any
 
 @dataclass
 class BacktestReport:
-    initial_capital: float
-    final_equity: float
-    total_return: float
+    initial_capital: float = 0
+    final_equity: float = 0
+    total_return: float = 0
     annualized_return: float = 0
     sharpe_ratio: float = 0
     max_drawdown: float = 0
@@ -54,13 +54,9 @@ def generate_report(
 
 
 def _max_drawdown(equity_curve: list[float]) -> float:
-    peak = 0.0
-    max_drawdown = 0.0
-    for equity in equity_curve:
-        peak = max(peak, equity)
-        if peak:
-            max_drawdown = max(max_drawdown, (peak - equity) / peak)
-    return max_drawdown
+    peak = max(equity_curve, default=0.0)
+    final_equity = equity_curve[-1] if equity_curve else 0.0
+    return (peak - final_equity) / peak if peak else 0
 
 
 def _sharpe_ratio(equity_curve: list[float]) -> float:
