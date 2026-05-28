@@ -54,9 +54,15 @@ def generate_report(
 
 
 def _max_drawdown(equity_curve: list[float]) -> float:
-    peak = max(equity_curve, default=0.0)
-    final_equity = equity_curve[-1] if equity_curve else 0.0
-    return (peak - final_equity) / peak if peak else 0
+    peak = 0.0
+    max_drawdown = 0.0
+
+    for equity in equity_curve:
+        peak = max(peak, equity)
+        if peak:
+            max_drawdown = max(max_drawdown, (peak - equity) / peak)
+
+    return max_drawdown
 
 
 def _sharpe_ratio(equity_curve: list[float]) -> float:

@@ -16,8 +16,14 @@ def test_report_calculates_metrics() -> None:
     assert report.total_trades == 4
     assert report.win_rate == pytest.approx(0.5)
     assert report.profit_factor == pytest.approx(300 / 80)
-    assert report.max_drawdown == pytest.approx((10250 - 10220) / 10250)
+    assert report.max_drawdown == pytest.approx((10100 - 10050) / 10100)
     assert isinstance(report.sharpe_ratio, float)
+
+
+def test_report_calculates_peak_to_trough_drawdown_before_recovery() -> None:
+    report = generate_report(initial_capital=100, trades=[], equity_curve=[100, 80, 120])
+
+    assert report.max_drawdown == pytest.approx(0.2)
 
 
 def test_backtest_report_defaults() -> None:
