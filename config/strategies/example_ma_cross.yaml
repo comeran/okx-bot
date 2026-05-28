@@ -1,0 +1,21 @@
+name: MA_Cross
+symbol: BTC-USDT-SWAP
+timeframe: 1h
+capital:
+  initial_balance: 10000
+  currency: USDT
+risk:
+  max_position_pct: 0.1
+  stop_loss_pct: 0.02
+  take_profit_pct: 0.04
+params:
+  fast: 10
+  slow: 30
+indicators:
+  fast_ma: "sma(close, {{ fast }})"
+  slow_ma: "sma(close, {{ slow }})"
+conditions:
+  buy:
+    - "fast_ma > slow_ma"
+  sell:
+    - "fast_ma < slow_ma"
