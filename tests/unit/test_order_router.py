@@ -79,3 +79,27 @@ async def test_order_manager_submit():
         strategy_name="test",
     )
     assert order.status == OrderStatus.FILLED
+
+
+@pytest.mark.asyncio
+async def test_order_manager_generates_unique_order_ids_for_repeated_submits():
+    handler = MockHandler()
+    router = OrderRouter(backtest=handler, mode="backtest")
+    manager = UnifiedOrderManager(router=router)
+
+    order1 = await manager.submit(
+        symbol="BTC-USDT",
+        side=OrderSide.BUY,
+        order_type=OrderType.MARKET,
+        amount=0.1,
+        strategy_name="test",
+    )
+    order2 = await manager.submit(
+        symbol="BTC-USDT",
+        side=OrderSide.SELL,
+        order_type=OrderType.MARKET,
+        amount=0.1,
+        strategy_name="test",
+    )
+
+    assert order1.id != order2.id

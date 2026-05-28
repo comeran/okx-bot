@@ -7,6 +7,7 @@ class UnifiedOrderManager:
         self.router = router
         self._positions: dict[str, dict[str, Position]] = {}
         self._balances: dict[str, float] = {}
+        self._order_seq = 0
 
     async def submit(
         self,
@@ -19,8 +20,9 @@ class UnifiedOrderManager:
         take_profit: float | None = None,
         strategy_name: str = "",
     ) -> Order:
+        self._order_seq += 1
         order = Order(
-            id=f"{strategy_name}-{symbol}-{id(self)}",
+            id=f"{strategy_name}-{symbol}-{id(self)}-{self._order_seq}",
             symbol=symbol,
             side=side,
             type=order_type,
