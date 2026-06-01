@@ -57,10 +57,10 @@ class BaseStrategy(ABC):
             price=price,
         )
 
-    async def cancel(self, order_id: str) -> Any:
+    async def cancel(self, order_id: str, symbol: str | None = None) -> Any:
         if self._order_manager is None:
             raise RuntimeError("Order manager not set")
-        return await self._order_manager.cancel(order_id)
+        return await self._order_manager.cancel(order_id, symbol)
 
     def get_position(self, symbol: str) -> Any:
         if self._order_manager is None:

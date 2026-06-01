@@ -2,7 +2,38 @@ from typing import Any
 
 from src.backtest.matcher import OrderMatcher
 from src.backtest.report import BacktestReport, generate_report
-from src.core.types import Bar, Order, OrderSide, OrderStatus
+from src.core.types import Bar, Order, OrderSide, OrderStatus, OrderType
+
+
+class BacktestOrderManager:
+    def __init__(self) -> None:
+        self._next_id = 0
+
+    async def submit(
+        self,
+        symbol: str,
+        side: OrderSide,
+        order_type: OrderType,
+        amount: float,
+        price: float | None = None,
+        stop_loss: float | None = None,
+        take_profit: float | None = None,
+        strategy_name: str = "",
+    ) -> Order:
+        self._next_id += 1
+        return Order(
+            id=f"{strategy_name}-{self._next_id}",
+            symbol=symbol,
+            side=side,
+            type=order_type,
+            amount=amount,
+            price=price,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+        )
+
+    async def cancel(self, order_id: str, symbol: str | None = None) -> bool:
+        return True
 
 
 class BacktestEngine:
@@ -14,6 +45,12 @@ class BacktestEngine:
         equity = self.initial_capital
         trades: list[dict[str, Any]] = []
         equity_curve = [equity]
+
+        needs_order_manager = getattr(strategy, "_order_manager", None) is None and hasattr(
+            strategy, "set_order_manager"
+        )
+        if needs_order_manager:
+            strategy.set_order_manager(BacktestOrderManager())
 
         await strategy.on_init()
 

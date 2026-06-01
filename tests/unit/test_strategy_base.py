@@ -45,6 +45,24 @@ async def test_strategy_buy_requires_order_manager() -> None:
         await strategy.on_bar(make_bar(close=50001))
 
 
+async def test_strategy_cancel_forwards_symbol() -> None:
+    class Manager:
+        def __init__(self) -> None:
+            self.cancelled = []
+
+        async def cancel(self, order_id: str, symbol: str | None = None) -> bool:
+            self.cancelled.append((order_id, symbol))
+            return True
+
+    manager = Manager()
+    strategy = DummyStrategy()
+    strategy.set_order_manager(manager)
+
+    assert await strategy.cancel("exchange-order-1", symbol="BTC-USDT") is True
+
+    assert manager.cancelled == [("exchange-order-1", "BTC-USDT")]
+
+
 async def test_strategy_registry() -> None:
     registry = StrategyRegistry()
 

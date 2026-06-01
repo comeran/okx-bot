@@ -29,7 +29,15 @@ class MarketDataService:
 
     async def _poll_once(self, symbol: str, timeframe: str) -> None:
         key = f"{symbol}:{timeframe}"
-        rows = await self._exchange.watch_ohlcv(symbol, timeframe)
+        watch_ohlcv = getattr(self._exchange, "watch_ohlcv", None)
+        fetch_ohlcv = getattr(self._exchange, "fetch_ohlcv", None)
+        if callable(watch_ohlcv):
+            rows = await watch_ohlcv(symbol, timeframe)
+        elif callable(fetch_ohlcv):
+            rows = await fetch_ohlcv(symbol, timeframe)
+        else:
+            raise RuntimeError("Exchange does not support OHLCV data")
+
         for row in rows:
             bar = Bar(
                 timestamp=int(row[0]),

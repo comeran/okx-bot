@@ -9,7 +9,7 @@ class OrderHandler(ABC):
         """Submit an order."""
 
     @abstractmethod
-    async def cancel(self, order_id: str) -> bool:
+    async def cancel(self, order_id: str, symbol: str | None = None) -> bool:
         """Cancel an order by ID."""
 
 
@@ -39,5 +39,5 @@ class OrderRouter:
     async def submit(self, order: Order) -> Order:
         return await self._get_handler().submit(order)
 
-    async def cancel(self, order_id: str) -> bool:
-        return await self._get_handler().cancel(order_id)
+    async def cancel(self, order_id: str, symbol: str | None = None) -> bool:
+        return await self._get_handler().cancel(order_id, symbol)

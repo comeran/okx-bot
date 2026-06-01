@@ -16,8 +16,8 @@ class MockHandler(OrderHandler):
         order.fill_price = 50000
         return order
 
-    async def cancel(self, order_id: str) -> bool:
-        self.cancelled.append(order_id)
+    async def cancel(self, order_id: str, symbol: str | None = None) -> bool:
+        self.cancelled.append((order_id, symbol))
         return True
 
 
@@ -103,3 +103,14 @@ async def test_order_manager_generates_unique_order_ids_for_repeated_submits():
     )
 
     assert order1.id != order2.id
+
+
+@pytest.mark.asyncio
+async def test_order_manager_cancel_forwards_symbol():
+    handler = MockHandler()
+    router = OrderRouter(backtest=handler, mode="backtest")
+    manager = UnifiedOrderManager(router=router)
+
+    assert await manager.cancel("exchange-order-1", symbol="BTC-USDT") is True
+
+    assert handler.cancelled == [("exchange-order-1", "BTC-USDT")]

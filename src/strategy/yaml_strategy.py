@@ -68,14 +68,18 @@ class YAMLStrategy(BaseStrategy):
             }
         )
 
+        order = None
         buy_conditions = self.conditions.get("buy", [])
         if buy_conditions and all(
             parse_condition(expr, self._indicator_values) for expr in buy_conditions
         ):
-            await self.buy(self.symbol, 0.1)
+            order = await self.buy(self.symbol, 0.1)
 
         sell_conditions = self.conditions.get("sell", [])
         if sell_conditions and all(
             parse_condition(expr, self._indicator_values) for expr in sell_conditions
         ):
-            await self.sell(self.symbol, 0.1)
+            sell_order = await self.sell(self.symbol, 0.1)
+            order = order or sell_order
+
+        return order
