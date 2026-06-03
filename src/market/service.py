@@ -5,6 +5,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable
 
 import ccxt.async_support as ccxt
+from ccxt.base.errors import NotSupported
 
 from src.core.types import Bar
 
@@ -32,7 +33,12 @@ class MarketDataService:
         watch_ohlcv = getattr(self._exchange, "watch_ohlcv", None)
         fetch_ohlcv = getattr(self._exchange, "fetch_ohlcv", None)
         if callable(watch_ohlcv):
-            rows = await watch_ohlcv(symbol, timeframe)
+            try:
+                rows = await watch_ohlcv(symbol, timeframe)
+            except NotSupported:
+                if not callable(fetch_ohlcv):
+                    raise RuntimeError("Exchange does not support OHLCV data") from None
+                rows = await fetch_ohlcv(symbol, timeframe)
         elif callable(fetch_ohlcv):
             rows = await fetch_ohlcv(symbol, timeframe)
         else:

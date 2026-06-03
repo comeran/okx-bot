@@ -1,10 +1,16 @@
+import subprocess
+import sys
+
 import pytest
+import yaml
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from httpx import ASGITransport, AsyncClient
 
+from src.core.types import Bar
 from src.strategy.base import BaseStrategy
 from src.strategy.registry import StrategyRegistry
+from src.web.api import market as market_api
 from src.web.api import strategies as strategy_api
 from src.web.app import app as exported_app
 from src.web.app import create_app
@@ -201,6 +207,220 @@ def test_websocket_accepts_connection_and_sends_snapshot(app):
 
 
 @pytest.mark.asyncio
+async def test_get_and_update_settings(app):
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        initial_resp = await client.get("/api/settings")
+        update_resp = await client.put(
+            "/api/settings",
+            json={
+                "mode": "paper",
+                "exchange": {
+                    "api_key": "okx-api-key",
+                    "secret": "okx-secret-value",
+                    "passphrase": "okx-passphrase",
+                },
+                "backtest": {
+                    "initial_capital": 250000,
+                    "fee_rate": 0.0007,
+                    "slippage": 0.0015,
+                    "data_cache_dir": "./data/backtests",
+                },
+                "risk": {
+                    "max_daily_loss_pct": 0.03,
+                    "max_drawdown_pct": 0.12,
+                    "max_total_position_pct": 0.65,
+                },
+                "notify": {
+                    "telegram_bot_token": "telegram-token",
+                    "telegram_chat_id": "123456",
+                },
+            },
+        )
+        saved_resp = await client.get("/api/settings")
+
+    assert initial_resp.status_code == 200
+    assert initial_resp.json()["mode"] == "backtest"
+    assert update_resp.status_code == 200
+    saved = saved_resp.json()
+    assert saved["mode"] == "paper"
+    assert saved["exchange"] == {
+        "api_key": "ok*******ey",
+        "api_key_set": True,
+        "secret": "ok************ue",
+        "secret_set": True,
+        "passphrase": "ok**********se",
+        "passphrase_set": True,
+    }
+    assert saved["backtest"]["initial_capital"] == 250000
+    assert saved["risk"]["max_daily_loss_pct"] == 0.03
+    assert saved["notify"] == {
+        "telegram_bot_token": "te**********en",
+        "telegram_bot_token_set": True,
+        "telegram_chat_id": "123456",
+    }
+
+
+def test_settings_module_import_does_not_load_settings_file(tmp_path):
+    settings_path = tmp_path / "settings.local.yaml"
+    settings_path.write_text("mode: [not-a-string]\n", encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, "-c", "import src.web.api.settings; print('imported')"],
+        check=False,
+        capture_output=True,
+        env={"OKX_BOT_SETTINGS_PATH": str(settings_path)},
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "imported"
+
+
+@pytest.mark.asyncio
+async def test_settings_defaults_load_project_config_environment(monkeypatch):
+    monkeypatch.setenv("OKX_API_KEY", "env-api-key")
+    monkeypatch.setenv("OKX_SECRET", "env-secret-value")
+    monkeypatch.setenv("OKX_PASSPHRASE", "env-passphrase")
+    monkeypatch.setenv("TG_BOT_TOKEN", "env-telegram-token")
+    monkeypatch.setenv("TG_CHAT_ID", "987654")
+
+    transport = ASGITransport(app=create_app())
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/settings")
+
+    assert resp.status_code == 200
+    settings = resp.json()
+    assert settings["exchange"] == {
+        "api_key": "en*******ey",
+        "api_key_set": True,
+        "secret": "en************ue",
+        "secret_set": True,
+        "passphrase": "en**********se",
+        "passphrase_set": True,
+    }
+    assert settings["notify"] == {
+        "telegram_bot_token": "en**************en",
+        "telegram_bot_token_set": True,
+        "telegram_chat_id": "987654",
+    }
+
+
+@pytest.mark.asyncio
+async def test_settings_round_trip_keeps_existing_secrets(tmp_path, monkeypatch):
+    settings_path = tmp_path / "settings.local.yaml"
+    monkeypatch.setenv("OKX_BOT_SETTINGS_PATH", str(settings_path))
+    transport = ASGITransport(app=create_app())
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await client.put(
+            "/api/settings",
+            json={
+                "mode": "paper",
+                "exchange": {
+                    "api_key": "real-api-key",
+                    "secret": "real-secret-value",
+                    "passphrase": "real-passphrase",
+                },
+                "backtest": {
+                    "initial_capital": 250000,
+                    "fee_rate": 0.0007,
+                    "slippage": 0.0015,
+                    "data_cache_dir": "./data/backtests",
+                },
+                "risk": {
+                    "max_daily_loss_pct": 0.03,
+                    "max_drawdown_pct": 0.12,
+                    "max_total_position_pct": 0.65,
+                },
+                "notify": {
+                    "telegram_bot_token": "real-telegram-token",
+                    "telegram_chat_id": "123456",
+                },
+            },
+        )
+        settings = (await client.get("/api/settings")).json()
+        settings["web"]["port"] = 9001
+        await client.put("/api/settings", json=settings)
+        saved = (await client.get("/api/settings")).json()
+
+    persisted = yaml.safe_load(settings_path.read_text(encoding="utf-8"))
+    assert persisted["exchange"] == {
+        "api_key": "real-api-key",
+        "secret": "real-secret-value",
+        "passphrase": "real-passphrase",
+    }
+    assert persisted["notify"] == {
+        "telegram_bot_token": "real-telegram-token",
+        "telegram_chat_id": "123456",
+    }
+    assert saved["web"]["port"] == 9001
+
+
+@pytest.mark.asyncio
+async def test_settings_persist_across_app_instances(tmp_path, monkeypatch):
+    monkeypatch.setenv("OKX_BOT_SETTINGS_PATH", str(tmp_path / "settings.local.yaml"))
+
+    first_app = create_app()
+    first_transport = ASGITransport(app=first_app)
+    async with AsyncClient(transport=first_transport, base_url="http://first") as client:
+        await client.put(
+            "/api/settings",
+            json={
+                "mode": "live",
+                "exchange": {
+                    "api_key": "persisted-api-key",
+                    "secret": "persisted-secret",
+                    "passphrase": "persisted-passphrase",
+                },
+                "backtest": {
+                    "initial_capital": 300000,
+                    "fee_rate": 0.0008,
+                    "slippage": 0.0012,
+                    "data_cache_dir": "./data/persisted",
+                },
+                "risk": {
+                    "max_daily_loss_pct": 0.02,
+                    "max_drawdown_pct": 0.1,
+                    "max_total_position_pct": 0.5,
+                },
+                "notify": {
+                    "telegram_bot_token": "persisted-token",
+                    "telegram_chat_id": "654321",
+                },
+                "web": {
+                    "host": "127.0.0.1",
+                    "port": 9000,
+                },
+            },
+        )
+
+    second_app = create_app()
+    second_transport = ASGITransport(app=second_app)
+    async with AsyncClient(transport=second_transport, base_url="http://second") as client:
+        resp = await client.get("/api/settings")
+
+    assert resp.status_code == 200
+    saved = resp.json()
+    assert saved["mode"] == "live"
+    assert saved["exchange"] == {
+        "api_key": "pe*************ey",
+        "api_key_set": True,
+        "secret": "pe************et",
+        "secret_set": True,
+        "passphrase": "pe****************se",
+        "passphrase_set": True,
+    }
+    assert saved["backtest"]["initial_capital"] == 300000
+    assert saved["risk"]["max_total_position_pct"] == 0.5
+    assert saved["notify"] == {
+        "telegram_bot_token": "pe***********en",
+        "telegram_bot_token_set": True,
+        "telegram_chat_id": "654321",
+    }
+    assert saved["web"] == {"host": "127.0.0.1", "port": 9000}
+
+
+@pytest.mark.asyncio
 async def test_get_trading_state(app):
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -218,7 +438,149 @@ async def test_get_trading_state(app):
 
 
 @pytest.mark.asyncio
-async def test_get_market_data(app):
+async def test_market_klines_returns_rows_from_real_public_adapter(monkeypatch, app):
+    events = []
+
+    class FakeOKXSpotAdapter:
+        def __init__(self, api_key: str, secret: str, passphrase: str) -> None:
+            events.append(("init", api_key, secret, passphrase))
+
+        async def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100):
+            events.append(("fetch_ohlcv", symbol, timeframe, limit))
+            return [
+                Bar(timestamp=1700000000000, open=1.1, high=1.3, low=1.0, close=1.2, volume=10.5),
+                Bar(timestamp=1700000060000, open=1.2, high=1.4, low=1.1, close=1.3, volume=11.5),
+            ]
+
+        async def close(self) -> None:
+            events.append(("close",))
+
+    monkeypatch.setattr(market_api, "OKXSpotAdapter", FakeOKXSpotAdapter, raising=False)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/market/klines?symbol=ETH-USDT&timeframe=1m&limit=2")
+
+    assert resp.status_code == 200
+    assert resp.json() == [
+        {
+            "symbol": "ETH-USDT",
+            "timeframe": "1m",
+            "timestamp": 1700000000000,
+            "open": 1.1,
+            "high": 1.3,
+            "low": 1.0,
+            "close": 1.2,
+            "volume": 10.5,
+        },
+        {
+            "symbol": "ETH-USDT",
+            "timeframe": "1m",
+            "timestamp": 1700000060000,
+            "open": 1.2,
+            "high": 1.4,
+            "low": 1.1,
+            "close": 1.3,
+            "volume": 11.5,
+        },
+    ]
+    assert events == [
+        ("init", "", "", ""),
+        ("fetch_ohlcv", "ETH-USDT", "1m", 2),
+        ("close",),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_market_tickers_returns_rows_from_real_public_adapter(monkeypatch, app):
+    events = []
+
+    class FakeOKXSpotAdapter:
+        def __init__(self, api_key: str, secret: str, passphrase: str) -> None:
+            events.append(("init", api_key, secret, passphrase))
+
+        async def fetch_tickers(self, symbols: list[str]):
+            events.append(("fetch_tickers", symbols))
+            return [
+                {
+                    "symbol": "BTC-USDT",
+                    "last": 68000.0,
+                    "bidPx": 67999.5,
+                    "askPx": 68000.5,
+                    "vol24h": 123.45,
+                },
+                {
+                    "symbol": "ETH-USDT",
+                    "last": 3800.0,
+                    "bidPx": 3799.5,
+                    "askPx": 3800.5,
+                    "vol24h": 456.78,
+                },
+            ]
+
+        async def close(self) -> None:
+            events.append(("close",))
+
+    monkeypatch.setattr(market_api, "OKXSpotAdapter", FakeOKXSpotAdapter, raising=False)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/market/tickers")
+
+    assert resp.status_code == 200
+    assert resp.json() == [
+        {
+            "symbol": "BTC-USDT",
+            "last": 68000.0,
+            "bidPx": 67999.5,
+            "askPx": 68000.5,
+            "vol24h": 123.45,
+        },
+        {
+            "symbol": "ETH-USDT",
+            "last": 3800.0,
+            "bidPx": 3799.5,
+            "askPx": 3800.5,
+            "vol24h": 456.78,
+        },
+    ]
+    assert events == [
+        ("init", "", "", ""),
+        ("fetch_tickers", ["BTC-USDT", "ETH-USDT", "OKB-USDT", "SOL-USDT"]),
+        ("close",),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_get_market_data(monkeypatch, app):
+    class FakeOKXSpotAdapter:
+        def __init__(self, api_key: str, secret: str, passphrase: str) -> None:
+            pass
+
+        async def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100):
+            return [
+                Bar(
+                    timestamp=1700000000000 + index * 3_600_000,
+                    open=1,
+                    high=2,
+                    low=0.5,
+                    close=1.5,
+                    volume=10,
+                )
+                for index in range(limit)
+            ]
+
+        async def fetch_tickers(self, symbols: list[str]):
+            return [
+                {"symbol": symbol, "last": 1.0, "bidPx": 0.9, "askPx": 1.1, "vol24h": 10.0}
+                for symbol in symbols
+            ]
+
+        async def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(market_api, "OKXSpotAdapter", FakeOKXSpotAdapter)
+
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         klines_resp = await client.get("/api/market/klines?symbol=BTC-USDT&timeframe=1h&limit=100")

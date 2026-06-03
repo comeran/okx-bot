@@ -1,10 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue';
 import { ElMessage } from 'element-plus';
+import { useI18n } from 'vue-i18n';
 
 import Candlestick from '@/components/charts/Candlestick.vue';
 import { fetchKlines, fetchTickers } from '@/services/market';
 import type { Kline, MarketTicker } from '@/types/market';
+
+const { t } = useI18n();
 
 const timeframeOptions = ['1m', '5m', '15m', '1h', '4h', '1d'];
 const limitOptions = [50, 100, 200, 500];
@@ -41,7 +44,7 @@ const loadTickers = async () => {
     tickers.value = await fetchTickers();
   } catch {
     tickers.value = [];
-    ElMessage.warning('Unable to load symbols. You can still use the default markets.');
+    ElMessage.warning(t('market.unableToLoadSymbols'));
   } finally {
     tickersLoading.value = false;
   }
@@ -68,7 +71,7 @@ const loadKlines = async () => {
     }
 
     klines.value = [];
-    errorMessage.value = 'Failed to load market data. Please try again.';
+    errorMessage.value = t('market.loadDataError');
     ElMessage.error(errorMessage.value);
   } finally {
     if (requestId === klineRequestId) {
@@ -91,21 +94,21 @@ onMounted(() => {
   <section class="market-view">
     <div class="market-header">
       <div>
-        <h2>Market</h2>
-        <p>Review historical candles by symbol and timeframe.</p>
+        <h2>{{ t('market.title') }}</h2>
+        <p>{{ t('market.description') }}</p>
       </div>
     </div>
 
     <el-card shadow="hover" class="controls-card">
       <el-form :model="form" inline label-position="top" @submit.prevent="handleSubmit">
-        <el-form-item label="Symbol">
+        <el-form-item :label="t('common.symbol')">
           <el-select
             v-model="form.symbol"
             filterable
             allow-create
             default-first-option
             :loading="tickersLoading"
-            placeholder="Select symbol"
+            :placeholder="t('market.selectSymbol')"
             class="control-width"
           >
             <el-option
@@ -117,7 +120,7 @@ onMounted(() => {
           </el-select>
         </el-form-item>
 
-        <el-form-item label="Timeframe">
+        <el-form-item :label="t('common.timeframe')">
           <el-select v-model="form.timeframe" class="control-width">
             <el-option
               v-for="timeframe in timeframeOptions"
@@ -128,7 +131,7 @@ onMounted(() => {
           </el-select>
         </el-form-item>
 
-        <el-form-item label="Limit">
+        <el-form-item :label="t('common.limit')">
           <el-select v-model="form.limit" class="control-width">
             <el-option
               v-for="limit in limitOptions"
@@ -141,7 +144,7 @@ onMounted(() => {
 
         <el-form-item label=" ">
           <el-button type="primary" :loading="loading" native-type="submit">
-            Load chart
+            {{ t('market.loadChart') }}
           </el-button>
         </el-form-item>
       </el-form>
@@ -158,10 +161,10 @@ onMounted(() => {
 
         <el-empty
           v-else
-          :description="errorMessage || 'No kline data available for the selected market.'"
+          :description="errorMessage || t('market.noKlineData')"
         >
           <el-button type="primary" :loading="loading" @click="loadKlines">
-            Refresh
+            {{ t('common.refresh') }}
           </el-button>
         </el-empty>
       </div>

@@ -4,6 +4,7 @@ import type {
   AccountSummary,
   DashboardSnapshot,
   DashboardWebSocketMessage,
+  MarketTicker,
   Order,
   Position,
   StrategySummary,
@@ -16,6 +17,7 @@ interface DashboardState {
   positions: Position[];
   orders: Order[];
   strategies: StrategySummary[];
+  tickers: MarketTicker[];
   websocketConnected: boolean;
   websocketMessages: DashboardWebSocketMessage[];
   loading: boolean;
@@ -56,6 +58,14 @@ function isStrategyArray(value: unknown): value is StrategySummary[] {
   return Array.isArray(value) && value.every(isStrategySummary);
 }
 
+function isMarketTicker(value: unknown): value is MarketTicker {
+  return isRecord(value) && typeof value.symbol === 'string';
+}
+
+function isMarketTickerArray(value: unknown): value is MarketTicker[] {
+  return Array.isArray(value) && value.every(isMarketTicker);
+}
+
 function payloadFor(message: DashboardWebSocketMessage, key: string): unknown {
   const record = message as Record<string, unknown>;
   return record[key] ?? record.data;
@@ -67,6 +77,7 @@ export const useDashboardStore = defineStore('dashboard', {
     positions: [],
     orders: [],
     strategies: [],
+    tickers: [],
     websocketConnected: false,
     websocketMessages: [],
     loading: false,
@@ -92,6 +103,13 @@ export const useDashboardStore = defineStore('dashboard', {
         this.positions = positions;
         this.orders = orders;
         this.strategies = strategies;
+
+        try {
+          const tickers = await fetchJson<MarketTicker[]>('/api/market/tickers');
+          this.tickers = isMarketTickerArray(tickers) ? tickers : [];
+        } catch {
+          this.tickers = [];
+        }
       } catch (error) {
         this.error = error instanceof Error ? error.message : 'Failed to load dashboard data';
       } finally {

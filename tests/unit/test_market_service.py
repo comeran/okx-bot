@@ -2,6 +2,7 @@ from collections import deque
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from ccxt.base.errors import NotSupported
 
 from src.core.types import Bar
 from src.market.service import MarketDataService
@@ -44,6 +45,38 @@ async def test_poll_once_falls_back_to_fetch_ohlcv_when_watch_is_unavailable():
 
     with patch("src.market.service.ccxt") as ccxt:
         exchange = FetchOnlyExchange()
+        ccxt.okx.return_value = exchange
+        callback = AsyncMock()
+
+        service = MarketDataService("api-key", "secret", "passphrase")
+        service.subscribe("BTC-USDT-SWAP", "1m", callback)
+
+        await service._poll_once("BTC-USDT-SWAP", "1m")
+
+        assert exchange.fetch_ohlcv_called is True
+        assert len(service.get_recent_bars("BTC-USDT-SWAP", "1m")) == 1
+        callback.assert_awaited_once()
+
+
+async def test_poll_once_falls_back_to_fetch_ohlcv_when_watch_is_not_supported():
+    class WatchUnsupportedExchange:
+        def __init__(self) -> None:
+            self.fetch_ohlcv_called = False
+
+        async def watch_ohlcv(self, symbol: str, timeframe: str):
+            raise NotSupported("okx watchOHLCV() is not supported yet")
+
+        async def fetch_ohlcv(self, symbol: str, timeframe: str):
+            self.fetch_ohlcv_called = True
+            assert symbol == "BTC-USDT-SWAP"
+            assert timeframe == "1m"
+            return [[1700000000000, 50000, 51000, 49000, 50500, 100.5]]
+
+        async def close(self) -> None:
+            pass
+
+    with patch("src.market.service.ccxt") as ccxt:
+        exchange = WatchUnsupportedExchange()
         ccxt.okx.return_value = exchange
         callback = AsyncMock()
 

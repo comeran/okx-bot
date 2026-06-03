@@ -1,19 +1,48 @@
+<script setup lang="ts">
+import { computed } from 'vue';
+import { useI18n } from 'vue-i18n';
+
+import { locales, saveLocale, type Locale } from './i18n';
+
+const { locale, t } = useI18n({ useScope: 'global' });
+
+const selectedLocale = computed({
+  get: () => locale.value as Locale,
+  set: (value: Locale) => {
+    locale.value = value;
+    saveLocale(value);
+  },
+});
+</script>
+
 <template>
   <el-container class="app-shell">
     <el-aside width="220px" class="sidebar">
       <div class="brand">OKX Quant Bot</div>
       <el-menu router :default-active="$route.path" class="sidebar-menu">
-        <el-menu-item index="/">Dashboard</el-menu-item>
-        <el-menu-item index="/strategies">Strategies</el-menu-item>
-        <el-menu-item index="/backtest">Backtest</el-menu-item>
-        <el-menu-item index="/market">Market</el-menu-item>
-        <el-menu-item index="/trades">Trades</el-menu-item>
+        <el-menu-item index="/">{{ t('nav.dashboard') }}</el-menu-item>
+        <el-menu-item index="/strategies">{{ t('nav.strategies') }}</el-menu-item>
+        <el-menu-item index="/backtest">{{ t('nav.backtest') }}</el-menu-item>
+        <el-menu-item index="/market">{{ t('nav.market') }}</el-menu-item>
+        <el-menu-item index="/trades">{{ t('nav.trades') }}</el-menu-item>
+        <el-menu-item index="/settings">{{ t('nav.settings') }}</el-menu-item>
       </el-menu>
     </el-aside>
 
     <el-container>
       <el-header class="header">
-        <h1>Quant Trading Console</h1>
+        <h1>{{ t('app.title') }}</h1>
+        <div class="language-switcher">
+          <span>{{ t('app.language') }}</span>
+          <el-select v-model="selectedLocale" class="language-switcher__select" size="small">
+            <el-option
+              v-for="availableLocale in locales"
+              :key="availableLocale"
+              :label="availableLocale === 'zh-CN' ? '简体中文' : 'English'"
+              :value="availableLocale"
+            />
+          </el-select>
+        </div>
       </el-header>
       <el-main class="content">
         <router-view />
@@ -50,6 +79,7 @@
 .header {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   background: #ffffff;
   border-bottom: 1px solid #e4e7ed;
 }
@@ -58,6 +88,18 @@
   margin: 0;
   font-size: 20px;
   color: #303133;
+}
+
+.language-switcher {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #606266;
+  font-size: 14px;
+}
+
+.language-switcher__select {
+  width: 120px;
 }
 
 .content {

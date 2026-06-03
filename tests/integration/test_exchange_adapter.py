@@ -52,6 +52,78 @@ async def test_fetch_ohlcv_maps_rows_to_bars():
 
 
 @pytest.mark.asyncio
+async def test_fetch_tickers_maps_public_ticker_fields():
+    with patch("src.exchange.base.ccxt") as ccxt:
+        exchange = AsyncMock()
+        exchange.fetch_tickers.return_value = {
+            "BTC-USDT": {
+                "symbol": "BTC-USDT",
+                "last": 68000,
+                "bid": 67999.5,
+                "ask": 68000.5,
+                "baseVolume": 123.45,
+            },
+            "ETH-USDT": {
+                "symbol": "ETH-USDT",
+                "last": 3800,
+                "bid": 3799.5,
+                "ask": 3800.5,
+                "baseVolume": 456.78,
+            },
+        }
+        ccxt.okx.return_value = exchange
+        adapter = OKXSpotAdapter("api-key", "secret", "passphrase")
+
+    tickers = await adapter.fetch_tickers(["BTC-USDT", "ETH-USDT"])
+
+    exchange.fetch_tickers.assert_awaited_once_with(["BTC-USDT", "ETH-USDT"])
+    assert tickers == [
+        {
+            "symbol": "BTC-USDT",
+            "last": 68000.0,
+            "bidPx": 67999.5,
+            "askPx": 68000.5,
+            "vol24h": 123.45,
+        },
+        {
+            "symbol": "ETH-USDT",
+            "last": 3800.0,
+            "bidPx": 3799.5,
+            "askPx": 3800.5,
+            "vol24h": 456.78,
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_fetch_tickers_preserves_requested_okx_symbols_when_ccxt_normalizes_keys():
+    with patch("src.exchange.base.ccxt") as ccxt:
+        exchange = AsyncMock()
+        exchange.fetch_tickers.return_value = {
+            "BTC/USDT": {
+                "symbol": "BTC/USDT",
+                "last": 68000,
+                "bid": 67999.5,
+                "ask": 68000.5,
+                "baseVolume": 123.45,
+            },
+            "ETH/USDT": {
+                "symbol": "ETH/USDT",
+                "last": 3800,
+                "bid": 3799.5,
+                "ask": 3800.5,
+                "baseVolume": 456.78,
+            },
+        }
+        ccxt.okx.return_value = exchange
+        adapter = OKXSpotAdapter("api-key", "secret", "passphrase")
+
+    tickers = await adapter.fetch_tickers(["BTC-USDT", "ETH-USDT"])
+
+    assert [ticker["symbol"] for ticker in tickers] == ["BTC-USDT", "ETH-USDT"]
+
+
+@pytest.mark.asyncio
 async def test_submit_creates_order_and_maps_exchange_response():
     with patch("src.exchange.base.ccxt") as ccxt:
         exchange = AsyncMock()

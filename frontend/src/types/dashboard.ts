@@ -48,6 +48,14 @@ export interface StrategySummary {
   status: string;
 }
 
+export interface MarketTicker {
+  symbol: string;
+  last?: number | string;
+  bidPx?: number | string;
+  askPx?: number | string;
+  vol24h?: number | string;
+}
+
 export interface DashboardSnapshot {
   account?: AccountSummary | null;
   positions?: Position[];

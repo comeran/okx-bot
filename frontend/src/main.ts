@@ -4,10 +4,15 @@ import ElementPlus from 'element-plus';
 import 'element-plus/dist/index.css';
 
 import App from './App.vue';
+import { createI18nInstance } from './i18n';
 import router from './router';
+
+const i18n = createI18nInstance();
+document.documentElement.lang = i18n.global.locale.value;
 
 createApp(App)
   .use(createPinia())
   .use(router)
   .use(ElementPlus)
+  .use(i18n)
   .mount('#app');

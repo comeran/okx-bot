@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
-from src.web.api import backtest, market, strategies, trading
+from src.web.api import backtest, market, settings, strategies, trading
 from src.web.ws import WebSocketManager
 
 ws_manager = WebSocketManager()
@@ -37,6 +37,7 @@ def create_app() -> FastAPI:
     app.include_router(backtest.router, prefix="/api/backtest", tags=["backtest"])
     app.include_router(trading.router, prefix="/api/trading", tags=["trading"])
     app.include_router(market.router, prefix="/api/market", tags=["market"])
+    app.include_router(settings.create_router(), prefix="/api/settings", tags=["settings"])
     return app
 
 

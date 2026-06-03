@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { computed, onMounted, watch } from 'vue';
+import { useI18n } from 'vue-i18n';
 
 import { useWebSocket } from '@/composables/useWebSocket';
 import { useDashboardStore } from '@/stores/dashboard';
 import type { DashboardFieldValue, Order, Position } from '@/types/dashboard';
 
+const { t } = useI18n();
 const dashboard = useDashboardStore();
 const websocket = useWebSocket('/ws', {
   onMessage: dashboard.addWebSocketMessage,
@@ -20,6 +22,19 @@ const formatCurrency = (value?: number) => {
     currency: 'USD',
     maximumFractionDigits: 2,
   }).format(value);
+};
+
+const formatTickerPrice = (value?: number | string) => {
+  if (value === undefined || value === '') {
+    return '--';
+  }
+
+  const numberValue = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(numberValue)) {
+    return '--';
+  }
+
+  return numberValue.toLocaleString('en-US', { maximumFractionDigits: 4 });
 };
 
 const formatRecord = (record: Position | Order) => {
@@ -47,9 +62,9 @@ onMounted(() => {
 <template>
   <section>
     <div class="dashboard-header">
-      <h2>Dashboard</h2>
+      <h2>{{ t('dashboard.title') }}</h2>
       <el-tag :type="dashboard.websocketConnected ? 'success' : 'danger'">
-        WebSocket {{ dashboard.websocketConnected ? 'Connected' : 'Disconnected' }}
+        WebSocket {{ dashboard.websocketConnected ? t('common.connected') : t('common.disconnected') }}
       </el-tag>
     </div>
 
@@ -64,31 +79,55 @@ onMounted(() => {
     <el-row :gutter="16">
       <el-col :xs="24" :md="8">
         <el-card shadow="hover" v-loading="dashboard.loading">
-          <template #header>Total Equity</template>
+          <template #header>{{ t('dashboard.totalEquity') }}</template>
           <div class="metric">{{ formatCurrency(dashboard.account?.equity) }}</div>
         </el-card>
       </el-col>
       <el-col :xs="24" :md="8">
         <el-card shadow="hover" v-loading="dashboard.loading">
-          <template #header>Daily PnL</template>
+          <template #header>{{ t('dashboard.dailyPnl') }}</template>
           <div class="metric">{{ formatCurrency(dashboard.account?.daily_pnl) }}</div>
         </el-card>
       </el-col>
       <el-col :xs="24" :md="8">
         <el-card shadow="hover" v-loading="dashboard.loading">
-          <template #header>Active Strategies</template>
+          <template #header>{{ t('dashboard.activeStrategies') }}</template>
           <div class="metric">{{ dashboard.activeStrategyCount }}</div>
         </el-card>
       </el-col>
     </el-row>
 
     <el-row :gutter="16" class="dashboard-section">
+      <el-col :span="24">
+        <el-card shadow="never">
+          <template #header>{{ t('dashboard.marketTickers') }}</template>
+          <el-empty v-if="dashboard.tickers.length === 0" :description="t('dashboard.noMarketTickers')" />
+          <el-table v-else :data="dashboard.tickers" size="small">
+            <el-table-column prop="symbol" :label="t('common.symbol')" />
+            <el-table-column :label="t('dashboard.last')">
+              <template #default="{ row }">{{ formatTickerPrice(row.last) }}</template>
+            </el-table-column>
+            <el-table-column :label="t('dashboard.bid')">
+              <template #default="{ row }">{{ formatTickerPrice(row.bidPx) }}</template>
+            </el-table-column>
+            <el-table-column :label="t('dashboard.ask')">
+              <template #default="{ row }">{{ formatTickerPrice(row.askPx) }}</template>
+            </el-table-column>
+            <el-table-column :label="t('dashboard.volume24h')">
+              <template #default="{ row }">{{ formatTickerPrice(row.vol24h) }}</template>
+            </el-table-column>
+          </el-table>
+        </el-card>
+      </el-col>
+    </el-row>
+
+    <el-row :gutter="16" class="dashboard-section">
       <el-col :xs="24" :lg="12">
         <el-card shadow="never">
-          <template #header>Positions</template>
-          <el-empty v-if="dashboard.positions.length === 0" description="No positions" />
+          <template #header>{{ t('dashboard.positions') }}</template>
+          <el-empty v-if="dashboard.positions.length === 0" :description="t('dashboard.noPositions')" />
           <el-table v-else :data="dashboard.positions" size="small">
-            <el-table-column label="Position">
+            <el-table-column :label="t('dashboard.position')">
               <template #default="{ row }">{{ formatRecord(row) }}</template>
             </el-table-column>
           </el-table>
@@ -96,10 +135,10 @@ onMounted(() => {
       </el-col>
       <el-col :xs="24" :lg="12">
         <el-card shadow="never">
-          <template #header>Orders</template>
-          <el-empty v-if="dashboard.orders.length === 0" description="No orders" />
+          <template #header>{{ t('dashboard.orders') }}</template>
+          <el-empty v-if="dashboard.orders.length === 0" :description="t('dashboard.noOrders')" />
           <el-table v-else :data="dashboard.orders" size="small">
-            <el-table-column label="Order">
+            <el-table-column :label="t('dashboard.order')">
               <template #default="{ row }">{{ formatRecord(row) }}</template>
             </el-table-column>
           </el-table>
@@ -110,18 +149,18 @@ onMounted(() => {
     <el-row :gutter="16" class="dashboard-section">
       <el-col :xs="24" :lg="12">
         <el-card shadow="never">
-          <template #header>Strategies</template>
-          <el-empty v-if="dashboard.strategies.length === 0" description="No strategies" />
+          <template #header>{{ t('dashboard.strategies') }}</template>
+          <el-empty v-if="dashboard.strategies.length === 0" :description="t('dashboard.noStrategies')" />
           <el-table v-else :data="dashboard.strategies" size="small">
-            <el-table-column prop="name" label="Name" />
-            <el-table-column prop="status" label="Status" />
+            <el-table-column prop="name" :label="t('common.name')" />
+            <el-table-column prop="status" :label="t('common.status')" />
           </el-table>
         </el-card>
       </el-col>
       <el-col :xs="24" :lg="12">
         <el-card shadow="never">
-          <template #header>WebSocket Messages</template>
-          <el-empty v-if="latestMessages.length === 0" description="No messages" />
+          <template #header>{{ t('dashboard.websocketMessages') }}</template>
+          <el-empty v-if="latestMessages.length === 0" :description="t('dashboard.noMessages')" />
           <ul v-else class="message-list">
             <li v-for="(message, index) in latestMessages" :key="index">
               {{ message.type }}

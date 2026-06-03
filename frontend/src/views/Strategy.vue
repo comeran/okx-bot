@@ -1,11 +1,14 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue';
 import { ElMessage } from 'element-plus';
+import { useI18n } from 'vue-i18n';
 
 import CodeEditor from '@/components/editor/CodeEditor.vue';
 import StrategyForm from '@/components/StrategyForm.vue';
 import { listStrategies, startStrategy, stopStrategy } from '@/services/strategies';
 import type { StrategySummary, StrategyYamlForm } from '@/types/strategy';
+
+const { t } = useI18n();
 
 const strategies = ref<StrategySummary[]>([]);
 const selectedName = ref('');
@@ -73,7 +76,7 @@ async function refreshStrategies(): Promise<void> {
       selectedName.value = '';
     }
   } catch {
-    ElMessage.error('Failed to load strategies');
+    ElMessage.error(t('strategies.loadError'));
   } finally {
     loading.value = false;
   }
@@ -84,15 +87,15 @@ async function runAction(strategy: StrategySummary, action: 'start' | 'stop'): P
   try {
     if (action === 'start') {
       await startStrategy(strategy.name);
-      ElMessage.success(`Started ${strategy.name}`);
+      ElMessage.success(t('strategies.started', { name: strategy.name }));
     } else {
       await stopStrategy(strategy.name);
-      ElMessage.success(`Stopped ${strategy.name}`);
+      ElMessage.success(t('strategies.stopped', { name: strategy.name }));
     }
 
     await refreshStrategies();
   } catch {
-    ElMessage.error(`Failed to ${action} ${strategy.name}`);
+    ElMessage.error(t('strategies.actionError', { action, name: strategy.name }));
   } finally {
     actionName.value = '';
   }
@@ -115,18 +118,18 @@ onMounted(() => {
   <section class="strategy-page">
     <div class="strategy-page__header">
       <div>
-        <h2>Strategies</h2>
-        <p>Manage strategy runtime status and draft YAML configuration.</p>
+        <h2>{{ t('strategies.title') }}</h2>
+        <p>{{ t('strategies.description') }}</p>
       </div>
-      <el-button :loading="loading" @click="refreshStrategies">Refresh</el-button>
+      <el-button :loading="loading" @click="refreshStrategies">{{ t('strategies.refresh') }}</el-button>
     </div>
 
     <el-row :gutter="16">
       <el-col :xs="24" :lg="9">
         <el-card shadow="never">
-          <template #header>Strategy List</template>
+          <template #header>{{ t('strategies.strategyList') }}</template>
 
-          <el-empty v-if="!loading && strategies.length === 0" description="No strategies found" />
+          <el-empty v-if="!loading && strategies.length === 0" :description="t('strategies.noStrategiesFound')" />
           <el-table
             v-else
             v-loading="loading"
@@ -134,13 +137,13 @@ onMounted(() => {
             highlight-current-row
             @row-click="selectStrategy"
           >
-            <el-table-column prop="name" label="Name" min-width="140" />
-            <el-table-column label="Status" width="110">
+            <el-table-column prop="name" :label="t('common.name')" min-width="140" />
+            <el-table-column :label="t('common.status')" width="110">
               <template #default="{ row }: { row: StrategySummary }">
                 <el-tag :type="statusType(row.status)" effect="plain">{{ row.status }}</el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="Actions" width="170" fixed="right">
+            <el-table-column :label="t('common.actions')" width="170" fixed="right">
               <template #default="{ row }: { row: StrategySummary }">
                 <el-button
                   size="small"
@@ -149,7 +152,7 @@ onMounted(() => {
                   :loading="actionName === row.name"
                   @click.stop="runAction(row, 'start')"
                 >
-                  Start
+                  {{ t('strategies.start') }}
                 </el-button>
                 <el-button
                   size="small"
@@ -157,7 +160,7 @@ onMounted(() => {
                   :loading="actionName === row.name"
                   @click.stop="runAction(row, 'stop')"
                 >
-                  Stop
+                  {{ t('strategies.stop') }}
                 </el-button>
               </template>
             </el-table-column>
@@ -168,11 +171,11 @@ onMounted(() => {
       <el-col :xs="24" :lg="15">
         <el-card shadow="never">
           <template #header>
-            <span>Strategy YAML Form</span>
+            <span>{{ t('strategies.yamlForm') }}</span>
           </template>
 
           <StrategyForm v-model="form" @regenerate="applyFormToEditor" />
-          <CodeEditor v-model="code" label="Strategy YAML" language="yaml" />
+          <CodeEditor v-model="code" :label="t('strategies.strategyYaml')" language="yaml" />
         </el-card>
       </el-col>
     </el-row>

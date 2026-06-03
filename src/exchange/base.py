@@ -14,6 +14,10 @@ class ExchangeAdapter(OrderHandler, ABC):
         pass
 
     @abstractmethod
+    async def fetch_tickers(self, symbols: list[str]) -> list[dict[str, float | str]]:
+        pass
+
+    @abstractmethod
     async def close(self) -> None:
         pass
 
@@ -42,6 +46,24 @@ class OKXBaseAdapter(ExchangeAdapter):
             )
             for row in rows
         ]
+
+    async def fetch_tickers(self, symbols: list[str]) -> list[dict[str, float | str]]:
+        rows = await self._exchange.fetch_tickers(symbols)
+        tickers = []
+        for symbol in symbols:
+            row = rows.get(symbol) or rows.get(symbol.replace("-", "/"))
+            if row is None:
+                continue
+            tickers.append(
+                {
+                    "symbol": symbol,
+                    "last": float(row.get("last") or 0),
+                    "bidPx": float(row.get("bid") or 0),
+                    "askPx": float(row.get("ask") or 0),
+                    "vol24h": float(row.get("baseVolume") or 0),
+                }
+            )
+        return tickers
 
     async def submit(self, order: Order) -> Order:
         if order.type.value == "stop":
