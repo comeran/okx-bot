@@ -1,0 +1,44 @@
+src/web/app.py
+  s_b929a4cbd32e4b::t_e25235927a6b46 59
+  s_b929a4cbd32e4b::t_1b2a11b96abd51 6
+  s_b929a4cbd32e4b::t_a0a6a004a3a0b4 28
+  s_b929a4cbd32e4b::t_43067e3ab04f36 51
+  s_b929a4cbd32e4b::t_02047e65a5aa85 13
+  s_b929a4cbd32e4b::t_5842016ec503cf 58,60-62
+  s_b929a4cbd32e4b::t_d3329b6e73e836 34
+  s_b929a4cbd32e4b::t_b122b9d1983c66 14-27,29-32
+tests/integration/test_web_api.py
+  s_b929a4cbd32e4b::t_3b3aa40435fb26 716-718,720,722-727
+  s_b929a4cbd32e4b::t_dadc5a60f36a13 14
+  s_b929a4cbd32e4b::t_578aa0b13a8aca 674-698,712-715,734,737,741-742
+  s_b929a4cbd32e4b::t_de7ccccabe5c57 699-711,728-733,735-736,738-740,743-750
+src/web/api/strategies.py
+  s_b929a4cbd32e4b::t_b8bcfa110b0a3d 4
+  s_b929a4cbd32e4b::t_27d1aaac9bd518 18
+  s_b929a4cbd32e4b::t_4558473daa2f5c 151
+  s_b929a4cbd32e4b::t_29645c4a6e8b4e 147
+  s_b929a4cbd32e4b::t_d90029efa90ea4 85-87,89-92,94-97,99-104,106
+  s_b929a4cbd32e4b::t_7a94ab332f11e2 140
+  s_b929a4cbd32e4b::t_3fb4a3fee537a3 88,93,98
+  s_b929a4cbd32e4b::t_305fa7723bba08 109,118,139,150
+  s_b929a4cbd32e4b::t_1026359c509dea 111-115,117,119-121
+  s_b929a4cbd32e4b::t_3dd62b7683774e 116
+  s_b929a4cbd32e4b::t_362e0fc936639d 125,131-132,138
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "aa5d0df3ac8616c2a48fc453a5cea22fb0c04a92",
+  "prompts": {},
+  "logical_commit_id": "aa5d0df3ac8616c2a48fc453a5cea22fb0c04a92",
+  "sessions": {
+    "s_b929a4cbd32e4b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d82de29f-2dfc-4f86-bf3e-7ec2ace1cf0f",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Zane <zane@bigo.sg>"
+    }
+  }
+}
