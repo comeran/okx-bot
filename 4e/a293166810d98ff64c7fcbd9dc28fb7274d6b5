@@ -1,0 +1,67 @@
+src/web/api/strategies.py
+  s_b929a4cbd32e4b::t_d3c9dcb07cd003 4,8,10,17,19,25-27,29-35,37,43-58,61-62,64,69-70
+docs/superpowers/plans/2026-06-04-paper-accounting-contract.md
+  s_b929a4cbd32e4b::t_e1d13b49500624 141-153
+frontend/src/types/dashboard.ts
+  s_b929a4cbd32e4b::t_13d6b18169cd34 4-7
+tests/integration/test_web_api.py
+  s_b929a4cbd32e4b::t_a77c2c4e22dde4 240-290
+  s_b929a4cbd32e4b::t_4c293e27446067 216
+  s_b929a4cbd32e4b::t_3f53fd128b1ab7 132-134,144-155,158-170
+  s_b929a4cbd32e4b::t_2e0f11c785c88b 715,728-730,734-764
+  s_b929a4cbd32e4b::t_f8a2ca7b1aa9f0 731-733
+  s_b929a4cbd32e4b::t_87a8832f87e2f2 10
+  s_b929a4cbd32e4b::t_b16075c9a76747 678-685,688-690,700-705,707
+  s_b929a4cbd32e4b::t_055ed59b3aa59f 220,230-232,235-236
+frontend/src/locales/en.ts
+  s_b929a4cbd32e4b::t_5d321f7f48798a 30-31,33
+frontend/src/views/Dashboard.vue
+  s_b929a4cbd32e4b::t_98e23f29eee9c8 112,118,120-131,134-139,142
+frontend/src/locales/zh-CN.ts
+  s_b929a4cbd32e4b::t_fd0f2172c15411 30-31,33
+src/data/repository.py
+  s_b929a4cbd32e4b::t_01f9c8c5593b0d 3,7-14,24,27-93,129-175,178-184,216-235
+src/order/manager.py
+  s_b929a4cbd32e4b::t_a9b0a79dc9129c 3-7,17-18,23-24,57-60,63-66,87,93-97
+frontend/src/stores/dashboard.test.ts
+  s_b929a4cbd32e4b::t_f7e7f51785b0c7 25-32,66-73
+  s_b929a4cbd32e4b::t_c48657fe2132fa 46-53
+tests/unit/test_order_router.py
+  s_b929a4cbd32e4b::t_1fbf9d869b8503 24-68,154,162,201-216,220,247-278,280-281
+src/web/api/trading.py
+  s_b929a4cbd32e4b::t_0f555824692f56 25-28,30
+  s_b929a4cbd32e4b::t_e4635349fcbe82 11-19,23-24,29,32-35,38-45,47-56,58-60,62-68,73-83,91,98,101,104,110-112
+src/order/accounting.py
+  s_b929a4cbd32e4b::t_3b23c3c20581d6 185-187,189-191,199-201,203-205
+  s_b929a4cbd32e4b::t_56dcc9670f8bad 1-127,133-184,188,192-198,202,206-239,246-257
+  s_b929a4cbd32e4b::t_cd5d1c9eef8598 128-132
+  s_b929a4cbd32e4b::t_53b4464fe82ae2 240-245
+docs/superpowers/plans/2026-06-03-okx-bot-next-steps.md
+  ai_agent 163-164
+tests/unit/test_repository.py
+  s_b929a4cbd32e4b::t_077af63017e1a8 4-11,105-250
+src/data/models.py
+  s_b929a4cbd32e4b::t_8d040413959ae0 4-28,63-65
+tests/unit/test_paper_accounting.py
+  s_b929a4cbd32e4b::t_07a1fb71d573da 142
+  s_b929a4cbd32e4b::t_8562f1760677c9 201-206
+  s_b929a4cbd32e4b::t_e7316d64794890 152,156
+  s_b929a4cbd32e4b::t_16189250eee302 1-141,143-151,153-155,157-200,207-224
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "4ea293166810d98ff64c7fcbd9dc28fb7274d6b5",
+  "prompts": {},
+  "logical_commit_id": "4ea293166810d98ff64c7fcbd9dc28fb7274d6b5",
+  "sessions": {
+    "s_b929a4cbd32e4b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d82de29f-2dfc-4f86-bf3e-7ec2ace1cf0f",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Zane <zane@bigo.sg>"
+    }
+  }
+}
