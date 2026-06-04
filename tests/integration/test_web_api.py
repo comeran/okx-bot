@@ -309,7 +309,7 @@ async def test_run_backtest_uses_cached_bars_and_persists_summary(monkeypatch):
             KlineCache(
                 symbol="BTC-USDT",
                 timeframe="1h",
-                timestamp=1700000000000,
+                timestamp=1700002800000,
                 open=100.0,
                 high=101.0,
                 low=99.0,
@@ -319,7 +319,7 @@ async def test_run_backtest_uses_cached_bars_and_persists_summary(monkeypatch):
             KlineCache(
                 symbol="BTC-USDT",
                 timeframe="1h",
-                timestamp=1700003600000,
+                timestamp=1700006400000,
                 open=110.0,
                 high=111.0,
                 low=109.0,
@@ -372,8 +372,8 @@ async def test_run_backtest_uses_cached_bars_and_persists_summary(monkeypatch):
                 "strategy": "buy_once",
                 "symbol": "BTC-USDT",
                 "timeframe": "1h",
-                "start_time": 1700000000000,
-                "end_time": 1700003600000,
+                "start_time": 1700002800000,
+                "end_time": 1700006400000,
                 "initial_capital": 100000,
             },
         )
@@ -394,6 +394,174 @@ async def test_run_backtest_uses_cached_bars_and_persists_summary(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_run_backtest_fetches_missing_historical_bars_before_running(monkeypatch):
+    class FakeRepository:
+        results = []
+        klines = []
+
+        def get_klines(self, symbol, timeframe, start, end):
+            return [
+                kline
+                for kline in self.klines
+                if kline.symbol == symbol
+                and kline.timeframe == timeframe
+                and start <= kline.timestamp <= end
+            ]
+
+        def save_kline(self, kline):
+            self.klines.append(kline)
+            return kline
+
+        def save_backtest_result(self, result):
+            self.results.append(result)
+            return result
+
+    class BuyOnceStrategy(BaseStrategy):
+        name = "fetch_buy_once"
+
+        def __init__(self):
+            super().__init__()
+            self._bought = False
+
+        async def on_bar(self, bar):
+            if self._bought:
+                return None
+            self._bought = True
+            return await self.buy("BTC-USDT", 1.0)
+
+    class FakeAdapter:
+        calls = []
+        closed = False
+
+        async def fetch_ohlcv(self, symbol, timeframe, limit=100, since=None):
+            self.calls.append(
+                {"symbol": symbol, "timeframe": timeframe, "limit": limit, "since": since}
+            )
+            return [
+                Bar(timestamp=1700002800000, open=100, high=101, low=99, close=100, volume=1),
+                Bar(timestamp=1700006400000, open=110, high=111, low=109, close=110, volume=1),
+            ]
+
+        async def close(self):
+            self.closed = True
+
+    FakeRepository.results = []
+    FakeRepository.klines = []
+    FakeAdapter.calls = []
+    FakeAdapter.closed = False
+    registry = StrategyRegistry()
+    registry.register("fetch_buy_once", BuyOnceStrategy)
+    monkeypatch.setattr(backtest_api, "Repository", FakeRepository, raising=False)
+    monkeypatch.setattr(
+        backtest_api, "OKXSpotAdapter", lambda **kwargs: FakeAdapter(), raising=False
+    )
+    monkeypatch.setattr(backtest_api, "create_strategy_registry", lambda: registry, raising=False)
+    monkeypatch.setattr(backtest_api, "current_timestamp_ms", lambda: 1700007200000, raising=False)
+
+    transport = ASGITransport(app=create_app())
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/api/backtest/run",
+            json={
+                "strategy": "fetch_buy_once",
+                "symbol": "BTC-USDT",
+                "timeframe": "1h",
+                "start_time": 1700002800000,
+                "end_time": 1700006400000,
+                "initial_capital": 100000,
+            },
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["total_trades"] == 1
+    assert FakeAdapter.calls == [
+        {"symbol": "BTC-USDT", "timeframe": "1h", "limit": 2, "since": 1700002800000}
+    ]
+    assert [kline.timestamp for kline in FakeRepository.klines] == [1700002800000, 1700006400000]
+    assert FakeRepository.results[0].strategy == "fetch_buy_once"
+
+
+@pytest.mark.asyncio
+async def test_run_backtest_returns_502_when_historical_fetch_fails(monkeypatch):
+    class FakeRepository:
+        def get_klines(self, symbol, timeframe, start, end):
+            return []
+
+    class EmptyStrategy(BaseStrategy):
+        name = "fetch_failure"
+
+        async def on_bar(self, bar):
+            return None
+
+    class FailingAdapter:
+        async def fetch_ohlcv(self, symbol, timeframe, limit=100, since=None):
+            raise ValueError("malformed provider response")
+
+        async def close(self):
+            pass
+
+    registry = StrategyRegistry()
+    registry.register("fetch_failure", EmptyStrategy)
+    monkeypatch.setattr(backtest_api, "Repository", FakeRepository, raising=False)
+    monkeypatch.setattr(
+        backtest_api, "OKXSpotAdapter", lambda **kwargs: FailingAdapter(), raising=False
+    )
+    monkeypatch.setattr(backtest_api, "create_strategy_registry", lambda: registry, raising=False)
+
+    transport = ASGITransport(app=create_app())
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/api/backtest/run",
+            json={
+                "strategy": "fetch_failure",
+                "symbol": "BTC-USDT",
+                "timeframe": "1h",
+                "start_time": 1700002800000,
+                "end_time": 1700006400000,
+                "initial_capital": 100000,
+            },
+        )
+
+    assert resp.status_code == 502
+    assert resp.json()["detail"] == "failed to fetch historical market data"
+
+
+@pytest.mark.asyncio
+async def test_run_backtest_rejects_unsupported_historical_timeframe(monkeypatch):
+    class FakeRepository:
+        def get_klines(self, symbol, timeframe, start, end):
+            return []
+
+    class EmptyStrategy(BaseStrategy):
+        name = "unsupported_timeframe"
+
+        async def on_bar(self, bar):
+            return None
+
+    registry = StrategyRegistry()
+    registry.register("unsupported_timeframe", EmptyStrategy)
+    monkeypatch.setattr(backtest_api, "Repository", FakeRepository, raising=False)
+    monkeypatch.setattr(backtest_api, "create_strategy_registry", lambda: registry, raising=False)
+
+    transport = ASGITransport(app=create_app())
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/api/backtest/run",
+            json={
+                "strategy": "unsupported_timeframe",
+                "symbol": "BTC-USDT",
+                "timeframe": "2h",
+                "start_time": 1700002800000,
+                "end_time": 1700006400000,
+                "initial_capital": 100000,
+            },
+        )
+
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == "unsupported timeframe for historical backtest data"
+
+
+@pytest.mark.asyncio
 async def test_run_backtest_rejects_insufficient_cached_bars(monkeypatch):
     class FakeRepository:
         results = []
@@ -411,9 +579,19 @@ async def test_run_backtest_rejects_insufficient_cached_bars(monkeypatch):
         async def on_bar(self, bar):
             return None
 
+    class EmptyAdapter:
+        async def fetch_ohlcv(self, symbol, timeframe, limit=100, since=None):
+            return []
+
+        async def close(self):
+            pass
+
     registry = StrategyRegistry()
     registry.register("empty", EmptyStrategy)
     monkeypatch.setattr(backtest_api, "Repository", FakeRepository, raising=False)
+    monkeypatch.setattr(
+        backtest_api, "OKXSpotAdapter", lambda **kwargs: EmptyAdapter(), raising=False
+    )
     monkeypatch.setattr(backtest_api, "create_strategy_registry", lambda: registry, raising=False)
 
     transport = ASGITransport(app=create_app())
@@ -424,8 +602,8 @@ async def test_run_backtest_rejects_insufficient_cached_bars(monkeypatch):
                 "strategy": "empty",
                 "symbol": "BTC-USDT",
                 "timeframe": "1h",
-                "start_time": 1700000000000,
-                "end_time": 1700003600000,
+                "start_time": 1700002800000,
+                "end_time": 1700006400000,
                 "initial_capital": 100000,
             },
         )

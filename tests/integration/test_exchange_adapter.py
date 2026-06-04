@@ -45,10 +45,31 @@ async def test_fetch_ohlcv_maps_rows_to_bars():
 
     bars = await adapter.fetch_ohlcv("BTC-USDT", "1m", limit=2)
 
-    exchange.fetch_ohlcv.assert_awaited_once_with("BTC-USDT", "1m", limit=2)
+    exchange.fetch_ohlcv.assert_awaited_once_with("BTC-USDT", "1m", since=None, limit=2)
     assert [bar.timestamp for bar in bars] == [1700000000000, 1700000060000]
     assert bars[0].open == 50000.0
     assert bars[1].close == 51200.0
+
+
+@pytest.mark.asyncio
+async def test_fetch_ohlcv_forwards_since_to_exchange():
+    with patch("src.exchange.base.ccxt") as ccxt:
+        exchange = AsyncMock()
+        exchange.fetch_ohlcv.return_value = [
+            [1700000060000, 50500, 51500, 50000, 51200, 80.25],
+        ]
+        ccxt.okx.return_value = exchange
+        adapter = OKXSpotAdapter("api-key", "secret", "passphrase")
+
+    bars = await adapter.fetch_ohlcv("BTC-USDT", "1m", limit=1, since=1700000060000)
+
+    exchange.fetch_ohlcv.assert_awaited_once_with(
+        "BTC-USDT",
+        "1m",
+        since=1700000060000,
+        limit=1,
+    )
+    assert [bar.timestamp for bar in bars] == [1700000060000]
 
 
 @pytest.mark.asyncio

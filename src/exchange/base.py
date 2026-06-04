@@ -10,7 +10,13 @@ from src.order.router import OrderHandler
 
 class ExchangeAdapter(OrderHandler, ABC):
     @abstractmethod
-    async def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100) -> list[Bar]:
+    async def fetch_ohlcv(
+        self,
+        symbol: str,
+        timeframe: str,
+        limit: int = 100,
+        since: int | None = None,
+    ) -> list[Bar]:
         pass
 
     @abstractmethod
@@ -33,8 +39,14 @@ class OKXBaseAdapter(ExchangeAdapter):
             }
         )
 
-    async def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100) -> list[Bar]:
-        rows = await self._exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+    async def fetch_ohlcv(
+        self,
+        symbol: str,
+        timeframe: str,
+        limit: int = 100,
+        since: int | None = None,
+    ) -> list[Bar]:
+        rows = await self._exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
         return [
             Bar(
                 timestamp=int(row[0]),

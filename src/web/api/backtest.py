@@ -6,12 +6,13 @@ from uuid import uuid4
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from src.backtest.datasource import BacktestDataSource
 from src.backtest.engine import BacktestEngine
+from src.backtest.historical_data import MAX_PAGE_LIMIT, ensure_historical_bars
 from src.backtest.matcher import OrderMatcher
 from src.core.config import BacktestConfig, load_config
 from src.data.models import BacktestResultRecord
 from src.data.repository import Repository
+from src.exchange.okx_spot import OKXSpotAdapter
 from src.web.api.strategies import create_strategy_registry
 
 router = APIRouter()
@@ -38,10 +39,35 @@ async def run_backtest(req: BacktestRequest) -> dict[str, float | int]:
         raise HTTPException(status_code=404, detail="Strategy not found")
 
     repository = Repository()
-    bars = BacktestDataSource(repository, req.symbol, req.timeframe).get_cached_bars(
-        req.start_time,
-        req.end_time,
-    )
+    try:
+        bars = await ensure_historical_bars(
+            repo=repository,
+            symbol=req.symbol,
+            timeframe=req.timeframe,
+            start=req.start_time,
+            end=req.end_time,
+            adapter_factory=lambda: OKXSpotAdapter(
+                api_key="",
+                secret="",
+                passphrase="",
+            ),
+            page_limit=MAX_PAGE_LIMIT,
+        )
+    except ValueError as exc:
+        if str(exc) == "unsupported timeframe":
+            raise HTTPException(
+                status_code=422,
+                detail="unsupported timeframe for historical backtest data",
+            ) from exc
+        raise HTTPException(
+            status_code=502,
+            detail="failed to fetch historical market data",
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="failed to fetch historical market data",
+        ) from exc
     if len(bars) < 2:
         raise HTTPException(
             status_code=422,

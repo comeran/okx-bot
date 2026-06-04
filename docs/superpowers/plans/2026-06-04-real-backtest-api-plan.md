@@ -238,16 +238,101 @@ Run backend and frontend, then manually/browser-smoke `/backtest`:
 - Confirm `/api/backtest/results` is served from persisted result records after refresh.
 - Confirm console has no new errors.
 
-## Historical Data Follow-Up
+## Historical Data Cache-Miss Contract
 
-After the cache-only real-engine slice works, add cache-miss fetching as a separate milestone:
+After the cache-only real-engine slice works, `/api/backtest/run` should try to fill missing local candle data from OKX before returning an insufficient-data error.
 
-1. Define OKX historical candle fetch limits and pagination behavior.
-2. Fetch only missing ranges, not entire histories repeatedly.
-3. Persist fetched bars through `BacktestDataSource.save_bars_to_cache()`.
-4. Surface whether a run used cached data, freshly fetched data, or failed due provider unavailability.
+### Fetch interface
 
-Do not combine this with the first real-engine API replacement unless implementation stays very small.
+Extend the public OHLCV adapter contract to support a CCXT-compatible `since` value:
+
+```python
+async def fetch_ohlcv(
+    self,
+    symbol: str,
+    timeframe: str,
+    limit: int = 100,
+    since: int | None = None,
+) -> list[Bar]: ...
+```
+
+Rules:
+
+- `symbol` and `timeframe` remain machine-readable and are passed through unchanged.
+- `since` is a millisecond timestamp and maps directly to CCXT `fetch_ohlcv(..., since=since, limit=limit)`.
+- The first implementation uses `OKXSpotAdapter` with blank credentials, matching the existing public market API.
+- Default page size is `100`; maximum page size is `300` for backtest cache fills.
+
+### Gap detection
+
+For a request range `[start_time, end_time]`:
+
+1. Read cached bars for exact `symbol` and `timeframe`.
+2. Convert `timeframe` to milliseconds for supported values: `1m`, `5m`, `15m`, `1h`, `4h`, `1d`.
+3. Build expected timestamps from the first aligned timestamp at or after `start_time` through `end_time`, inclusive.
+4. Treat any expected timestamp absent from cache as missing.
+5. Fetch missing contiguous ranges only; do not re-fetch fully cached ranges.
+
+If the timeframe is unsupported, return `422` with:
+
+```json
+{
+  "detail": "unsupported timeframe for historical backtest data"
+}
+```
+
+### Pagination
+
+For each missing contiguous range:
+
+1. Start with `since = missing_range_start`.
+2. Request up to `min(300, expected_missing_count)` bars.
+3. Keep only returned bars whose timestamps are within `[missing_range_start, missing_range_end]`.
+4. Advance `since` to `last_returned_timestamp + timeframe_ms`.
+5. Stop when `since > missing_range_end`, the adapter returns no rows, or the returned timestamp stops advancing.
+
+This avoids infinite loops and avoids repeatedly fetching the entire requested range.
+
+### Deduplication and persistence
+
+- Deduplicate by `timestamp` after combining cached and fetched bars.
+- Prefer fetched bars when a fetched timestamp matches a cached timestamp.
+- Persist fetched bars through `BacktestDataSource.save_bars_to_cache()`.
+- Repository-level duplicate prevention is out of scope for this slice; service-level dedupe must prevent duplicate inserts during one request.
+- Return sorted bars by timestamp to the backtest engine.
+
+### Error semantics
+
+- If OKX fetching raises, return `502` with:
+
+```json
+{
+  "detail": "failed to fetch historical market data"
+}
+```
+
+- If fetching succeeds but fewer than two usable bars remain, return `422` with the existing detail:
+
+```json
+{
+  "detail": "insufficient historical data for requested backtest range"
+}
+```
+
+- If fetching returns partial data but at least two bars exist, run the backtest with available sorted bars. Exact full-range coverage is not required until the engine needs strict candle continuity.
+
+### API behavior
+
+`POST /api/backtest/run` should behave as follows:
+
+1. Validate request fields and strategy.
+2. Load cached bars.
+3. If fewer than two bars exist or there are missing expected timestamps, try OKX cache-miss fetching.
+4. Persist fetched bars.
+5. Reload/merge bars and run the real backtest engine.
+6. Persist summary results as before.
+
+The frontend can continue using the existing generic success/error messages for this slice.
 
 ## Risks and Tradeoffs
 
