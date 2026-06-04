@@ -1,0 +1,47 @@
+docs/superpowers/plans/2026-06-04-real-backtest-api-plan.md
+  s_b929a4cbd32e4b::t_c0fddb632ab4dc 1-288
+tests/integration/test_web_api.py
+  s_b929a4cbd32e4b::t_08c68832bc667b 408-413,415
+  s_b929a4cbd32e4b::t_2f8a221f55c413 305-367,372,376,383-384,386-393,397-407,414,416-419,424,428,433-435
+  s_b929a4cbd32e4b::t_58a5f2eaa5c0ca 11,14
+  s_b929a4cbd32e4b::t_fc57c62fccd41c 856
+  s_b929a4cbd32e4b::t_5ae793835b3b14 458-485,490-492
+docs/superpowers/plans/2026-06-03-okx-bot-next-steps.md
+  s_b929a4cbd32e4b::t_6ec8b13af80546 170,172-173,177-179
+  s_b929a4cbd32e4b::t_50b86d06f9dacb 101,105,107
+  s_b929a4cbd32e4b::t_de272e6c00a3e4 324-330
+tests/unit/test_repository.py
+  s_b929a4cbd32e4b::t_f814f8429ad43b 6
+  s_b929a4cbd32e4b::t_d63be5908e4dbc 90-153
+src/data/models.py
+  s_b929a4cbd32e4b::t_eeaa7022f2a880 78-93
+src/data/repository.py
+  s_b929a4cbd32e4b::t_cc82e9246506ef 9
+  s_b929a4cbd32e4b::t_4886e0e930cba4 210-223
+frontend/src/services/backtest.test.ts
+  s_b929a4cbd32e4b::t_ea54658991794e 39,45,51
+frontend/src/types/backtest.ts
+  s_b929a4cbd32e4b::t_ec19010daf0099 18-21
+src/web/api/backtest.py
+  s_b929a4cbd32e4b::t_e6cdfdf89b34cd 3-5,9-15
+  s_b929a4cbd32e4b::t_21449aa86d0130 31-37,40-43,45-56,58-62,70-80,82,89-100
+src/web/api/trading.py
+  s_b929a4cbd32e4b::t_fc57c62fccd41c 64
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "87c865922745ce0090c0a4249800f0f22592bc51",
+  "prompts": {},
+  "logical_commit_id": "87c865922745ce0090c0a4249800f0f22592bc51",
+  "sessions": {
+    "s_b929a4cbd32e4b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d82de29f-2dfc-4f86-bf3e-7ec2ace1cf0f",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Zane <zane@bigo.sg>"
+    }
+  }
+}
