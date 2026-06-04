@@ -22,6 +22,8 @@ interface DashboardState {
   websocketMessages: DashboardWebSocketMessage[];
   loading: boolean;
   error: string | null;
+  tickerError: string | null;
+  lastUpdatedAt: number | null;
 }
 
 async function fetchJson<T>(url: string): Promise<T> {
@@ -82,6 +84,8 @@ export const useDashboardStore = defineStore('dashboard', {
     websocketMessages: [],
     loading: false,
     error: null,
+    tickerError: null,
+    lastUpdatedAt: null,
   }),
   getters: {
     activeStrategyCount: (state) => state.strategies.filter((strategy) => strategy.status === 'running').length,
@@ -90,6 +94,7 @@ export const useDashboardStore = defineStore('dashboard', {
     async loadInitialData() {
       this.loading = true;
       this.error = null;
+      this.tickerError = null;
 
       try {
         const [account, positions, orders, strategies] = await Promise.all([
@@ -107,9 +112,12 @@ export const useDashboardStore = defineStore('dashboard', {
         try {
           const tickers = await fetchJson<MarketTicker[]>('/api/market/tickers');
           this.tickers = isMarketTickerArray(tickers) ? tickers : [];
-        } catch {
+        } catch (error) {
+          this.tickerError = error instanceof Error ? error.message : 'Failed to load market tickers';
           this.tickers = [];
         }
+
+        this.lastUpdatedAt = Date.now();
       } catch (error) {
         this.error = error instanceof Error ? error.message : 'Failed to load dashboard data';
       } finally {
@@ -120,9 +128,13 @@ export const useDashboardStore = defineStore('dashboard', {
       this.websocketConnected = connected;
     },
     addWebSocketMessage(message: DashboardWebSocketMessage) {
-      this.websocketMessages.unshift(message);
+      const receivedMessage = {
+        ...message,
+        received_at: message.received_at ?? Date.now(),
+      };
+      this.websocketMessages.unshift(receivedMessage);
       this.websocketMessages = this.websocketMessages.slice(0, WEBSOCKET_MESSAGE_HISTORY_LIMIT);
-      this.applyWebSocketMessage(message);
+      this.applyWebSocketMessage(receivedMessage);
     },
     applyWebSocketMessage(message: DashboardWebSocketMessage) {
       switch (message.type) {

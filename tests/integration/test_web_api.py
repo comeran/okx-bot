@@ -12,6 +12,7 @@ from src.strategy.base import BaseStrategy
 from src.strategy.registry import StrategyRegistry
 from src.web.api import market as market_api
 from src.web.api import strategies as strategy_api
+from src.web.api import trading as trading_api
 from src.web.app import app as exported_app
 from src.web.app import create_app
 
@@ -121,6 +122,87 @@ async def test_start_and_stop_strategy_runs_bot_engine_lifecycle(monkeypatch):
         await client.post("/api/strategies/lifecycle/stop")
 
     assert LifecycleStrategy.events == ["started", "stopped"]
+
+
+@pytest.mark.asyncio
+async def test_start_strategy_wires_repository_backed_order_manager(monkeypatch):
+    class FakeRepository:
+        orders = []
+        trades = []
+        positions = []
+
+        def save_order(self, order):
+            self.orders.append(order)
+            return order
+
+        def save_trade(self, trade):
+            self.trades.append(trade)
+            return trade
+
+        def save_position(self, position):
+            self.positions.append(position)
+            return position
+
+    class BuyingStrategy(BaseStrategy):
+        name = "buyer"
+
+        async def on_init(self):
+            await self.buy("BTC-USDT", 0.1, price=50000.0)
+
+        async def on_bar(self, bar):
+            pass
+
+    registry = StrategyRegistry()
+    registry.register("buyer", BuyingStrategy)
+    monkeypatch.setattr(strategy_api, "create_strategy_registry", lambda: registry)
+    monkeypatch.setattr(strategy_api, "Repository", FakeRepository, raising=False)
+    monkeypatch.setattr(strategy_api, "current_timestamp_ms", lambda: 1700000000000, raising=False)
+
+    app = create_app()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post("/api/strategies/buyer/start")
+
+    assert resp.status_code == 200
+    assert [order.model_dump() for order in FakeRepository.orders] == [
+        {
+            "id": None,
+            "order_id": FakeRepository.orders[0].order_id,
+            "strategy": "buyer",
+            "symbol": "BTC-USDT",
+            "side": "buy",
+            "type": "limit",
+            "amount": 0.1,
+            "price": 50000.0,
+            "status": "filled",
+            "fill_price": 50000.0,
+            "timestamp": 1700000000000,
+        }
+    ]
+    assert [trade.model_dump() for trade in FakeRepository.trades] == [
+        {
+            "id": None,
+            "strategy": "buyer",
+            "symbol": "BTC-USDT",
+            "side": "buy",
+            "amount": 0.1,
+            "price": 50000.0,
+            "fee": 0.0,
+            "timestamp": 1700000000000,
+        }
+    ]
+    assert [position.model_dump() for position in FakeRepository.positions] == [
+        {
+            "id": None,
+            "strategy": "buyer",
+            "symbol": "BTC-USDT",
+            "side": "long",
+            "amount": 0.1,
+            "entry_price": 50000.0,
+            "leverage": 1,
+            "timestamp": 1700000000000,
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -421,6 +503,147 @@ async def test_settings_persist_across_app_instances(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_get_positions_returns_persisted_position_records(monkeypatch, app):
+    class Position:
+        def model_dump(self):
+            return {
+                "id": 1,
+                "strategy": "ma_cross",
+                "symbol": "BTC-USDT",
+                "side": "long",
+                "amount": 0.2,
+                "entry_price": 65000.0,
+                "leverage": 3,
+                "timestamp": 1700000000000,
+            }
+
+    class FakeRepository:
+        def get_positions(self, strategy=None):
+            assert strategy is None
+            return [Position()]
+
+    monkeypatch.setattr(trading_api, "Repository", FakeRepository, raising=False)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/trading/positions")
+
+    assert resp.status_code == 200
+    assert resp.json() == [
+        {
+            "id": 1,
+            "strategy": "ma_cross",
+            "symbol": "BTC-USDT",
+            "side": "long",
+            "amount": 0.2,
+            "entry_price": 65000.0,
+            "leverage": 3,
+            "timestamp": 1700000000000,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_get_orders_returns_persisted_order_records(monkeypatch, app):
+    class Order:
+        def model_dump(self):
+            return {
+                "id": 1,
+                "order_id": "order-1",
+                "strategy": "ma_cross",
+                "symbol": "BTC-USDT",
+                "side": "buy",
+                "type": "limit",
+                "amount": 0.2,
+                "price": 65000.0,
+                "status": "open",
+                "fill_price": 0.0,
+                "timestamp": 1700000000000,
+            }
+
+    class FakeRepository:
+        def get_orders(self):
+            return [Order()]
+
+    monkeypatch.setattr(trading_api, "Repository", FakeRepository, raising=False)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/trading/orders")
+
+    assert resp.status_code == 200
+    assert resp.json() == [
+        {
+            "id": 1,
+            "order_id": "order-1",
+            "strategy": "ma_cross",
+            "symbol": "BTC-USDT",
+            "side": "buy",
+            "type": "limit",
+            "amount": 0.2,
+            "price": 65000.0,
+            "status": "open",
+            "fill_price": 0.0,
+            "timestamp": 1700000000000,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_get_account_derives_summary_from_persisted_trading_state(monkeypatch, app):
+    class Position:
+        amount = 0.2
+        entry_price = 65000.0
+
+    class Trade:
+        side = "sell"
+        amount = 0.1
+        price = 68000.0
+        fee = 1.5
+        timestamp = 1700000000000
+
+    class FakeRepository:
+        def get_positions(self, strategy=None):
+            return [Position()]
+
+        def get_trades(self, strategy=None):
+            return [Trade()]
+
+    monkeypatch.setattr(trading_api, "Repository", FakeRepository, raising=False)
+    monkeypatch.setattr(trading_api, "current_timestamp_ms", lambda: 1700001000000, raising=False)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/trading/account")
+
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "equity": 13000.0,
+        "daily_pnl": 6798.5,
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_positions_forwards_strategy_filter(monkeypatch, app):
+    calls = []
+
+    class FakeRepository:
+        def get_positions(self, strategy=None):
+            calls.append(strategy)
+            return []
+
+    monkeypatch.setattr(trading_api, "Repository", FakeRepository, raising=False)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/trading/positions?strategy=ma_cross")
+
+    assert resp.status_code == 200
+    assert resp.json() == []
+    assert calls == ["ma_cross"]
+
+
+@pytest.mark.asyncio
 async def test_get_trading_state(app):
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -435,6 +658,105 @@ async def test_get_trading_state(app):
     assert account_resp.status_code == 200
     assert "equity" in account_resp.json()
     assert "daily_pnl" in account_resp.json()
+
+
+@pytest.mark.asyncio
+async def test_get_trades_returns_persisted_trade_records(monkeypatch, app):
+    class Trade:
+        def __init__(self, **values):
+            self.values = values
+            self.timestamp = values["timestamp"]
+
+        def model_dump(self):
+            return self.values
+
+    class FakeRepository:
+        def get_trades(self, strategy=None):
+            assert strategy is None
+            return [
+                Trade(
+                    id=1,
+                    strategy="ma_cross",
+                    symbol="BTC-USDT",
+                    side="buy",
+                    amount=0.1,
+                    price=68000.0,
+                    fee=1.2,
+                    timestamp=1700000000000,
+                )
+            ]
+
+    monkeypatch.setattr(trading_api, "Repository", FakeRepository, raising=False)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/trading/trades")
+
+    assert resp.status_code == 200
+    assert resp.json() == [
+        {
+            "id": 1,
+            "strategy": "ma_cross",
+            "symbol": "BTC-USDT",
+            "side": "buy",
+            "amount": 0.1,
+            "price": 68000.0,
+            "fee": 1.2,
+            "timestamp": 1700000000000,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_get_trades_forwards_strategy_filter(monkeypatch, app):
+    calls = []
+
+    class FakeRepository:
+        def get_trades(self, strategy=None):
+            calls.append(strategy)
+            return []
+
+    monkeypatch.setattr(trading_api, "Repository", FakeRepository, raising=False)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/trading/trades?strategy=ma_cross")
+
+    assert resp.status_code == 200
+    assert resp.json() == []
+    assert calls == ["ma_cross"]
+
+
+@pytest.mark.asyncio
+async def test_get_trades_returns_newest_first(monkeypatch, app):
+    class Trade:
+        def __init__(self, timestamp):
+            self.timestamp = timestamp
+
+        def model_dump(self):
+            return {
+                "id": self.timestamp,
+                "strategy": "ma_cross",
+                "symbol": "BTC-USDT",
+                "side": "buy",
+                "amount": 0.1,
+                "price": 68000.0,
+                "fee": 1.2,
+                "timestamp": self.timestamp,
+            }
+
+    class FakeRepository:
+        def get_trades(self, strategy=None):
+            return [Trade(1700000000000), Trade(1700100000000)]
+
+    monkeypatch.setattr(trading_api, "Repository", FakeRepository, raising=False)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/trading/trades")
+
+    assert resp.status_code == 200
+    assert [trade["timestamp"] for trade in resp.json()] == [1700100000000, 1700000000000]
 
 
 @pytest.mark.asyncio

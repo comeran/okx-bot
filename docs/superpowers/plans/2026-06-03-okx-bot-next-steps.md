@@ -1,103 +1,328 @@
-# OKX Bot Next Steps
+# OKX Bot Unfinished Work
 
 ## Scope
 
-Stabilize the current web dashboard/settings/market/i18n changes, prepare them for commit, then continue with the remaining UI gaps.
+This document tracks unfinished work across the OKX quantitative trading bot project, from broad product directions down to concrete follow-up items. It is a working backlog, not an implementation plan for a single sprint.
 
-## Locked decisions
+## Standing decisions
 
-- Keep the current work in this isolated worktree until the user asks to commit or merge.
-- Do not commit automatically.
+- Do not commit automatically; commit only when explicitly requested.
+- Keep machine-readable identifiers untranslated: API field names, strategy IDs, trading symbols, YAML/config keys, side values, and persisted settings keys.
 - Preserve secret masking behavior for OKX credentials and Telegram bot token.
-- Keep machine-readable identifiers untranslated: API field names, strategy IDs, trading symbols, YAML/config keys, and persisted settings keys.
+- Treat the current web console as an incremental control surface: avoid presenting placeholder data as live trading truth.
 
-## Step 1: Overall regression verification
+## Current near-term focus
 
-Goal: prove the current backend and frontend changes still work together.
+### 1. Trading loop UI polish
 
-Checks:
+Goal: make Dashboard and Strategies clearer as runtime-control pages without expanding into backend runtime architecture.
 
-1. Run backend tests: `uv run pytest`
-2. Run Python lint/format checks: `uv run ruff check .` and `uv run ruff format --check .`
-3. Run frontend tests: `npm --prefix frontend exec vitest -- --run`
-4. Run frontend build: `npm --prefix frontend run build`
-5. If the dev servers are running, manually smoke test the browser UI after any fix:
-   - Dashboard loads and language switching still works.
-   - Strategies page starts/stops a strategy.
-   - Market page loads tickers/klines.
-   - Settings page loads and preserves masked secrets.
+Locked decisions:
 
-Exit criteria:
+- Keep this round frontend UI polish focused; do not implement true WebSocket runtime snapshots, OKX position/order sync, or YAML persistence in this round.
+- Dashboard refresh should reload the full first-screen snapshot: account, positions, orders, strategies, and tickers.
+- Split Dashboard errors into main runtime errors and `tickerError`, so ticker failures are not silently shown as empty data.
+- Render Positions and Orders as structured tables using existing frontend types; show `—` for missing fields and do not fabricate data.
+- Improve WebSocket message log readability with message type, received time, and short payload preview; do not add polling or fake real-time snapshots.
+- Use per-strategy-row loading for start/stop actions and disable invalid actions based on current `running` / `stopped` status.
+- Keep the Strategies YAML area as draft/generated YAML only; do not add save buttons or backend config reads/writes in this round.
+- Verify with frontend Vitest, frontend production build, and browser checks for `/` and `/strategies`; backend tests are not required unless backend contracts change.
 
-- All automated checks pass, or failures are documented with root cause and next action.
-- No browser console errors during manual smoke checks.
+Detailed items:
 
-## Step 2: Working tree cleanup and commit preparation
+- `frontend/src/stores/dashboard.ts`
+  - Add or refine `lastUpdatedAt`.
+  - Add `tickerError`.
+  - Keep main API failures separate from ticker-only failures.
+  - Store richer WebSocket message log entries: type, received timestamp, and payload preview.
+- `frontend/src/views/Dashboard.vue`
+  - Add a manual refresh button.
+  - Show last update time.
+  - Keep connected/disconnected status visible.
+  - Show ticker failure separately from no ticker data.
+  - Replace generic Positions and Orders key-value rendering with clear columns.
+  - Improve WebSocket messages panel readability.
+- `frontend/src/views/Strategy.vue`
+  - Add row-level action loading for start/stop.
+  - Disable start for running strategies and stop for stopped strategies.
+  - Render strategy status with clearer tags.
+  - Clarify YAML form/editor copy as draft/generated YAML.
+- `frontend/src/locales/en.ts` and `frontend/src/locales/zh-CN.ts`
+  - Add or update localized copy for refresh state, last update, ticker errors, table empty states, WebSocket log labels, strategy status, and YAML draft wording.
 
-Goal: make the current diff understandable and safe to commit when requested.
+## Web console backlog
 
-Checks:
+### Dashboard
 
-1. Inspect `git status --short`.
-2. Inspect unstaged diff with `git diff`.
-3. Confirm no temporary screenshots, generated build artifacts, credentials, or accidental local files are included.
-4. Confirm dependency changes are limited to `vue-i18n` and lockfile updates.
-5. Run an independent runtime-correctness review of the current diff.
-6. Prepare a concise commit message, but do not commit unless the user explicitly asks.
+Current state:
 
-Exit criteria:
+- Dashboard loads account, positions, orders, strategies, and tickers through the frontend store.
+- Backend account/positions/orders/trades read local Repository-backed paper-mode state.
+- Account summary omits fields that cannot be truthfully derived yet, such as available balance and unrealized PnL.
+- WebSocket store handlers exist for richer messages, but backend does not emit them yet.
 
-- Working tree contains only intended source/test/lockfile/plan changes.
-- Review has no open critical/runtime-correctness findings.
-- Commit summary is ready for user approval.
+Unfinished work:
 
-## Step 3: Backtest page implementation
-
-Goal: replace the Backtest placeholder with a usable strategy validation page.
-
-Planned behavior:
-
-- Form fields: strategy, symbol, timeframe, start/end time, initial capital.
-- Submit to `/api/backtest/run`.
-- Show metrics: total return, Sharpe ratio, max drawdown, win rate, total trades.
-- Show recent result history from `/api/backtest/results` if available.
-- Keep UI text covered by i18n.
-
-Verification:
-
-- Add tests for service/form behavior where practical.
-- Run frontend tests and build.
-- Manually run a backtest in the browser.
-
-## Step 4: Trades page implementation
-
-Goal: replace the Trades placeholder with trading state visibility.
-
-Planned behavior:
-
-- Display current positions from `/api/trading/positions`.
-- Display current/open orders from `/api/trading/orders`.
-- Display account summary from `/api/trading/account` or link to Dashboard state.
-- Keep UI text covered by i18n.
-
-Verification:
-
-- Add tests for data loading where practical.
-- Run frontend tests and build.
-- Manually verify the page in the browser.
-
-## Step 5: Trading loop UI polish
-
-Goal: make Settings, Strategies, Dashboard, Backtest, and Trades feel like one coherent control loop.
-
-Potential work:
-
-- Surface current mode from Settings in Dashboard.
-- Show strategy runtime state and recent actions more clearly.
+- Show real account state once backend account data is wired.
+- Show real positions and open orders once backend trading state is wired.
 - Add risk/account status summary.
-- Add empty/error states consistently across pages.
+- Surface current runtime mode from Settings.
+- Add equity curve or account history when data exists.
+- Add alert/notification area for risk events and strategy failures.
+- Make empty/error/loading states consistent across all cards.
 
-Verification:
+### Strategies
 
-- Full frontend test/build.
-- Browser smoke test across all navigation pages.
+Current state:
+
+- Strategy list supports basic start/stop against the API.
+- YAML form/editor generates local YAML only.
+- Backend exposes a minimal in-memory `ma_cross` strategy with `running` / `stopped` state.
+
+Unfinished work:
+
+- Persist user-created or edited strategy configs.
+- Load saved strategies from configuration or database.
+- Support strategy create/update/delete flows.
+- Show per-strategy runtime details: last signal, last order, PnL, errors, uptime, and recent actions.
+- Validate YAML against the strategy DSL before launch.
+- Support richer DSL operators such as `crosses_above` and `crosses_below`.
+- Connect generated indicator definitions to actual computed indicator values.
+- Add strategy isolation and failure handling in the runtime engine.
+
+### Backtest
+
+Current state:
+
+- The Backtest page has a usable form, metrics display, and result history table.
+- Frontend service and validation tests exist.
+- Backend `/api/backtest/run` currently returns synthetic results instead of running a real historical backtest.
+- Backend result history is in memory.
+
+Unfinished work:
+
+- Wire `/api/backtest/run` to the real backtest engine and historical candle data.
+- Fetch OKX historical data on cache miss and persist it.
+- Persist backtest results instead of keeping only in-memory history.
+- Show equity curve, drawdown curve, and per-trade list.
+- Add result detail pages or expandable rows.
+- Support comparing multiple runs or parameter sets.
+- Make fee, slippage, initial capital, and date ranges traceable in saved results.
+
+### Market
+
+Current state:
+
+- Market page can load historical candles and render a basic candlestick chart.
+- Ticker symbols are currently limited to a small hard-coded set.
+
+Unfinished work:
+
+- Replace hard-coded ticker symbols with configurable or discoverable markets.
+- Add real-time price updates.
+- Add order book and recent trades views.
+- Add technical indicator overlays such as MA, RSI, MACD, and Bollinger Bands.
+- Support smoother timeframe switching and cached reloads.
+- Improve market data error states and retry behavior.
+
+### Trades
+
+Current state:
+
+- Trade history page displays persisted trade records from `/api/trading/trades`.
+- Optional strategy filtering exists at the API/service layer.
+- Current positions, open orders, and account summary are not yet part of the Trades page.
+
+Unfinished work:
+
+- Add filters for strategy, symbol, side, and time range.
+- Add pagination or virtualized loading for large histories.
+- Add order history beyond executed trade records.
+- Add current positions and open orders if the page should become a broader trading-state page.
+- Add account summary or link to Dashboard account state.
+- Add export/download only after the data model is stable.
+
+### Settings
+
+Current state:
+
+- Settings page can load and save local config values.
+- Secrets are masked and blank submissions preserve existing values.
+
+Unfinished work:
+
+- Apply setting changes to running services where safe.
+- Clarify which settings require restart.
+- Validate runtime mode transitions before applying them.
+- Surface current mode in Dashboard and strategy controls.
+- Add connection-test actions for OKX and Telegram credentials.
+- Add safer handling for live-mode enablement.
+
+## Backend/runtime backlog
+
+### Trading account, positions, orders, and trades
+
+Current state:
+
+- `/api/trading/account` derives local paper-mode `equity` and `daily_pnl` from persisted positions and trades.
+- `/api/trading/positions`, `/api/trading/orders`, and `/api/trading/trades` read persisted Repository records.
+- Runtime strategy startup injects a Repository-backed `UnifiedOrderManager`, so strategy order submissions can persist orders, fills, trades, and position records.
+- Repository tables exist for orders, positions, trades, and klines, but paper-mode accounting is still simplified.
+
+Unfinished work:
+
+- Decide how paper-mode account cash, equity, fees, and reset behavior should be represented.
+- Add position netting/closing semantics instead of storing each filled order as a standalone position record.
+- Improve paper-mode fill pricing; market orders currently lack market-data-driven execution prices in the runtime start path.
+- Add reconciliation between exchange state and local repository for live/demo modes.
+- Add API tests as account and position contracts become richer.
+
+### Engine and trading loop
+
+Current state:
+
+- `BotEngine` has minimal lifecycle state and strategy registration.
+- Strategy start/stop is coarse and in-memory.
+- Order manager and risk manager are not fully wired into a continuous trading loop.
+
+Unfinished work:
+
+- Implement a market data driven strategy loop.
+- Isolate strategies so one failure does not stop unrelated strategies.
+- Wire signal generation to order routing and persistence.
+- Add graceful startup/shutdown state restoration.
+- Track strategy runtime errors, heartbeat, and uptime.
+- Add structured runtime events for UI and logs.
+
+### WebSocket and real-time updates
+
+Current state:
+
+- Backend WebSocket accepts connections and sends only a `connected` message.
+- `WebSocketManager.broadcast()` exists but is not used for runtime updates.
+- Frontend store can consume richer messages, but backend does not emit them.
+
+Unfinished work:
+
+- Define the runtime WebSocket message contract.
+- Broadcast account, positions, orders, strategies, and risk events.
+- Add snapshot-on-connect behavior.
+- Add subscription or channel semantics if needed.
+- Add reconnect/resubscribe behavior for OKX market/private channels.
+- Add sequence or stale-data handling where required.
+
+### Risk management
+
+Current state:
+
+- Risk checks exist in code, but are not fully visible in the trading loop or UI.
+
+Unfinished work:
+
+- Wire risk checks into order submission paths.
+- Add circuit-breaker state.
+- Add pause-all and manual unlock flows.
+- Monitor max daily loss, max drawdown, max total position, margin ratio, and liquidation risk.
+- Emit risk alerts to UI and notifications.
+- Add tests for risk blocking and state transitions.
+
+### Exchange adapters and order routing
+
+Current state:
+
+- OKX spot/futures/swap/options adapters exist at a basic level.
+- Derivatives-specific behavior is thin.
+- Stop orders and OKX stop-loss/take-profit are not supported.
+
+Unfinished work:
+
+- Add derivatives-specific leverage, margin mode, and position mode handling.
+- Support stop-loss and take-profit order semantics.
+- Add safer live-mode order validation.
+- Add retry/backoff and exchange error normalization.
+- Add order lifecycle reconciliation.
+- Add integration tests or simulator coverage for order routing.
+
+### Market data service
+
+Current state:
+
+- Market service has basic polling/watch abstraction.
+- Web API creates market adapters directly for some requests.
+
+Unfinished work:
+
+- Add shared market data service/cache wiring.
+- Add cache-miss historical data fetches.
+- Add WebSocket streaming with reconnect and resubscribe.
+- Add missed-message recovery.
+- Add configurable market universe and instrument type handling.
+
+### Configuration and persistence
+
+Current state:
+
+- App config covers runtime, OKX, backtest, risk, notifications, and web server settings.
+- Strategy config list is not yet part of `AppConfig`.
+- Settings writes do not automatically reconfigure all running services.
+
+Unfinished work:
+
+- Add strategy configuration persistence.
+- Decide which settings are hot-reloadable and which require restart.
+- Persist runtime state needed for recovery.
+- Add migrations or schema management if repository tables evolve.
+- Keep config editing safe around secrets and live trading mode.
+
+## Notifications and observability
+
+Current state:
+
+- Telegram settings exist, but notification behavior is not fully wired into runtime events.
+
+Unfinished work:
+
+- Send alerts for strategy failures, risk circuit breakers, order failures, and live-mode warnings.
+- Add structured logs for trading loop events.
+- Add UI-visible event history.
+- Add health/status endpoints for runtime services.
+
+## Deployment and operations
+
+Unfinished work:
+
+- Add Docker or deployment packaging when the runtime is stable enough.
+- Document local development startup for backend and frontend.
+- Document production/live-mode safety checklist.
+- Add CI checks for backend tests, frontend tests, build, and lint/format.
+- Add backup/restore guidance for local data and configs.
+
+## Verification backlog
+
+Automated checks to keep using:
+
+- Backend tests: `uv run pytest`
+- Python lint: `uv run ruff check .`
+- Python format check: `uv run ruff format --check .`
+- Frontend tests: `npm --prefix frontend exec vitest run`
+- Frontend build: `npm --prefix frontend run build`
+
+Manual browser smoke checks:
+
+- `/` Dashboard loads, refreshes, and shows empty/error states correctly.
+- `/strategies` lists strategies and handles start/stop interactions correctly.
+- `/backtest` can run a basic backtest flow and display metrics/history.
+- `/market` loads chart data for supported symbols/timeframes.
+- `/trades` displays trade history and empty state correctly.
+- `/settings` preserves masked secrets and saves non-secret settings correctly.
+
+## Suggested implementation order
+
+1. Commit the current UI and trading-state work when explicitly requested.
+2. Decide and implement richer paper-mode account and position accounting semantics.
+3. Wire backtest API to real historical data and persistent results.
+4. Define and implement backend runtime WebSocket snapshots/events.
+5. Add persisted strategy config management.
+6. Wire risk manager and order manager into the continuous market-data-driven engine loop.
+7. Expand market data streaming, indicators, and chart overlays.
+8. Add notifications, observability, CI, and deployment packaging.

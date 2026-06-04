@@ -42,6 +42,8 @@ describe('dashboard store', () => {
     expect(dashboard.strategies).toEqual([{ name: 'ma_cross', status: 'running' }]);
     expect(dashboard.tickers).toEqual([]);
     expect(dashboard.error).toBeNull();
+    expect(dashboard.tickerError).toBe('Request failed: 503');
+    expect(dashboard.lastUpdatedAt).toEqual(expect.any(Number));
   });
 
   it('loads public market tickers with the dashboard snapshot data', async () => {
@@ -67,6 +69,20 @@ describe('dashboard store', () => {
     expect(fetchMock).toHaveBeenCalledWith('/api/market/tickers');
     expect(dashboard.tickers).toEqual([
       { symbol: 'BTC-USDT', last: 68000, bidPx: 67999.5, askPx: 68000.5, vol24h: 123.45 },
+    ]);
+    expect(dashboard.tickerError).toBeNull();
+    expect(dashboard.lastUpdatedAt).toEqual(expect.any(Number));
+  });
+
+  it('adds received timestamps to websocket messages', () => {
+    vi.setSystemTime(new Date('2026-06-03T12:00:00Z'));
+
+    const dashboard = useDashboardStore();
+
+    dashboard.addWebSocketMessage({ type: 'connected' });
+
+    expect(dashboard.websocketMessages).toEqual([
+      { type: 'connected', received_at: new Date('2026-06-03T12:00:00Z').getTime() },
     ]);
   });
 });

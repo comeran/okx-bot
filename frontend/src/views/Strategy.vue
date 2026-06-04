@@ -7,6 +7,7 @@ import CodeEditor from '@/components/editor/CodeEditor.vue';
 import StrategyForm from '@/components/StrategyForm.vue';
 import { listStrategies, startStrategy, stopStrategy } from '@/services/strategies';
 import type { StrategySummary, StrategyYamlForm } from '@/types/strategy';
+import { getStrategyActionState, getStrategyStatusTagType } from '@/utils/strategy';
 
 const { t } = useI18n();
 
@@ -101,11 +102,8 @@ async function runAction(strategy: StrategySummary, action: 'start' | 'stop'): P
   }
 }
 
-function statusType(status: string): 'success' | 'info' | 'warning' | 'danger' {
-  if (status === 'running') return 'success';
-  if (status === 'stopped') return 'info';
-  if (status === 'error') return 'danger';
-  return 'warning';
+function actionState(strategy: StrategySummary) {
+  return getStrategyActionState(strategy, actionName.value);
 }
 
 onMounted(() => {
@@ -140,7 +138,7 @@ onMounted(() => {
             <el-table-column prop="name" :label="t('common.name')" min-width="140" />
             <el-table-column :label="t('common.status')" width="110">
               <template #default="{ row }: { row: StrategySummary }">
-                <el-tag :type="statusType(row.status)" effect="plain">{{ row.status }}</el-tag>
+                <el-tag :type="getStrategyStatusTagType(row.status)" effect="plain">{{ row.status }}</el-tag>
               </template>
             </el-table-column>
             <el-table-column :label="t('common.actions')" width="170" fixed="right">
@@ -148,16 +146,16 @@ onMounted(() => {
                 <el-button
                   size="small"
                   type="success"
-                  :disabled="row.status === 'running'"
-                  :loading="actionName === row.name"
+                  :disabled="actionState(row).startDisabled"
+                  :loading="actionState(row).actionLoading"
                   @click.stop="runAction(row, 'start')"
                 >
                   {{ t('strategies.start') }}
                 </el-button>
                 <el-button
                   size="small"
-                  :disabled="row.status !== 'running'"
-                  :loading="actionName === row.name"
+                  :disabled="actionState(row).stopDisabled"
+                  :loading="actionState(row).actionLoading"
                   @click.stop="runAction(row, 'stop')"
                 >
                   {{ t('strategies.stop') }}
@@ -174,6 +172,7 @@ onMounted(() => {
             <span>{{ t('strategies.yamlForm') }}</span>
           </template>
 
+          <p class="strategy-page__hint">{{ t('strategies.yamlDraftHint') }}</p>
           <StrategyForm v-model="form" @regenerate="applyFormToEditor" />
           <CodeEditor v-model="code" :label="t('strategies.strategyYaml')" language="yaml" />
         </el-card>
@@ -195,8 +194,13 @@ h2 {
   margin-bottom: 20px;
 }
 
-.strategy-page__header p {
+.strategy-page__header p,
+.strategy-page__hint {
   margin: 0;
   color: #606266;
+}
+
+.strategy-page__hint {
+  margin-bottom: 16px;
 }
 </style>
