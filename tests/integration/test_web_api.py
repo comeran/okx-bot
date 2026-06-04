@@ -8,8 +8,10 @@ from fastapi.testclient import TestClient
 from httpx import ASGITransport, AsyncClient
 
 from src.core.types import Bar, Order, OrderSide, OrderStatus, OrderType
+from src.data.models import KlineCache
 from src.strategy.base import BaseStrategy
 from src.strategy.registry import StrategyRegistry
+from src.web.api import backtest as backtest_api
 from src.web.api import market as market_api
 from src.web.api import strategies as strategy_api
 from src.web.api import trading as trading_api
@@ -300,28 +302,137 @@ async def test_start_unknown_strategy_returns_404(app):
 
 
 @pytest.mark.asyncio
-async def test_run_backtest(app):
-    transport = ASGITransport(app=app)
+async def test_run_backtest_uses_cached_bars_and_persists_summary(monkeypatch):
+    class FakeRepository:
+        results = []
+        klines = [
+            KlineCache(
+                symbol="BTC-USDT",
+                timeframe="1h",
+                timestamp=1700000000000,
+                open=100.0,
+                high=101.0,
+                low=99.0,
+                close=100.0,
+                volume=10.0,
+            ),
+            KlineCache(
+                symbol="BTC-USDT",
+                timeframe="1h",
+                timestamp=1700003600000,
+                open=110.0,
+                high=111.0,
+                low=109.0,
+                close=110.0,
+                volume=12.0,
+            ),
+        ]
+
+        def get_klines(self, symbol, timeframe, start, end):
+            return [
+                kline
+                for kline in self.klines
+                if kline.symbol == symbol
+                and kline.timeframe == timeframe
+                and start <= kline.timestamp <= end
+            ]
+
+        def save_backtest_result(self, result):
+            self.results.append(result)
+            return result
+
+        def get_backtest_results(self, limit=50):
+            return sorted(self.results, key=lambda result: result.created_at, reverse=True)[:limit]
+
+    class BuyOnceStrategy(BaseStrategy):
+        name = "buy_once"
+
+        def __init__(self):
+            super().__init__()
+            self._bought = False
+
+        async def on_bar(self, bar):
+            if self._bought:
+                return None
+            self._bought = True
+            return await self.buy("BTC-USDT", 1.0)
+
+    FakeRepository.results = []
+    registry = StrategyRegistry()
+    registry.register("buy_once", BuyOnceStrategy)
+    monkeypatch.setattr(backtest_api, "Repository", FakeRepository, raising=False)
+    monkeypatch.setattr(backtest_api, "create_strategy_registry", lambda: registry, raising=False)
+    monkeypatch.setattr(backtest_api, "current_timestamp_ms", lambda: 1700007200000, raising=False)
+
+    transport = ASGITransport(app=create_app())
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.post(
             "/api/backtest/run",
             json={
-                "strategy": "ma_cross",
+                "strategy": "buy_once",
                 "symbol": "BTC-USDT",
                 "timeframe": "1h",
                 "start_time": 1700000000000,
-                "end_time": 1700100000000,
+                "end_time": 1700003600000,
                 "initial_capital": 100000,
             },
         )
 
     assert resp.status_code == 200
     data = resp.json()
-    assert data["total_return"] != 0
+    assert data["total_trades"] == 1
+    assert data["total_return"] < 0
     assert isinstance(data["sharpe_ratio"], float)
-    assert "max_drawdown" in data
-    assert "win_rate" in data
-    assert data["total_trades"] > 0
+    assert len(FakeRepository.results) == 1
+    saved = FakeRepository.results[0]
+    assert saved.strategy == "buy_once"
+    assert saved.symbol == "BTC-USDT"
+    assert saved.timeframe == "1h"
+    assert saved.initial_capital == 100000
+    assert saved.total_trades == 1
+    assert saved.created_at == 1700007200000
+
+
+@pytest.mark.asyncio
+async def test_run_backtest_rejects_insufficient_cached_bars(monkeypatch):
+    class FakeRepository:
+        results = []
+
+        def get_klines(self, symbol, timeframe, start, end):
+            return []
+
+        def save_backtest_result(self, result):
+            self.results.append(result)
+            return result
+
+    class EmptyStrategy(BaseStrategy):
+        name = "empty"
+
+        async def on_bar(self, bar):
+            return None
+
+    registry = StrategyRegistry()
+    registry.register("empty", EmptyStrategy)
+    monkeypatch.setattr(backtest_api, "Repository", FakeRepository, raising=False)
+    monkeypatch.setattr(backtest_api, "create_strategy_registry", lambda: registry, raising=False)
+
+    transport = ASGITransport(app=create_app())
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/api/backtest/run",
+            json={
+                "strategy": "empty",
+                "symbol": "BTC-USDT",
+                "timeframe": "1h",
+                "start_time": 1700000000000,
+                "end_time": 1700003600000,
+                "initial_capital": 100000,
+            },
+        )
+
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == "insufficient historical data for requested backtest range"
+    assert FakeRepository.results == []
 
 
 @pytest.mark.asyncio
@@ -344,27 +455,41 @@ async def test_run_backtest_rejects_unknown_strategy(app):
 
 
 @pytest.mark.asyncio
-async def test_get_backtest_results(app):
-    transport = ASGITransport(app=app)
+async def test_get_backtest_results_returns_persisted_summaries(monkeypatch):
+    class FakeResult:
+        def __init__(self, result_id, symbol, created_at):
+            self.id = result_id
+            self.strategy = "ma_cross"
+            self.symbol = symbol
+            self.timeframe = "4h"
+            self.start_time = 1700000000000
+            self.end_time = 1700100000000
+            self.initial_capital = 50000.0
+            self.total_return = 0.02
+            self.sharpe_ratio = 1.1
+            self.max_drawdown = 0.03
+            self.win_rate = 0.5
+            self.total_trades = 2
+            self.created_at = created_at
+
+        def model_dump(self):
+            return self.__dict__
+
+    class FakeRepository:
+        def get_backtest_results(self, limit=50):
+            return [FakeResult("bt-new", "ETH-USDT", 2), FakeResult("bt-old", "BTC-USDT", 1)]
+
+    monkeypatch.setattr(backtest_api, "Repository", FakeRepository, raising=False)
+
+    transport = ASGITransport(app=create_app())
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        await client.post(
-            "/api/backtest/run",
-            json={
-                "strategy": "ma_cross",
-                "symbol": "ETH-USDT",
-                "timeframe": "4h",
-                "start_time": 1700000000000,
-                "end_time": 1700100000000,
-                "initial_capital": 50000,
-            },
-        )
         resp = await client.get("/api/backtest/results")
 
     assert resp.status_code == 200
     data = resp.json()
-    assert isinstance(data, list)
-    expected = {"strategy": "ma_cross", "symbol": "ETH-USDT", "timeframe": "4h"}
-    assert expected.items() <= data[-1].items()
+    assert [result["id"] for result in data] == ["bt-new", "bt-old"]
+    assert data[0]["symbol"] == "ETH-USDT"
+    assert data[0]["total_trades"] == 2
 
 
 def test_websocket_accepts_connection_and_sends_snapshot(app):
@@ -728,9 +853,7 @@ async def test_get_positions_forwards_strategy_filter(monkeypatch, app):
 
 
 @pytest.mark.asyncio
-async def test_get_positions_filters_flat_rows_without_open_position_method(
-    monkeypatch, app
-):
+async def test_get_positions_filters_flat_rows_without_open_position_method(monkeypatch, app):
     class Position:
         def __init__(self, symbol, amount):
             self.symbol = symbol

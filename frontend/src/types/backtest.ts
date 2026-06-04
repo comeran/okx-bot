@@ -15,4 +15,7 @@ export interface BacktestMetrics {
   total_trades: number;
 }
 
-export interface BacktestResult extends BacktestRequest, BacktestMetrics {}
+export interface BacktestResult extends BacktestRequest, BacktestMetrics {
+  id: string;
+  created_at: number;
+}

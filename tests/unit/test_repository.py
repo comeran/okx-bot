@@ -3,6 +3,7 @@ from sqlmodel import SQLModel, create_engine
 
 from src.data.models import (
     AccountRecord,
+    BacktestResultRecord,
     CashLedgerRecord,
     KlineCache,
     OrderRecord,
@@ -84,6 +85,72 @@ def test_kline_cache(repo: Repository):
     repo.save_kline(kline)
     klines = repo.get_klines("BTC-USDT", "1h", 1700000000000, 1700003600000)
     assert len(klines) == 1
+
+
+def test_save_and_list_backtest_results_newest_first(repo: Repository):
+    repo.save_backtest_result(
+        BacktestResultRecord(
+            id="bt-old",
+            strategy="ma_cross",
+            symbol="BTC-USDT",
+            timeframe="1h",
+            start_time=1700000000000,
+            end_time=1700003600000,
+            initial_capital=100000.0,
+            total_return=0.01,
+            sharpe_ratio=1.2,
+            max_drawdown=0.03,
+            win_rate=0.5,
+            total_trades=2,
+            created_at=1700003600000,
+        )
+    )
+    repo.save_backtest_result(
+        BacktestResultRecord(
+            id="bt-new",
+            strategy="ma_cross",
+            symbol="ETH-USDT",
+            timeframe="1h",
+            start_time=1700007200000,
+            end_time=1700010800000,
+            initial_capital=200000.0,
+            total_return=-0.02,
+            sharpe_ratio=-0.5,
+            max_drawdown=0.04,
+            win_rate=0.25,
+            total_trades=4,
+            created_at=1700010800000,
+        )
+    )
+
+    results = repo.get_backtest_results()
+
+    assert [result.id for result in results] == ["bt-new", "bt-old"]
+    assert results[0].symbol == "ETH-USDT"
+    assert results[0].total_trades == 4
+
+
+def test_list_backtest_results_honors_limit(repo: Repository):
+    for index in range(3):
+        repo.save_backtest_result(
+            BacktestResultRecord(
+                id=f"bt-{index}",
+                strategy="ma_cross",
+                symbol="BTC-USDT",
+                timeframe="1h",
+                start_time=1700000000000 + index,
+                end_time=1700003600000 + index,
+                initial_capital=100000.0,
+                total_return=0.01,
+                sharpe_ratio=1.0,
+                max_drawdown=0.02,
+                win_rate=0.5,
+                total_trades=1,
+                created_at=1700000000000 + index,
+            )
+        )
+
+    assert [result.id for result in repo.get_backtest_results(limit=2)] == ["bt-2", "bt-1"]
 
 
 def test_get_trades_filters(repo: Repository):

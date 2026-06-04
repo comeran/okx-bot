@@ -61,9 +61,7 @@ def serialize_account(account: object | None) -> dict[str, float]:
 
     values = account_mapping(account)
     return {
-        key: float(values.get(key, 0.0))
-        if isinstance(values.get(key, 0.0), int | float)
-        else 0.0
+        key: float(values.get(key, 0.0)) if isinstance(values.get(key, 0.0), int | float) else 0.0
         for key in PAPER_ACCOUNT_KEYS
     }
 

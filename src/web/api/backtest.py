@@ -1,13 +1,20 @@
 from __future__ import annotations
 
+import time
+from uuid import uuid4
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from src.backtest.report import generate_report
-from src.web.api.strategies import strategy_exists
+from src.backtest.datasource import BacktestDataSource
+from src.backtest.engine import BacktestEngine
+from src.backtest.matcher import OrderMatcher
+from src.core.config import BacktestConfig, load_config
+from src.data.models import BacktestResultRecord
+from src.data.repository import Repository
+from src.web.api.strategies import create_strategy_registry
 
 router = APIRouter()
-_results: list[dict[str, float | int | str]] = []
 
 
 class BacktestRequest(BaseModel):
@@ -21,30 +28,38 @@ class BacktestRequest(BaseModel):
 
 @router.post("/run")
 async def run_backtest(req: BacktestRequest) -> dict[str, float | int]:
-    if not strategy_exists(req.strategy):
+    if req.end_time <= req.start_time:
+        raise HTTPException(status_code=422, detail="end_time must be after start_time")
+    if req.initial_capital <= 0:
+        raise HTTPException(status_code=422, detail="initial_capital must be greater than 0")
+
+    registry = create_strategy_registry()
+    if req.strategy not in registry.list_strategies():
         raise HTTPException(status_code=404, detail="Strategy not found")
 
-    duration_steps = max(
-        1,
-        min(24, (req.end_time - req.start_time) // _timeframe_ms(req.timeframe)),
+    repository = Repository()
+    bars = BacktestDataSource(repository, req.symbol, req.timeframe).get_cached_bars(
+        req.start_time,
+        req.end_time,
     )
-    symbol_bias = (sum(ord(char) for char in req.symbol) % 7) / 10000
-    trades = [
-        {"pnl": req.initial_capital * (0.003 + symbol_bias), "timestamp": req.start_time},
-        {"pnl": -req.initial_capital * 0.0015, "timestamp": req.start_time + duration_steps},
-        {"pnl": req.initial_capital * (0.002 + duration_steps / 10000), "timestamp": req.end_time},
-    ]
-    equity = req.initial_capital
-    equity_curve = [equity]
-    for trade in trades:
-        equity += float(trade["pnl"])
-        equity_curve.append(equity)
+    if len(bars) < 2:
+        raise HTTPException(
+            status_code=422,
+            detail="insufficient historical data for requested backtest range",
+        )
 
-    report = generate_report(
+    strategy = registry.create(req.strategy)
+    if hasattr(strategy, "symbol"):
+        strategy.symbol = req.symbol
+
+    backtest_config = load_backtest_config()
+    report = await BacktestEngine(
         initial_capital=req.initial_capital,
-        trades=trades,
-        equity_curve=equity_curve,
-    )
+        matcher=OrderMatcher(
+            slippage=backtest_config.slippage,
+            fee_rate=backtest_config.fee_rate,
+        ),
+    ).run(strategy, bars)
     metrics = {
         "total_return": report.total_return,
         "sharpe_ratio": report.sharpe_ratio,
@@ -52,30 +67,34 @@ async def run_backtest(req: BacktestRequest) -> dict[str, float | int]:
         "win_rate": report.win_rate,
         "total_trades": report.total_trades,
     }
-    _results.append(
-        {
-            "strategy": req.strategy,
-            "symbol": req.symbol,
-            "timeframe": req.timeframe,
-            "start_time": req.start_time,
-            "end_time": req.end_time,
+    created_at = current_timestamp_ms()
+    repository.save_backtest_result(
+        BacktestResultRecord(
+            id=f"bt_{created_at}_{uuid4().hex[:8]}",
+            strategy=req.strategy,
+            symbol=req.symbol,
+            timeframe=req.timeframe,
+            start_time=req.start_time,
+            end_time=req.end_time,
+            initial_capital=req.initial_capital,
+            created_at=created_at,
             **metrics,
-        }
+        )
     )
     return metrics
 
 
-def _timeframe_ms(timeframe: str) -> int:
-    unit = timeframe[-1:]
-    value = int(timeframe[:-1]) if timeframe[:-1].isdigit() else 1
-    value = max(1, value)
-    return {
-        "m": 60_000,
-        "h": 3_600_000,
-        "d": 86_400_000,
-    }.get(unit, 3_600_000) * value
-
-
 @router.get("/results")
 async def list_results() -> list[dict[str, float | int | str]]:
-    return _results
+    return [result.model_dump() for result in Repository().get_backtest_results()]
+
+
+def current_timestamp_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def load_backtest_config() -> BacktestConfig:
+    try:
+        return load_config("config/settings.yaml").backtest
+    except FileNotFoundError:
+        return BacktestConfig()

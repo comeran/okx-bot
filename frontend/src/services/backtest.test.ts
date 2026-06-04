@@ -36,16 +36,19 @@ describe('backtest service', () => {
   it('loads historical backtest results from the backtest API', async () => {
     const results = [
       {
+        id: 'bt-new',
         strategy: 'ma_cross',
         symbol: 'ETH-USDT',
         timeframe: '4h',
         start_time: 1700000000000,
         end_time: 1700100000000,
+        initial_capital: 100000,
         total_return: 0.08,
         sharpe_ratio: 1.2,
         max_drawdown: 0.04,
         win_rate: 0.52,
         total_trades: 12,
+        created_at: 1700100000000,
       },
     ];
     mockedAxios.get.mockResolvedValueOnce({ data: results });

@@ -98,12 +98,13 @@ Current state:
 - Frontend service and validation tests exist.
 - Backend `/api/backtest/run` currently returns synthetic results instead of running a real historical backtest.
 - Backend result history is in memory.
+- Detailed implementation plan: [Real Backtest API Implementation Plan](2026-06-04-real-backtest-api-plan.md).
 
 Unfinished work:
 
-- Wire `/api/backtest/run` to the real backtest engine and historical candle data.
-- Fetch OKX historical data on cache miss and persist it.
+- Wire `/api/backtest/run` to the real backtest engine and cached historical candle data.
 - Persist backtest results instead of keeping only in-memory history.
+- Fetch OKX historical data on cache miss and persist it after the cache-only real-engine slice works.
 - Show equity curve, drawdown curve, and per-trade list.
 - Add result detail pages or expandable rows.
 - Support comparing multiple runs or parameter sets.
@@ -166,16 +167,16 @@ Detailed contract for the next paper-accounting milestone: [Paper-Mode Accountin
 
 Current state:
 
-- `/api/trading/account` derives local paper-mode `equity` and `daily_pnl` from persisted positions and trades.
+- `/api/trading/account` returns local paper-mode cash, equity, realized PnL, unrealized PnL, daily PnL, and fees from persisted account records.
 - `/api/trading/positions`, `/api/trading/orders`, and `/api/trading/trades` read persisted Repository records.
-- Runtime strategy startup injects a Repository-backed `UnifiedOrderManager`, so strategy order submissions can persist orders, fills, trades, and position records.
-- Repository tables exist for orders, positions, trades, and klines, but paper-mode accounting is still simplified.
+- Runtime strategy startup injects a Repository-backed `UnifiedOrderManager`, so strategy order submissions can persist orders, fills, trades, account records, cash ledger entries, and net positions.
+- Paper-mode accounting supports fill rejection for market orders without a usable price, net long/short position updates, realized PnL, and separate fee tracking.
 
 Unfinished work:
 
-- Decide how paper-mode account cash, equity, fees, and reset behavior should be represented.
-- Add position netting/closing semantics instead of storing each filled order as a standalone position record.
-- Improve paper-mode fill pricing; market orders currently lack market-data-driven execution prices in the runtime start path.
+- Add true rolling daily PnL using timestamped realized-PnL ledger events.
+- Add mark-to-market unrealized PnL using a shared market data price provider.
+- Add explicit paper account reset behavior.
 - Add reconciliation between exchange state and local repository for live/demo modes.
 - Add API tests as account and position contracts become richer.
 
@@ -320,11 +321,10 @@ Manual browser smoke checks:
 
 ## Suggested implementation order
 
-1. Commit the current UI and trading-state work when explicitly requested.
-2. Decide and implement richer paper-mode account and position accounting semantics.
-3. Wire backtest API to real historical data and persistent results.
-4. Define and implement backend runtime WebSocket snapshots/events.
-5. Add persisted strategy config management.
-6. Wire risk manager and order manager into the continuous market-data-driven engine loop.
-7. Expand market data streaming, indicators, and chart overlays.
-8. Add notifications, observability, CI, and deployment packaging.
+1. Wire backtest API to the real engine, cached historical data, and persistent result summaries.
+2. Add historical candle cache-miss fetching from OKX once the cache-only backtest path works.
+3. Define and implement backend runtime WebSocket snapshots/events.
+4. Add persisted strategy config management.
+5. Wire risk manager and order manager into the continuous market-data-driven engine loop.
+6. Expand market data streaming, indicators, and chart overlays.
+7. Add notifications, observability, CI, and deployment packaging.

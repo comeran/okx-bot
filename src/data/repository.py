@@ -6,6 +6,7 @@ from sqlmodel import Session, SQLModel, create_engine, select
 
 from src.data.models import (
     AccountRecord,
+    BacktestResultRecord,
     CashLedgerRecord,
     KlineCache,
     OrderRecord,
@@ -202,6 +203,24 @@ class Repository:
             .where(KlineCache.timestamp >= start)
             .where(KlineCache.timestamp <= end)
             .order_by(KlineCache.timestamp)
+        )
+        with Session(self.engine) as session:
+            return list(session.exec(statement).all())
+
+    def save_backtest_result(
+        self, result: BacktestResultRecord
+    ) -> BacktestResultRecord:
+        with Session(self.engine) as session:
+            session.add(result)
+            session.commit()
+            session.refresh(result)
+            return result
+
+    def get_backtest_results(self, limit: int = 50) -> list[BacktestResultRecord]:
+        statement = (
+            select(BacktestResultRecord)
+            .order_by(BacktestResultRecord.created_at.desc())
+            .limit(limit)
         )
         with Session(self.engine) as session:
             return list(session.exec(statement).all())

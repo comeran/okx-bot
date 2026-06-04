@@ -75,3 +75,19 @@ class KlineCache(SQLModel, table=True):
     low: float
     close: float
     volume: float
+
+
+class BacktestResultRecord(SQLModel, table=True):
+    id: str = Field(primary_key=True)
+    strategy: str = Field(index=True)
+    symbol: str = Field(index=True)
+    timeframe: str = Field(index=True)
+    start_time: int = Field(index=True)
+    end_time: int = Field(index=True)
+    initial_capital: float
+    total_return: float
+    sharpe_ratio: float
+    max_drawdown: float
+    win_rate: float
+    total_trades: int
+    created_at: int = Field(index=True)
