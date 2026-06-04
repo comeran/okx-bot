@@ -11,6 +11,7 @@ from src.core.types import Bar, Order, OrderSide, OrderStatus, OrderType
 from src.data.models import KlineCache
 from src.strategy.base import BaseStrategy
 from src.strategy.registry import StrategyRegistry
+from src.web import app as web_app
 from src.web.api import backtest as backtest_api
 from src.web.api import market as market_api
 from src.web.api import strategies as strategy_api
@@ -670,10 +671,83 @@ async def test_get_backtest_results_returns_persisted_summaries(monkeypatch):
     assert data[0]["total_trades"] == 2
 
 
-def test_websocket_accepts_connection_and_sends_snapshot(app):
-    with TestClient(app) as client:
+def test_websocket_accepts_connection_and_sends_snapshot(monkeypatch):
+    class FakeRepository:
+        def get_account(self, strategy=None):
+            return {
+                "cash_balance": 100000.0,
+                "equity": 100100.0,
+                "realized_pnl": 100.0,
+                "unrealized_pnl": 0.0,
+                "daily_pnl": 100.0,
+                "fees_paid": 1.5,
+            }
+
+        def get_open_positions(self, strategy=None):
+            return []
+
+        def get_orders(self):
+            return []
+
+    monkeypatch.setattr(web_app, "Repository", FakeRepository, raising=False)
+
+    with TestClient(create_app()) as client:
         with client.websocket_connect("/ws") as websocket:
-            assert websocket.receive_json() == {"type": "connected"}
+            snapshot = websocket.receive_json()
+
+    assert snapshot == {
+        "type": "snapshot",
+        "data": {
+            "account": {
+                "cash_balance": 100000.0,
+                "equity": 100100.0,
+                "realized_pnl": 100.0,
+                "unrealized_pnl": 0.0,
+                "daily_pnl": 100.0,
+                "fees_paid": 1.5,
+            },
+            "positions": [],
+            "orders": [],
+            "strategies": [{"name": "ma_cross", "status": "stopped"}],
+        },
+    }
+
+
+def test_websocket_snapshot_reflects_running_strategy_status():
+    app = create_app()
+
+    with TestClient(app) as client:
+        resp = client.post("/api/strategies/ma_cross/start")
+        with client.websocket_connect("/ws") as websocket:
+            snapshot = websocket.receive_json()
+
+    assert resp.status_code == 200
+    assert snapshot["data"]["strategies"] == [{"name": "ma_cross", "status": "running"}]
+
+
+@pytest.mark.asyncio
+async def test_strategy_start_broadcasts_status_event(monkeypatch):
+    messages = []
+
+    async def broadcast(message):
+        messages.append(message)
+
+    monkeypatch.setattr(strategy_api, "current_timestamp_ms", lambda: 1700000000000)
+    monkeypatch.setattr(web_app.ws_manager, "broadcast", broadcast)
+
+    transport = ASGITransport(app=create_app())
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post("/api/strategies/ma_cross/start")
+
+    assert resp.status_code == 200
+    assert messages == [
+        {
+            "type": "strategy_status",
+            "strategy": "ma_cross",
+            "status": "running",
+            "timestamp": 1700000000000,
+        }
+    ]
 
 
 @pytest.mark.asyncio
