@@ -160,6 +160,8 @@ Unfinished work:
 
 ## Backend/runtime backlog
 
+Detailed contract for the next paper-accounting milestone: [Paper-Mode Accounting Contract](2026-06-04-paper-accounting-contract.md).
+
 ### Trading account, positions, orders, and trades
 
 Current state:

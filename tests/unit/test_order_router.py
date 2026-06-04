@@ -21,6 +21,51 @@ class MockHandler(OrderHandler):
         return True
 
 
+class FakeRepository:
+    def __init__(self):
+        self.orders = []
+        self.trades = []
+        self.positions = {}
+        self.accounts = {}
+        self.ledger = []
+
+    def save_order(self, order):
+        self.orders.append(order)
+        return order
+
+    def save_trade(self, trade):
+        self.trades.append(trade)
+        return trade
+
+    def get_account(self, strategy):
+        return self.accounts.get(strategy)
+
+    def upsert_account(self, account):
+        self.accounts[account.strategy] = account
+        return account
+
+    def get_position(self, strategy, symbol):
+        return self.positions.get((strategy, symbol))
+
+    def upsert_position(self, position):
+        self.positions[(position.strategy, position.symbol)] = position
+        return position
+
+    def delete_position(self, strategy, symbol):
+        self.positions.pop((strategy, symbol), None)
+
+    def get_open_positions(self, strategy=None):
+        return [
+            position
+            for position in self.positions.values()
+            if position.amount != 0 and (strategy is None or position.strategy == strategy)
+        ]
+
+    def save_cash_ledger(self, entry):
+        self.ledger.append(entry)
+        return entry
+
+
 @pytest.mark.asyncio
 async def test_router_backtest():
     handler = MockHandler()
@@ -106,25 +151,7 @@ async def test_order_manager_generates_unique_order_ids_for_repeated_submits():
 
 
 @pytest.mark.asyncio
-async def test_order_manager_persists_filled_order_trade_and_position():
-    class FakeRepository:
-        def __init__(self):
-            self.orders = []
-            self.trades = []
-            self.positions = []
-
-        def save_order(self, order):
-            self.orders.append(order)
-            return order
-
-        def save_trade(self, trade):
-            self.trades.append(trade)
-            return trade
-
-        def save_position(self, position):
-            self.positions.append(position)
-            return position
-
+async def test_order_manager_persists_filled_order_and_applies_accounting():
     handler = MockHandler()
     repository = FakeRepository()
     router = OrderRouter(backtest=handler, mode="backtest")
@@ -132,6 +159,7 @@ async def test_order_manager_persists_filled_order_trade_and_position():
         router=router,
         repository=repository,
         timestamp_ms=lambda: 1700000000000,
+        initial_equity=100000.0,
     )
 
     order = await manager.submit(
@@ -170,46 +198,32 @@ async def test_order_manager_persists_filled_order_trade_and_position():
             "timestamp": 1700000000000,
         }
     ]
-    assert [saved.model_dump() for saved in repository.positions] == [
-        {
-            "id": None,
-            "strategy": "ma_cross",
-            "symbol": "BTC-USDT",
-            "side": "long",
-            "amount": 0.1,
-            "entry_price": 50000.0,
-            "leverage": 1,
-            "timestamp": 1700000000000,
-        }
-    ]
+    assert repository.accounts["ma_cross"].cash_balance == 95000.0
+    assert repository.accounts["ma_cross"].equity == 100000.0
+    assert repository.positions[("ma_cross", "BTC-USDT")].model_dump() == {
+        "id": None,
+        "strategy": "ma_cross",
+        "symbol": "BTC-USDT",
+        "side": "long",
+        "amount": 0.1,
+        "entry_price": 50000.0,
+        "leverage": 1,
+        "timestamp": 1700000000000,
+        "mark_price": None,
+        "realized_pnl": 0.0,
+        "unrealized_pnl": 0.0,
+    }
+    assert repository.ledger[0].amount == -5000.0
 
 
 @pytest.mark.asyncio
-async def test_order_manager_persists_pending_order_without_trade_or_position():
+async def test_order_manager_persists_pending_order_without_accounting_mutation():
     class PendingHandler(OrderHandler):
         async def submit(self, order: Order) -> Order:
             return order
 
         async def cancel(self, order_id: str, symbol: str | None = None) -> bool:
             return True
-
-    class FakeRepository:
-        def __init__(self):
-            self.orders = []
-            self.trades = []
-            self.positions = []
-
-        def save_order(self, order):
-            self.orders.append(order)
-            return order
-
-        def save_trade(self, trade):
-            self.trades.append(trade)
-            return trade
-
-        def save_position(self, position):
-            self.positions.append(position)
-            return position
 
     repository = FakeRepository()
     router = OrderRouter(backtest=PendingHandler(), mode="backtest")
@@ -231,7 +245,40 @@ async def test_order_manager_persists_pending_order_without_trade_or_position():
     assert len(repository.orders) == 1
     assert repository.orders[0].status == "pending"
     assert repository.trades == []
-    assert repository.positions == []
+    assert repository.positions == {}
+    assert repository.accounts == {}
+
+
+@pytest.mark.asyncio
+async def test_order_manager_persists_rejected_order_without_accounting_mutation():
+    class RejectedHandler(OrderHandler):
+        async def submit(self, order: Order) -> Order:
+            order.status = OrderStatus.REJECTED
+            return order
+
+        async def cancel(self, order_id: str, symbol: str | None = None) -> bool:
+            return True
+
+    repository = FakeRepository()
+    router = OrderRouter(backtest=RejectedHandler(), mode="backtest")
+    manager = UnifiedOrderManager(
+        router=router,
+        repository=repository,
+        timestamp_ms=lambda: 1700000000000,
+    )
+
+    await manager.submit(
+        symbol="BTC-USDT",
+        side=OrderSide.BUY,
+        order_type=OrderType.MARKET,
+        amount=0.1,
+        strategy_name="ma_cross",
+    )
+
+    assert repository.orders[0].status == "rejected"
+    assert repository.trades == []
+    assert repository.positions == {}
+    assert repository.accounts == {}
 
 
 @pytest.mark.asyncio

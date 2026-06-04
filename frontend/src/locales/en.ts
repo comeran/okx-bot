@@ -27,7 +27,10 @@ export default {
   dashboard: {
     title: 'Dashboard',
     totalEquity: 'Total Equity',
+    cashBalance: 'Cash Balance',
+    realizedPnl: 'Realized PnL',
     dailyPnl: 'Daily PnL',
+    feesPaid: 'Fees Paid',
     activeStrategies: 'Active Strategies',
     marketTickers: 'Market Tickers',
     noMarketTickers: 'No market tickers',

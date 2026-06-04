@@ -1,8 +1,10 @@
 import time
 from collections.abc import Callable
+from typing import Any
 
-from src.core.types import Order, OrderSide, OrderStatus, OrderType, Position, PositionSide
-from src.data.models import OrderRecord, PositionRecord, TradeRecord
+from src.core.types import Order, OrderSide, OrderStatus, OrderType
+from src.data.models import OrderRecord
+from src.order.accounting import PaperAccountingService
 from src.order.router import OrderRouter
 
 
@@ -12,11 +14,14 @@ class UnifiedOrderManager:
         router: OrderRouter,
         repository=None,
         timestamp_ms: Callable[[], int] | None = None,
+        initial_equity: float = 100000.0,
+        fee_rate: float = 0.0,
     ) -> None:
         self.router = router
         self.repository = repository
         self.timestamp_ms = timestamp_ms or self._current_timestamp_ms
-        self._positions: dict[str, dict[str, Position]] = {}
+        self.initial_equity = initial_equity
+        self.fee_rate = fee_rate
         self._balances: dict[str, float] = {}
         self._order_seq = 0
 
@@ -49,10 +54,16 @@ class UnifiedOrderManager:
     async def cancel(self, order_id: str, symbol: str | None = None) -> bool:
         return await self.router.cancel(order_id, symbol)
 
-    def get_position(self, strategy_name: str, symbol: str) -> Position | None:
-        return self._positions.get(strategy_name, {}).get(symbol)
+    def get_position(self, strategy_name: str, symbol: str) -> Any:
+        if self.repository is not None and hasattr(self.repository, "get_position"):
+            return self.repository.get_position(strategy_name, symbol)
+        return None
 
     def get_balance(self, strategy_name: str) -> float:
+        if self.repository is not None and hasattr(self.repository, "get_account"):
+            account = self.repository.get_account(strategy_name)
+            if account is not None:
+                return account.cash_balance
         return self._balances.get(strategy_name, 0.0)
 
     def set_balance(self, strategy_name: str, amount: float) -> None:
@@ -63,7 +74,6 @@ class UnifiedOrderManager:
             return
 
         timestamp = order.fill_time or self.timestamp_ms()
-        fill_price = order.fill_price or 0.0
         self.repository.save_order(
             OrderRecord(
                 order_id=order.id,
@@ -74,53 +84,17 @@ class UnifiedOrderManager:
                 amount=order.amount,
                 price=order.price or 0.0,
                 status=order.status.value,
-                fill_price=fill_price,
+                fill_price=order.fill_price or 0.0,
                 timestamp=timestamp,
             )
         )
 
         if order.status == OrderStatus.FILLED:
-            self._persist_fill(order, strategy_name, timestamp, fill_price)
-
-    def _persist_fill(
-        self,
-        order: Order,
-        strategy_name: str,
-        timestamp: int,
-        fill_price: float,
-    ) -> None:
-        self.repository.save_trade(
-            TradeRecord(
-                strategy=strategy_name,
-                symbol=order.symbol,
-                side=order.side.value,
-                amount=order.amount,
-                price=fill_price,
-                fee=0.0,
-                timestamp=timestamp,
-            )
-        )
-
-        position_side = PositionSide.LONG if order.side == OrderSide.BUY else PositionSide.SHORT
-        position = Position(
-            symbol=order.symbol,
-            side=position_side,
-            amount=order.amount,
-            entry_price=fill_price,
-            unrealized_pnl=0.0,
-        )
-        self._positions.setdefault(strategy_name, {})[order.symbol] = position
-        self.repository.save_position(
-            PositionRecord(
-                strategy=strategy_name,
-                symbol=order.symbol,
-                side=position_side.value,
-                amount=order.amount,
-                entry_price=fill_price,
-                leverage=position.leverage,
-                timestamp=timestamp,
-            )
-        )
+            PaperAccountingService(
+                repository=self.repository,
+                initial_equity=self.initial_equity,
+                fee_rate=self.fee_rate,
+            ).process_filled_order(order, strategy_name, timestamp)
 
     @staticmethod
     def _current_timestamp_ms() -> int:

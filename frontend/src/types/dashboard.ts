@@ -1,9 +1,12 @@
 export interface AccountSummary {
   equity: number;
   daily_pnl: number;
+  cash_balance?: number;
+  realized_pnl?: number;
+  unrealized_pnl?: number;
+  fees_paid?: number;
   available_balance?: number;
   margin_ratio?: number;
-  unrealized_pnl?: number;
 }
 
 export type DashboardFieldValue = string | number | boolean | null | undefined;

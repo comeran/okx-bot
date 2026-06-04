@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 
 from fastapi import APIRouter, HTTPException
 
+from src.core.config import BacktestConfig, load_config
 from src.core.engine import BotEngine
-from src.core.types import Order, OrderStatus
+from src.core.types import Order, OrderStatus, OrderType
 from src.data.repository import Repository
 from src.order.manager import UnifiedOrderManager
 from src.order.router import OrderHandler, OrderRouter
 from src.strategy.builtin.ma_cross import register_ma_cross
 from src.strategy.registry import StrategyRegistry
+
+PriceProvider = Callable[[str], float | None]
 
 
 def current_timestamp_ms() -> int:
@@ -18,23 +22,52 @@ def current_timestamp_ms() -> int:
 
 
 class LocalPaperOrderHandler(OrderHandler):
+    def __init__(self, latest_price: PriceProvider | None = None) -> None:
+        self.latest_price = latest_price
+
     async def submit(self, order: Order) -> Order:
+        fill_price = self._fill_price(order)
+        if fill_price is None:
+            order.status = OrderStatus.REJECTED
+            order.fill_price = None
+            order.fill_time = None
+            return order
+
         order.status = OrderStatus.FILLED
-        order.fill_price = order.price or 0.0
+        order.fill_price = fill_price
         order.fill_time = current_timestamp_ms()
         return order
 
     async def cancel(self, order_id: str, symbol: str | None = None) -> bool:
         return True
 
+    def _fill_price(self, order: Order) -> float | None:
+        if order.price is not None and order.price > 0:
+            return order.price
+        if order.type == OrderType.MARKET and self.latest_price is not None:
+            price = self.latest_price(order.symbol)
+            if price is not None and price > 0:
+                return price
+        return None
 
-def create_order_manager() -> UnifiedOrderManager:
-    handler = LocalPaperOrderHandler()
+
+def paper_backtest_config() -> BacktestConfig:
+    try:
+        return load_config("config/settings.yaml").backtest
+    except FileNotFoundError:
+        return BacktestConfig()
+
+
+def create_order_manager(latest_price: PriceProvider | None = None) -> UnifiedOrderManager:
+    handler = LocalPaperOrderHandler(latest_price=latest_price)
     router = OrderRouter(backtest=handler, mode="backtest")
+    backtest_config = paper_backtest_config()
     return UnifiedOrderManager(
         router=router,
         repository=Repository(),
         timestamp_ms=current_timestamp_ms,
+        initial_equity=backtest_config.initial_capital,
+        fee_rate=backtest_config.fee_rate,
     )
 
 

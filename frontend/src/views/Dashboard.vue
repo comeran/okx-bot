@@ -109,19 +109,37 @@ onMounted(() => {
     />
 
     <el-row :gutter="16">
-      <el-col :xs="24" :md="8">
+      <el-col :xs="24" :sm="12" :lg="4">
         <el-card shadow="hover" v-loading="dashboard.loading">
           <template #header>{{ t('dashboard.totalEquity') }}</template>
           <div class="metric">{{ formatCurrency(dashboard.account?.equity) }}</div>
         </el-card>
       </el-col>
-      <el-col :xs="24" :md="8">
+      <el-col :xs="24" :sm="12" :lg="4">
+        <el-card shadow="hover" v-loading="dashboard.loading">
+          <template #header>{{ t('dashboard.cashBalance') }}</template>
+          <div class="metric">{{ formatCurrency(dashboard.account?.cash_balance) }}</div>
+        </el-card>
+      </el-col>
+      <el-col :xs="24" :sm="12" :lg="4">
+        <el-card shadow="hover" v-loading="dashboard.loading">
+          <template #header>{{ t('dashboard.realizedPnl') }}</template>
+          <div class="metric">{{ formatCurrency(dashboard.account?.realized_pnl) }}</div>
+        </el-card>
+      </el-col>
+      <el-col :xs="24" :sm="12" :lg="4">
         <el-card shadow="hover" v-loading="dashboard.loading">
           <template #header>{{ t('dashboard.dailyPnl') }}</template>
           <div class="metric">{{ formatCurrency(dashboard.account?.daily_pnl) }}</div>
         </el-card>
       </el-col>
-      <el-col :xs="24" :md="8">
+      <el-col :xs="24" :sm="12" :lg="4">
+        <el-card shadow="hover" v-loading="dashboard.loading">
+          <template #header>{{ t('dashboard.feesPaid') }}</template>
+          <div class="metric">{{ formatCurrency(dashboard.account?.fees_paid) }}</div>
+        </el-card>
+      </el-col>
+      <el-col :xs="24" :sm="12" :lg="4">
         <el-card shadow="hover" v-loading="dashboard.loading">
           <template #header>{{ t('dashboard.activeStrategies') }}</template>
           <div class="metric">{{ dashboard.activeStrategyCount }}</div>

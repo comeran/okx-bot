@@ -1,7 +1,14 @@
 import pytest
 from sqlmodel import SQLModel, create_engine
 
-from src.data.models import KlineCache, OrderRecord, PositionRecord, TradeRecord
+from src.data.models import (
+    AccountRecord,
+    CashLedgerRecord,
+    KlineCache,
+    OrderRecord,
+    PositionRecord,
+    TradeRecord,
+)
 from src.data.repository import Repository
 
 
@@ -95,3 +102,149 @@ def test_get_trades_filters(repo: Repository):
     assert len(repo.get_trades(strategy="strat_a")) == 3
     assert len(repo.get_trades(strategy="strat_b")) == 2
     assert len(repo.get_trades()) == 5
+
+
+def test_upsert_and_get_account(repo: Repository):
+    repo.upsert_account(
+        AccountRecord(
+            strategy="ma_cross",
+            initial_equity=100000.0,
+            cash_balance=95000.0,
+            equity=100500.0,
+            realized_pnl=500.0,
+            unrealized_pnl=0.0,
+            daily_pnl=500.0,
+            fees_paid=2.0,
+            updated_at=1700000000000,
+        )
+    )
+    repo.upsert_account(
+        AccountRecord(
+            strategy="ma_cross",
+            initial_equity=100000.0,
+            cash_balance=96000.0,
+            equity=101000.0,
+            realized_pnl=1000.0,
+            unrealized_pnl=0.0,
+            daily_pnl=1000.0,
+            fees_paid=3.0,
+            updated_at=1700000001000,
+        )
+    )
+
+    account = repo.get_account("ma_cross")
+
+    assert account is not None
+    assert account.cash_balance == 96000.0
+    assert account.realized_pnl == 1000.0
+
+
+def test_get_account_aggregates_all_strategies(repo: Repository):
+    repo.upsert_account(
+        AccountRecord(
+            strategy="a",
+            initial_equity=100.0,
+            cash_balance=90.0,
+            equity=110.0,
+            realized_pnl=10.0,
+            unrealized_pnl=1.0,
+            daily_pnl=5.0,
+            fees_paid=0.5,
+            updated_at=1,
+        )
+    )
+    repo.upsert_account(
+        AccountRecord(
+            strategy="b",
+            initial_equity=200.0,
+            cash_balance=180.0,
+            equity=210.0,
+            realized_pnl=20.0,
+            unrealized_pnl=2.0,
+            daily_pnl=6.0,
+            fees_paid=0.7,
+            updated_at=2,
+        )
+    )
+
+    account = repo.get_account()
+
+    assert account is not None
+    assert account.initial_equity == 300.0
+    assert account.cash_balance == 270.0
+    assert account.updated_at == 2
+
+
+def test_cash_ledger_filters_by_strategy(repo: Repository):
+    repo.save_cash_ledger(
+        CashLedgerRecord(
+            strategy="a",
+            symbol="BTC-USDT",
+            order_id="1",
+            event_type="fill",
+            amount=-100.0,
+            balance_after=99900.0,
+            timestamp=2,
+        )
+    )
+    repo.save_cash_ledger(
+        CashLedgerRecord(
+            strategy="b",
+            symbol="ETH-USDT",
+            order_id="2",
+            event_type="fill",
+            amount=-50.0,
+            balance_after=99950.0,
+            timestamp=1,
+        )
+    )
+
+    assert [entry.order_id for entry in repo.get_cash_ledger()] == ["2", "1"]
+    assert [entry.order_id for entry in repo.get_cash_ledger("a")] == ["1"]
+
+
+def test_upsert_position_and_open_positions_filter_flat_rows(repo: Repository):
+    repo.upsert_position(
+        PositionRecord(
+            strategy="ma_cross",
+            symbol="BTC-USDT",
+            side="long",
+            amount=0.1,
+            entry_price=50000.0,
+            leverage=1,
+            timestamp=1700000000000,
+        )
+    )
+    repo.upsert_position(
+        PositionRecord(
+            strategy="ma_cross",
+            symbol="ETH-USDT",
+            side="long",
+            amount=0.0,
+            entry_price=0.0,
+            leverage=1,
+            timestamp=1700000001000,
+        )
+    )
+    repo.upsert_position(
+        PositionRecord(
+            strategy="ma_cross",
+            symbol="BTC-USDT",
+            side="long",
+            amount=0.2,
+            entry_price=51000.0,
+            leverage=1,
+            timestamp=1700000002000,
+            mark_price=52000.0,
+            realized_pnl=10.0,
+            unrealized_pnl=20.0,
+        )
+    )
+
+    position = repo.get_position("ma_cross", "BTC-USDT")
+    open_positions = repo.get_open_positions("ma_cross")
+
+    assert position is not None
+    assert position.amount == 0.2
+    assert position.mark_price == 52000.0
+    assert [(pos.symbol, pos.amount) for pos in open_positions] == [("BTC-USDT", 0.2)]

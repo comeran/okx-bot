@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from httpx import ASGITransport, AsyncClient
 
-from src.core.types import Bar
+from src.core.types import Bar, Order, OrderSide, OrderStatus, OrderType
 from src.strategy.base import BaseStrategy
 from src.strategy.registry import StrategyRegistry
 from src.web.api import market as market_api
@@ -129,7 +129,9 @@ async def test_start_strategy_wires_repository_backed_order_manager(monkeypatch)
     class FakeRepository:
         orders = []
         trades = []
-        positions = []
+        positions = {}
+        accounts = {}
+        ledger = []
 
         def save_order(self, order):
             self.orders.append(order)
@@ -139,9 +141,33 @@ async def test_start_strategy_wires_repository_backed_order_manager(monkeypatch)
             self.trades.append(trade)
             return trade
 
-        def save_position(self, position):
-            self.positions.append(position)
+        def get_account(self, strategy):
+            return self.accounts.get(strategy)
+
+        def upsert_account(self, account):
+            self.accounts[account.strategy] = account
+            return account
+
+        def get_position(self, strategy, symbol):
+            return self.positions.get((strategy, symbol))
+
+        def upsert_position(self, position):
+            self.positions[(position.strategy, position.symbol)] = position
             return position
+
+        def delete_position(self, strategy, symbol):
+            self.positions.pop((strategy, symbol), None)
+
+        def get_open_positions(self, strategy=None):
+            return [
+                position
+                for position in self.positions.values()
+                if position.amount != 0 and (strategy is None or position.strategy == strategy)
+            ]
+
+        def save_cash_ledger(self, entry):
+            self.ledger.append(entry)
+            return entry
 
     class BuyingStrategy(BaseStrategy):
         name = "buyer"
@@ -187,11 +213,11 @@ async def test_start_strategy_wires_repository_backed_order_manager(monkeypatch)
             "side": "buy",
             "amount": 0.1,
             "price": 50000.0,
-            "fee": 0.0,
+            "fee": 2.5,
             "timestamp": 1700000000000,
         }
     ]
-    assert [position.model_dump() for position in FakeRepository.positions] == [
+    assert [position.model_dump() for position in FakeRepository.positions.values()] == [
         {
             "id": None,
             "strategy": "buyer",
@@ -201,8 +227,67 @@ async def test_start_strategy_wires_repository_backed_order_manager(monkeypatch)
             "entry_price": 50000.0,
             "leverage": 1,
             "timestamp": 1700000000000,
+            "mark_price": None,
+            "realized_pnl": 0.0,
+            "unrealized_pnl": 0.0,
         }
     ]
+    assert FakeRepository.accounts["buyer"].cash_balance == 94997.5
+    assert FakeRepository.accounts["buyer"].equity == 99997.5
+
+
+@pytest.mark.asyncio
+async def test_local_paper_order_handler_rejects_market_order_without_price():
+    handler = strategy_api.LocalPaperOrderHandler()
+    order = Order(
+        id="order-1",
+        symbol="BTC-USDT",
+        side=OrderSide.BUY,
+        type=OrderType.MARKET,
+        amount=0.1,
+    )
+
+    result = await handler.submit(order)
+
+    assert result.status == OrderStatus.REJECTED
+    assert result.fill_price is None
+    assert result.fill_time is None
+
+
+@pytest.mark.asyncio
+async def test_local_paper_order_handler_fills_limit_order_at_explicit_price():
+    handler = strategy_api.LocalPaperOrderHandler()
+    order = Order(
+        id="order-1",
+        symbol="BTC-USDT",
+        side=OrderSide.BUY,
+        type=OrderType.LIMIT,
+        amount=0.1,
+        price=50000.0,
+    )
+
+    result = await handler.submit(order)
+
+    assert result.status == OrderStatus.FILLED
+    assert result.fill_price == 50000.0
+    assert result.fill_time is not None
+
+
+@pytest.mark.asyncio
+async def test_local_paper_order_handler_fills_market_order_from_price_provider():
+    handler = strategy_api.LocalPaperOrderHandler(latest_price=lambda symbol: 51000.0)
+    order = Order(
+        id="order-1",
+        symbol="BTC-USDT",
+        side=OrderSide.BUY,
+        type=OrderType.MARKET,
+        amount=0.1,
+    )
+
+    result = await handler.submit(order)
+
+    assert result.status == OrderStatus.FILLED
+    assert result.fill_price == 51000.0
 
 
 @pytest.mark.asyncio
@@ -590,27 +675,21 @@ async def test_get_orders_returns_persisted_order_records(monkeypatch, app):
 
 
 @pytest.mark.asyncio
-async def test_get_account_derives_summary_from_persisted_trading_state(monkeypatch, app):
-    class Position:
-        amount = 0.2
-        entry_price = 65000.0
-
-    class Trade:
-        side = "sell"
-        amount = 0.1
-        price = 68000.0
-        fee = 1.5
-        timestamp = 1700000000000
+async def test_get_account_returns_paper_account_state(monkeypatch, app):
+    class Account:
+        cash_balance = 95000.0
+        equity = 100500.0
+        realized_pnl = 500.0
+        unrealized_pnl = 0.0
+        daily_pnl = 500.0
+        fees_paid = 2.5
 
     class FakeRepository:
-        def get_positions(self, strategy=None):
-            return [Position()]
-
-        def get_trades(self, strategy=None):
-            return [Trade()]
+        def get_account(self, strategy=None):
+            assert strategy is None
+            return Account()
 
     monkeypatch.setattr(trading_api, "Repository", FakeRepository, raising=False)
-    monkeypatch.setattr(trading_api, "current_timestamp_ms", lambda: 1700001000000, raising=False)
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -618,9 +697,14 @@ async def test_get_account_derives_summary_from_persisted_trading_state(monkeypa
 
     assert resp.status_code == 200
     assert resp.json() == {
-        "equity": 13000.0,
-        "daily_pnl": 6798.5,
+        "cash_balance": 95000.0,
+        "equity": 100500.0,
+        "realized_pnl": 500.0,
+        "unrealized_pnl": 0.0,
+        "daily_pnl": 500.0,
+        "fees_paid": 2.5,
     }
+    assert "available_balance" not in resp.json()
 
 
 @pytest.mark.asyncio
@@ -628,7 +712,7 @@ async def test_get_positions_forwards_strategy_filter(monkeypatch, app):
     calls = []
 
     class FakeRepository:
-        def get_positions(self, strategy=None):
+        def get_open_positions(self, strategy=None):
             calls.append(strategy)
             return []
 
@@ -641,6 +725,43 @@ async def test_get_positions_forwards_strategy_filter(monkeypatch, app):
     assert resp.status_code == 200
     assert resp.json() == []
     assert calls == ["ma_cross"]
+
+
+@pytest.mark.asyncio
+async def test_get_positions_filters_flat_rows_without_open_position_method(
+    monkeypatch, app
+):
+    class Position:
+        def __init__(self, symbol, amount):
+            self.symbol = symbol
+            self.amount = amount
+            self.timestamp = 1700000000000
+
+        def model_dump(self):
+            return {
+                "symbol": self.symbol,
+                "amount": self.amount,
+                "timestamp": self.timestamp,
+            }
+
+    class FakeRepository:
+        def get_positions(self, strategy=None):
+            return [Position("BTC-USDT", 0.1), Position("ETH-USDT", 0.0)]
+
+    monkeypatch.setattr(trading_api, "Repository", FakeRepository, raising=False)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/trading/positions")
+
+    assert resp.status_code == 200
+    assert resp.json() == [
+        {
+            "symbol": "BTC-USDT",
+            "amount": 0.1,
+            "timestamp": 1700000000000,
+        }
+    ]
 
 
 @pytest.mark.asyncio

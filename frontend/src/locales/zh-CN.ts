@@ -27,7 +27,10 @@ export default {
   dashboard: {
     title: '仪表盘',
     totalEquity: '总权益',
+    cashBalance: '现金余额',
+    realizedPnl: '已实现盈亏',
     dailyPnl: '当日盈亏',
+    feesPaid: '已付手续费',
     activeStrategies: '运行中策略',
     marketTickers: '市场行情',
     noMarketTickers: '暂无市场行情',

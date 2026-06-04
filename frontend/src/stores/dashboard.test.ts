@@ -22,7 +22,14 @@ describe('dashboard store', () => {
       }
 
       const responses: Record<string, unknown> = {
-        '/api/trading/account': { equity: 1000, daily_pnl: 12.5 },
+        '/api/trading/account': {
+          cash_balance: 950,
+          equity: 1000,
+          realized_pnl: 50,
+          unrealized_pnl: 0,
+          daily_pnl: 12.5,
+          fees_paid: 2.5,
+        },
         '/api/trading/positions': [{ symbol: 'BTC-USDT', amount: 1 }],
         '/api/trading/orders': [{ order_id: 'order-1', symbol: 'BTC-USDT' }],
         '/api/strategies': [{ name: 'ma_cross', status: 'running' }],
@@ -36,7 +43,14 @@ describe('dashboard store', () => {
 
     await dashboard.loadInitialData();
 
-    expect(dashboard.account).toEqual({ equity: 1000, daily_pnl: 12.5 });
+    expect(dashboard.account).toEqual({
+      cash_balance: 950,
+      equity: 1000,
+      realized_pnl: 50,
+      unrealized_pnl: 0,
+      daily_pnl: 12.5,
+      fees_paid: 2.5,
+    });
     expect(dashboard.positions).toEqual([{ symbol: 'BTC-USDT', amount: 1 }]);
     expect(dashboard.orders).toEqual([{ order_id: 'order-1', symbol: 'BTC-USDT' }]);
     expect(dashboard.strategies).toEqual([{ name: 'ma_cross', status: 'running' }]);
@@ -49,7 +63,14 @@ describe('dashboard store', () => {
   it('loads public market tickers with the dashboard snapshot data', async () => {
     const fetchMock = vi.fn((url: string) => {
       const responses: Record<string, unknown> = {
-        '/api/trading/account': { equity: 1000, daily_pnl: 12.5 },
+        '/api/trading/account': {
+          cash_balance: 950,
+          equity: 1000,
+          realized_pnl: 50,
+          unrealized_pnl: 0,
+          daily_pnl: 12.5,
+          fees_paid: 2.5,
+        },
         '/api/trading/positions': [],
         '/api/trading/orders': [],
         '/api/strategies': [{ name: 'ma_cross', status: 'stopped' }],
