@@ -201,15 +201,16 @@ Unfinished work:
 
 Current state:
 
-- Backend WebSocket accepts connections and sends only a `connected` message.
-- `WebSocketManager.broadcast()` exists but is not used for runtime updates.
-- Frontend store can consume richer messages, but backend does not emit them.
+- Backend WebSocket sends a `snapshot` message on connect with local account, positions, orders, and strategy status.
+- Strategy start/stop updates broadcast `strategy_status` events through `WebSocketManager.broadcast()`.
+- Snapshot strategy status shares the same in-memory runtime state as the strategy API.
+- Frontend store can consume snapshot messages and per-domain update messages.
 
 Unfinished work:
 
-- Define the runtime WebSocket message contract.
-- Broadcast account, positions, orders, strategies, and risk events.
-- Add snapshot-on-connect behavior.
+- Broadcast repository-backed `orders`, `positions`, and `account` updates after paper-mode strategy fills.
+- Decide whether executed trade records should broadcast as `trades` in this slice or remain page/API-only for now.
+- Broadcast risk events once risk checks are wired into order submission paths.
 - Add subscription or channel semantics if needed.
 - Add reconnect/resubscribe behavior for OKX market/private channels.
 - Add sequence or stale-data handling where required.
@@ -323,7 +324,7 @@ Manual browser smoke checks:
 
 1. Wire backtest API to the real engine, cached historical data, and persistent result summaries.
 2. Add historical candle cache-miss fetching from OKX once the cache-only backtest path works.
-3. Define and implement backend runtime WebSocket snapshots/events.
+3. Extend backend runtime WebSocket events to broadcast paper order, position, and account updates after fills.
 4. Add persisted strategy config management.
 5. Wire risk manager and order manager into the continuous market-data-driven engine loop.
 6. Expand market data streaming, indicators, and chart overlays.

@@ -1,5 +1,5 @@
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from src.core.types import Order, OrderSide, OrderStatus, OrderType
@@ -16,12 +16,14 @@ class UnifiedOrderManager:
         timestamp_ms: Callable[[], int] | None = None,
         initial_equity: float = 100000.0,
         fee_rate: float = 0.0,
+        on_order_update: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         self.router = router
         self.repository = repository
         self.timestamp_ms = timestamp_ms or self._current_timestamp_ms
         self.initial_equity = initial_equity
         self.fee_rate = fee_rate
+        self.on_order_update = on_order_update
         self._balances: dict[str, float] = {}
         self._order_seq = 0
 
@@ -49,6 +51,8 @@ class UnifiedOrderManager:
         )
         submitted_order = await self.router.submit(order)
         self._persist_order(submitted_order, strategy_name)
+        if self.on_order_update is not None:
+            await self.on_order_update(strategy_name)
         return submitted_order
 
     async def cancel(self, order_id: str, symbol: str | None = None) -> bool:

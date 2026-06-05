@@ -13,9 +13,11 @@ from src.order.manager import UnifiedOrderManager
 from src.order.router import OrderHandler, OrderRouter
 from src.strategy.builtin.ma_cross import register_ma_cross
 from src.strategy.registry import StrategyRegistry
+from src.web.api import trading
 
 PriceProvider = Callable[[str], float | None]
-StatusBroadcaster = Callable[[dict[str, object]], Awaitable[None]]
+RuntimeBroadcaster = Callable[[dict[str, object]], Awaitable[None]]
+OrderUpdateCallback = Callable[[str], Awaitable[None]]
 
 
 def current_timestamp_ms() -> int:
@@ -59,16 +61,21 @@ def paper_backtest_config() -> BacktestConfig:
         return BacktestConfig()
 
 
-def create_order_manager(latest_price: PriceProvider | None = None) -> UnifiedOrderManager:
+def create_order_manager(
+    latest_price: PriceProvider | None = None,
+    repository: Repository | None = None,
+    on_order_update: OrderUpdateCallback | None = None,
+) -> UnifiedOrderManager:
     handler = LocalPaperOrderHandler(latest_price=latest_price)
     router = OrderRouter(backtest=handler, mode="backtest")
     backtest_config = paper_backtest_config()
     return UnifiedOrderManager(
         router=router,
-        repository=Repository(),
+        repository=repository or Repository(),
         timestamp_ms=current_timestamp_ms,
         initial_equity=backtest_config.initial_capital,
         fee_rate=backtest_config.fee_rate,
+        on_order_update=on_order_update,
     )
 
 
@@ -99,7 +106,7 @@ class StrategyRuntimeState:
 
 
 def create_router(
-    broadcast: StatusBroadcaster | None = None,
+    broadcast: RuntimeBroadcaster | None = None,
     runtime: StrategyRuntimeState | None = None,
 ) -> APIRouter:
     router = APIRouter()
@@ -120,6 +127,25 @@ def create_router(
             }
         )
 
+    async def broadcast_trading_updates(repository: Repository, strategy: str) -> None:
+        if broadcast is None:
+            return
+        positions = (
+            repository.get_open_positions(strategy)
+            if hasattr(repository, "get_open_positions")
+            else repository.get_positions(strategy)
+        )
+        await broadcast(
+            {"type": "orders", "orders": trading.serialize_records(repository.get_orders())}
+        )
+        await broadcast({"type": "positions", "positions": trading.serialize_records(positions)})
+        await broadcast(
+            {
+                "type": "account",
+                "account": trading.serialize_account(repository.get_account(strategy)),
+            }
+        )
+
     @router.get("")
     async def list_strategies() -> list[dict[str, str]]:
         return runtime.list_strategies()
@@ -129,10 +155,19 @@ def create_router(
         if not strategy_exists(name):
             raise HTTPException(status_code=404, detail="Strategy not found")
         if name not in runtime.engines:
+            repository = Repository()
             strategy = runtime.registry.create(name)
             set_order_manager = getattr(strategy, "set_order_manager", None)
             if set_order_manager is not None:
-                set_order_manager(create_order_manager())
+                set_order_manager(
+                    create_order_manager(
+                        repository=repository,
+                        on_order_update=lambda strategy_name: broadcast_trading_updates(
+                            repository,
+                            strategy_name,
+                        ),
+                    )
+                )
             engine = BotEngine(strategies=[strategy])
             await engine.start()
             runtime.engines[name] = engine

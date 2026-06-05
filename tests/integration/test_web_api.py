@@ -144,7 +144,12 @@ async def test_start_strategy_wires_repository_backed_order_manager(monkeypatch)
             self.trades.append(trade)
             return trade
 
-        def get_account(self, strategy):
+        def get_orders(self):
+            return self.orders
+
+        def get_account(self, strategy=None):
+            if strategy is None:
+                return next(iter(self.accounts.values()), None)
             return self.accounts.get(strategy)
 
         def upsert_account(self, account):
@@ -181,11 +186,17 @@ async def test_start_strategy_wires_repository_backed_order_manager(monkeypatch)
         async def on_bar(self, bar):
             pass
 
+    messages = []
+
+    async def broadcast(message):
+        messages.append(message)
+
     registry = StrategyRegistry()
     registry.register("buyer", BuyingStrategy)
     monkeypatch.setattr(strategy_api, "create_strategy_registry", lambda: registry)
     monkeypatch.setattr(strategy_api, "Repository", FakeRepository, raising=False)
     monkeypatch.setattr(strategy_api, "current_timestamp_ms", lambda: 1700000000000, raising=False)
+    monkeypatch.setattr(web_app.ws_manager, "broadcast", broadcast)
 
     app = create_app()
     transport = ASGITransport(app=app)
@@ -237,6 +248,33 @@ async def test_start_strategy_wires_repository_backed_order_manager(monkeypatch)
     ]
     assert FakeRepository.accounts["buyer"].cash_balance == 94997.5
     assert FakeRepository.accounts["buyer"].equity == 99997.5
+    assert messages[:3] == [
+        {
+            "type": "orders",
+            "orders": [order.model_dump() for order in FakeRepository.orders],
+        },
+        {
+            "type": "positions",
+            "positions": [position.model_dump() for position in FakeRepository.positions.values()],
+        },
+        {
+            "type": "account",
+            "account": {
+                "cash_balance": 94997.5,
+                "equity": 99997.5,
+                "realized_pnl": 0.0,
+                "unrealized_pnl": 0.0,
+                "daily_pnl": 0.0,
+                "fees_paid": 2.5,
+            },
+        },
+    ]
+    assert messages[3] == {
+        "type": "strategy_status",
+        "strategy": "buyer",
+        "status": "running",
+        "timestamp": 1700000000000,
+    }
 
 
 @pytest.mark.asyncio
