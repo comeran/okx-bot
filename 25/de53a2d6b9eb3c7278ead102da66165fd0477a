@@ -1,0 +1,37 @@
+src/web/api/strategies.py
+  s_b929a4cbd32e4b::t_698775943898d8 16
+  s_b929a4cbd32e4b::t_c0ae657fd05cfd 130-138,140-144,146-148
+  s_b929a4cbd32e4b::t_cef02c9a01055d 64-68,74,78
+  s_b929a4cbd32e4b::t_ebcda95ca645db 19-20
+  s_b929a4cbd32e4b::t_c20e04b0bb1ceb 158,162-170
+  s_b929a4cbd32e4b::t_b3eb5e1065e127 109
+docs/superpowers/plans/2026-06-03-okx-bot-next-steps.md
+  s_b929a4cbd32e4b::t_90f2293f44cd60 204-207,211-213
+  s_b929a4cbd32e4b::t_980aea40cee97f 327
+tests/integration/test_web_api.py
+  s_b929a4cbd32e4b::t_5ad5553934ad64 189-192,199
+  s_b929a4cbd32e4b::t_a40746bc941754 251-261,270-277
+  s_b929a4cbd32e4b::t_d53c123de89e5e 147-152
+  s_b929a4cbd32e4b::t_a644af7954572a 262-269
+src/order/manager.py
+  s_b929a4cbd32e4b::t_12f92608ff512a 54-55
+  s_b929a4cbd32e4b::t_8aef9bb493fbc6 19,26
+  s_b929a4cbd32e4b::t_43f5f14cac6e85 2
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "25de53a2d6b9eb3c7278ead102da66165fd0477a",
+  "prompts": {},
+  "logical_commit_id": "25de53a2d6b9eb3c7278ead102da66165fd0477a",
+  "sessions": {
+    "s_b929a4cbd32e4b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d82de29f-2dfc-4f86-bf3e-7ec2ace1cf0f",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Zane <zane@bigo.sg>"
+    }
+  }
+}
