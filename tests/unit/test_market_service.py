@@ -99,6 +99,70 @@ async def test_poll_once_raises_when_exchange_has_no_ohlcv_method():
             await service._poll_once("BTC-USDT-SWAP", "1m")
 
 
+async def test_poll_once_skips_bars_already_seen_for_subscription():
+    class FetchExchange:
+        def __init__(self) -> None:
+            self.rows = [
+                [[1700000000000, 50000, 51000, 49000, 50500, 100.5]],
+                [
+                    [1700000000000, 50000, 51000, 49000, 50500, 100.5],
+                    [1700000060000, 50500, 51500, 50000, 51200, 80.25],
+                ],
+            ]
+
+        async def fetch_ohlcv(self, symbol: str, timeframe: str):
+            return self.rows.pop(0)
+
+        async def close(self) -> None:
+            pass
+
+    with patch("src.market.service.ccxt") as ccxt:
+        ccxt.okx.return_value = FetchExchange()
+        callback = AsyncMock()
+        service = MarketDataService("api-key", "secret", "passphrase")
+        service.subscribe("BTC-USDT-SWAP", "1m", callback)
+
+        await service._poll_once("BTC-USDT-SWAP", "1m")
+        await service._poll_once("BTC-USDT-SWAP", "1m")
+
+    bars = service.get_recent_bars("BTC-USDT-SWAP", "1m")
+    assert [bar.timestamp for bar in bars] == [1700000000000, 1700000060000]
+    assert callback.await_count == 2
+
+
+async def test_start_waits_between_successful_poll_cycles(monkeypatch):
+    class FetchExchange:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def fetch_ohlcv(self, symbol: str, timeframe: str):
+            self.calls += 1
+            if self.calls == 2:
+                service._running = False
+            return [[1700000000000 + self.calls, 50000, 51000, 49000, 50500, 100.5]]
+
+        async def close(self) -> None:
+            pass
+
+    with patch("src.market.service.ccxt") as ccxt:
+        exchange = FetchExchange()
+        ccxt.okx.return_value = exchange
+        sleep_durations = []
+        service = MarketDataService("api-key", "secret", "passphrase")
+
+        async def sleep(duration):
+            sleep_durations.append(duration)
+            service._running = False
+
+        monkeypatch.setattr("src.market.service.asyncio.sleep", sleep)
+        service.subscribe("BTC-USDT-SWAP", "1m", AsyncMock())
+
+        await service.start()
+
+    assert exchange.calls == 1
+    assert sleep_durations == [1]
+
+
 async def test_get_recent_bars_returns_requested_tail_from_buffer():
     service = MarketDataService("api-key", "secret", "passphrase")
     key = "BTC-USDT-SWAP:1m"

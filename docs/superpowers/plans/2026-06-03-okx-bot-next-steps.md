@@ -58,8 +58,10 @@ Current state:
 
 - Dashboard loads account, positions, orders, strategies, and tickers through the frontend store.
 - Backend account/positions/orders/trades read local Repository-backed paper-mode state.
+- Backend WebSocket snapshots include local account, positions, orders, and strategy status.
+- Runtime strategy status, strategy error, orders, positions, and account updates can broadcast over WebSocket.
 - Account summary omits fields that cannot be truthfully derived yet, such as available balance and unrealized PnL.
-- WebSocket store handlers exist for richer messages, but backend does not emit them yet.
+- Frontend store handlers exist for snapshot and per-domain runtime messages, but page-level runtime readability still needs polish.
 
 Unfinished work:
 
@@ -77,18 +79,18 @@ Current state:
 
 - Strategy list supports basic start/stop against the API.
 - YAML form/editor generates local YAML only.
-- Backend exposes a minimal in-memory `ma_cross` strategy with `running` / `stopped` state.
+- Backend lists built-in strategies plus persisted SQLite strategy configs.
+- Persisted `ma_cross` configs can start by saved config name with their saved `symbol`, `timeframe`, and `params`.
+- Runtime strategy failures are isolated and broadcast as stopped/error events.
 
 Unfinished work:
 
-- Persist user-created or edited strategy configs.
-- Load saved strategies from configuration or database.
-- Support strategy create/update/delete flows.
+- Add frontend create/update/delete flows for persisted strategy configs.
 - Show per-strategy runtime details: last signal, last order, PnL, errors, uptime, and recent actions.
 - Validate YAML against the strategy DSL before launch.
 - Support richer DSL operators such as `crosses_above` and `crosses_below`.
 - Connect generated indicator definitions to actual computed indicator values.
-- Add strategy isolation and failure handling in the runtime engine.
+- Expand persisted runtime support beyond `ma_cross`.
 
 ### Backtest
 
@@ -184,17 +186,16 @@ Unfinished work:
 
 Current state:
 
-- `BotEngine` has minimal lifecycle state and strategy registration.
-- Strategy start/stop is coarse and in-memory.
-- Order manager and risk manager are not fully wired into a continuous trading loop.
+- `BotEngine` starts/stops strategies and can subscribe symbol/timeframe strategies to a shared market data service.
+- Persisted strategy configs can run through their saved `strategy_type`, `symbol`, `timeframe`, and `params`.
+- Strategy failures are isolated: the failing strategy is stopped, status/error events are broadcast, and the latest error is kept in runtime memory.
+- Continuous-loop order submission goes through a minimal max-position risk gate before routing.
 
 Unfinished work:
 
-- Implement a market data driven strategy loop.
-- Isolate strategies so one failure does not stop unrelated strategies.
-- Wire signal generation to order routing and persistence.
+- Expand the market-data-driven loop beyond persisted `ma_cross` configs.
 - Add graceful startup/shutdown state restoration.
-- Track strategy runtime errors, heartbeat, and uptime.
+- Track strategy heartbeat and uptime.
 - Add structured runtime events for UI and logs.
 
 ### WebSocket and real-time updates
@@ -202,14 +203,15 @@ Unfinished work:
 Current state:
 
 - Backend WebSocket sends a `snapshot` message on connect with local account, positions, orders, and strategy status.
+- Snapshot strategy status includes built-in strategies and persisted strategy configs.
 - Strategy start/stop updates broadcast `strategy_status` events through `WebSocketManager.broadcast()`.
-- Snapshot strategy status shares the same in-memory runtime state as the strategy API.
+- Strategy runtime failures broadcast stopped status plus `strategy_error` events.
+- Paper-mode strategy fills can broadcast repository-backed `orders`, `positions`, and `account` updates.
 - Frontend store can consume snapshot messages and per-domain update messages.
 
 Unfinished work:
 
-- Broadcast repository-backed `orders`, `positions`, and `account` updates after paper-mode strategy fills.
-- Decide whether executed trade records should broadcast as `trades` in this slice or remain page/API-only for now.
+- Decide whether executed trade records should broadcast as `trades` or remain page/API-only for now.
 - Broadcast risk events once risk checks are wired into order submission paths.
 - Add subscription or channel semantics if needed.
 - Add reconnect/resubscribe behavior for OKX market/private channels.
@@ -219,11 +221,12 @@ Unfinished work:
 
 Current state:
 
-- Risk checks exist in code, but are not fully visible in the trading loop or UI.
+- Risk checks exist in code.
+- Paper-mode order submission now applies a minimal max-position risk gate before routing orders.
 
 Unfinished work:
 
-- Wire risk checks into order submission paths.
+- Add richer risk checks to continuous order submission paths.
 - Add circuit-breaker state.
 - Add pause-all and manual unlock flows.
 - Monitor max daily loss, max drawdown, max total position, margin ratio, and liquidation risk.
@@ -252,11 +255,12 @@ Unfinished work:
 Current state:
 
 - Market service has basic polling/watch abstraction.
+- Strategy runtime can share one market data service instance for symbol/timeframe subscriptions.
 - Web API creates market adapters directly for some requests.
 
 Unfinished work:
 
-- Add shared market data service/cache wiring.
+- Add shared cache wiring for market data service consumers.
 - Add cache-miss historical data fetches.
 - Add WebSocket streaming with reconnect and resubscribe.
 - Add missed-message recovery.
@@ -267,16 +271,22 @@ Unfinished work:
 Current state:
 
 - App config covers runtime, OKX, backtest, risk, notifications, and web server settings.
-- Strategy config list is not yet part of `AppConfig`.
+- Strategy configs are persisted in SQLite through `Repository`, not by rewriting YAML files.
+- Persisted strategy config fields keep machine-readable values unchanged: `name`, `strategy_type`, `symbol`, `timeframe`, and JSON `params` keys/values.
+- Strategy config records include `name`, `strategy_type`, `symbol`, `timeframe`, `params`, `enabled`, `created_at`, and `updated_at`.
+- Strategy names are unique and upsertable, so saving the same name updates the existing local config.
+- `/api/strategies` remains backward compatible and still lists built-in strategies when no persisted config exists.
+- `/api/strategies/configs` lists and saves persisted configs, currently restricted to `ma_cross`.
 - Settings writes do not automatically reconfigure all running services.
 
 Unfinished work:
 
-- Add strategy configuration persistence.
+- Add frontend strategy configuration create/update/delete UX.
 - Decide which settings are hot-reloadable and which require restart.
 - Persist runtime state needed for recovery.
 - Add migrations or schema management if repository tables evolve.
 - Keep config editing safe around secrets and live trading mode.
+- Expand persisted strategy execution beyond parameterized `ma_cross`.
 
 ## Notifications and observability
 
@@ -322,10 +332,10 @@ Manual browser smoke checks:
 
 ## Suggested implementation order
 
-1. Wire backtest API to the real engine, cached historical data, and persistent result summaries.
-2. Add historical candle cache-miss fetching from OKX once the cache-only backtest path works.
-3. Extend backend runtime WebSocket events to broadcast paper order, position, and account updates after fills.
-4. Add persisted strategy config management.
-5. Wire risk manager and order manager into the continuous market-data-driven engine loop.
-6. Expand market data streaming, indicators, and chart overlays.
+1. Commit the verified backend runtime checkpoint so the next frontend slice starts from a clean review boundary.
+2. Polish Dashboard and Strategies as runtime-control pages using existing backend data and WebSocket events only.
+3. Add risk/account runtime events, mark-to-market unrealized PnL, and rolling daily PnL once the UI exposes the current runtime state clearly.
+4. Expand market data reliability with shared cache wiring, streaming reconnect/resubscribe, and missed-message recovery.
+5. Add frontend strategy config create/update/delete UX after runtime control feedback is clear.
+6. Expand persisted strategy execution beyond parameterized `ma_cross`.
 7. Add notifications, observability, CI, and deployment packaging.

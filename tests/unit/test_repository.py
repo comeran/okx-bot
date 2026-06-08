@@ -8,6 +8,7 @@ from src.data.models import (
     KlineCache,
     OrderRecord,
     PositionRecord,
+    StrategyConfigRecord,
     TradeRecord,
 )
 from src.data.repository import Repository
@@ -69,6 +70,56 @@ def test_save_and_get_position(repo: Repository):
     positions = repo.get_positions(strategy="ma_cross")
     assert len(positions) == 1
     assert positions[0].leverage == 10
+
+
+def test_upsert_and_list_strategy_configs(repo: Repository):
+    repo.upsert_strategy_config(
+        StrategyConfigRecord(
+            name="ma_cross_btc",
+            strategy_type="ma_cross",
+            symbol="BTC-USDT",
+            timeframe="1h",
+            params={"fast_window": 5, "slow_window": 20},
+            enabled=True,
+            created_at=1700000000000,
+            updated_at=1700000000000,
+        )
+    )
+    repo.upsert_strategy_config(
+        StrategyConfigRecord(
+            name="ma_cross_eth",
+            strategy_type="ma_cross",
+            symbol="ETH-USDT",
+            timeframe="4h",
+            params={"fast_window": 10, "slow_window": 30},
+            enabled=False,
+            created_at=1700000001000,
+            updated_at=1700000001000,
+        )
+    )
+    repo.upsert_strategy_config(
+        StrategyConfigRecord(
+            name="ma_cross_btc",
+            strategy_type="ma_cross",
+            symbol="BTC-USDT-SWAP",
+            timeframe="15m",
+            params={"fast_window": 7, "slow_window": 21},
+            enabled=True,
+            created_at=1,
+            updated_at=1700000002000,
+        )
+    )
+
+    configs = repo.get_strategy_configs()
+    config = repo.get_strategy_config("ma_cross_btc")
+
+    assert [item.name for item in configs] == ["ma_cross_eth", "ma_cross_btc"]
+    assert config is not None
+    assert config.symbol == "BTC-USDT-SWAP"
+    assert config.timeframe == "15m"
+    assert config.params == {"fast_window": 7, "slow_window": 21}
+    assert config.created_at == 1700000000000
+    assert config.updated_at == 1700000002000
 
 
 def test_kline_cache(repo: Repository):

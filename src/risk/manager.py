@@ -22,12 +22,16 @@ class RiskManager:
         max_daily_loss_pct: float = 0.05,
         max_drawdown_pct: float = 0.15,
         require_stop_loss: bool = False,
+        enforce_daily_loss: bool = True,
+        enforce_drawdown: bool = True,
     ) -> None:
         self.position_rule = MaxPositionRule(max_position_pct)
         self.daily_loss_rule = MaxDailyLossRule(max_daily_loss_pct)
         self.drawdown_rule = MaxDrawdownRule(max_drawdown_pct)
         self.stop_loss_rule = StopLossRequiredRule()
         self.require_stop_loss = require_stop_loss
+        self.enforce_daily_loss = enforce_daily_loss
+        self.enforce_drawdown = enforce_drawdown
 
     def check_order(
         self,
@@ -46,13 +50,13 @@ class RiskManager:
         ):
             return RiskCheckResult(False, "Order exceeds maximum position size")
 
-        if not self.daily_loss_rule.check(
+        if self.enforce_daily_loss and not self.daily_loss_rule.check(
             daily_pnl=daily_pnl,
             total_equity=total_equity,
         ):
             return RiskCheckResult(False, "Daily loss exceeds maximum allowed loss")
 
-        if not self.drawdown_rule.check(
+        if self.enforce_drawdown and not self.drawdown_rule.check(
             peak_equity=peak_equity,
             current_equity=current_equity,
         ):

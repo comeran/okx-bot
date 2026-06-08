@@ -1,3 +1,4 @@
+import asyncio
 import subprocess
 import sys
 
@@ -8,7 +9,7 @@ from fastapi.testclient import TestClient
 from httpx import ASGITransport, AsyncClient
 
 from src.core.types import Bar, Order, OrderSide, OrderStatus, OrderType
-from src.data.models import KlineCache
+from src.data.models import KlineCache, StrategyConfigRecord
 from src.strategy.base import BaseStrategy
 from src.strategy.registry import StrategyRegistry
 from src.web import app as web_app
@@ -64,6 +65,614 @@ async def test_get_strategies(app):
 
     assert resp.status_code == 200
     assert {"name": "ma_cross", "status": "stopped"} in resp.json()
+
+
+@pytest.mark.asyncio
+async def test_get_strategies_includes_persisted_configs(monkeypatch):
+    class FakeRepository:
+        def get_strategy_configs(self):
+            return [
+                StrategyConfigRecord(
+                    name="ma_cross_btc",
+                    strategy_type="ma_cross",
+                    symbol="BTC-USDT",
+                    timeframe="1h",
+                    params={"fast_window": 5, "slow_window": 20},
+                    enabled=True,
+                    created_at=1700000000000,
+                    updated_at=1700000000000,
+                )
+            ]
+
+    monkeypatch.setattr(strategy_api, "Repository", FakeRepository, raising=False)
+
+    transport = ASGITransport(app=create_app())
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/strategies")
+
+    assert resp.status_code == 200
+    assert {"name": "ma_cross_btc", "status": "stopped"} in resp.json()
+
+
+@pytest.mark.asyncio
+async def test_strategy_config_api_saves_and_lists_configs(monkeypatch):
+    class FakeRepository:
+        configs = []
+
+        def get_strategy_configs(self):
+            return self.configs
+
+        def upsert_strategy_config(self, config):
+            self.configs = [item for item in self.configs if item.name != config.name]
+            self.configs.append(config)
+            return config
+
+    FakeRepository.configs = []
+    monkeypatch.setattr(strategy_api, "Repository", FakeRepository, raising=False)
+    monkeypatch.setattr(strategy_api, "current_timestamp_ms", lambda: 1700000000000)
+
+    transport = ASGITransport(app=create_app())
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        save_resp = await client.post(
+            "/api/strategies/configs",
+            json={
+                "name": "ma_cross_btc",
+                "strategy_type": "ma_cross",
+                "symbol": "BTC-USDT",
+                "timeframe": "1h",
+                "params": {"fast_window": 5, "slow_window": 20},
+                "enabled": True,
+            },
+        )
+        list_resp = await client.get("/api/strategies/configs")
+
+    assert save_resp.status_code == 200
+    assert save_resp.json() == {
+        "id": None,
+        "name": "ma_cross_btc",
+        "strategy_type": "ma_cross",
+        "symbol": "BTC-USDT",
+        "timeframe": "1h",
+        "params": {"fast_window": 5, "slow_window": 20},
+        "enabled": True,
+        "created_at": 1700000000000,
+        "updated_at": 1700000000000,
+    }
+    assert list_resp.status_code == 200
+    assert [item["name"] for item in list_resp.json()] == ["ma_cross_btc"]
+
+
+def test_create_risk_manager_without_settings_uses_max_position_only(monkeypatch):
+    def missing_settings(path):
+        raise FileNotFoundError
+
+    monkeypatch.setattr(strategy_api, "load_config", missing_settings)
+
+    manager = strategy_api.create_risk_manager()
+
+    assert manager.enforce_daily_loss is False
+    assert manager.enforce_drawdown is False
+
+
+@pytest.mark.asyncio
+async def test_strategy_config_api_rejects_non_ma_cross_strategy_type(monkeypatch):
+    class FakeRepository:
+        def get_strategy_configs(self):
+            return []
+
+    monkeypatch.setattr(strategy_api, "Repository", FakeRepository, raising=False)
+
+    transport = ASGITransport(app=create_app())
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/api/strategies/configs",
+            json={
+                "name": "grid_btc",
+                "strategy_type": "grid",
+                "symbol": "BTC-USDT",
+                "timeframe": "1h",
+                "params": {},
+                "enabled": True,
+            },
+        )
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "Only ma_cross strategy configs are supported"
+
+
+@pytest.mark.asyncio
+async def test_start_persisted_strategy_config_uses_strategy_type_and_params(monkeypatch):
+    class ConfigurableStrategy(BaseStrategy):
+        created = []
+
+        def __init__(
+            self,
+            symbol="BTC-USDT",
+            fast_window=10,
+            slow_window=30,
+            amount=0.1,
+        ):
+            super().__init__()
+            self.symbol = symbol
+            self.fast_window = fast_window
+            self.slow_window = slow_window
+            self.amount = amount
+            self.created.append(self)
+
+        async def on_bar(self, bar):
+            pass
+
+    config = StrategyConfigRecord(
+        name="ma_cross_btc",
+        strategy_type="ma_cross",
+        symbol="BTC-USDT-SWAP",
+        timeframe="15m",
+        params={"fast_window": 5, "slow_window": 20, "amount": 0.2},
+        enabled=True,
+        created_at=1700000000000,
+        updated_at=1700000000000,
+    )
+
+    class FakeRepository:
+        def get_strategy_configs(self):
+            return [config]
+
+        def get_strategy_config(self, name):
+            if name == config.name:
+                return config
+            return None
+
+    registry = StrategyRegistry()
+    registry.register("ma_cross", ConfigurableStrategy)
+    monkeypatch.setattr(strategy_api, "create_strategy_registry", lambda: registry)
+    monkeypatch.setattr(strategy_api, "Repository", FakeRepository, raising=False)
+
+    transport = ASGITransport(app=create_app())
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        start_resp = await client.post("/api/strategies/ma_cross_btc/start")
+        strategies_resp = await client.get("/api/strategies")
+
+    assert start_resp.status_code == 200
+    assert start_resp.json() == {"status": "started", "strategy": "ma_cross_btc"}
+    assert {"name": "ma_cross_btc", "status": "running"} in strategies_resp.json()
+    assert ConfigurableStrategy.created[0].name == "ma_cross_btc"
+    assert ConfigurableStrategy.created[0].symbol == "BTC-USDT-SWAP"
+    assert ConfigurableStrategy.created[0].fast_window == 5
+    assert ConfigurableStrategy.created[0].slow_window == 20
+    assert ConfigurableStrategy.created[0].amount == 0.2
+
+
+@pytest.mark.asyncio
+async def test_start_persisted_strategy_config_can_override_builtin_name(monkeypatch):
+    class ConfigurableStrategy(BaseStrategy):
+        created = []
+
+        def __init__(self, symbol="BTC-USDT", fast_window=10, slow_window=30):
+            super().__init__()
+            self.symbol = symbol
+            self.fast_window = fast_window
+            self.slow_window = slow_window
+            self.created.append(self)
+
+        async def on_bar(self, bar):
+            pass
+
+    config = StrategyConfigRecord(
+        name="ma_cross",
+        strategy_type="ma_cross",
+        symbol="ETH-USDT",
+        timeframe="1h",
+        params={"fast_window": 5, "slow_window": 20},
+        enabled=True,
+        created_at=1700000000000,
+        updated_at=1700000000000,
+    )
+
+    class FakeRepository:
+        def get_strategy_config(self, name):
+            if name == config.name:
+                return config
+            return None
+
+        def get_strategy_configs(self):
+            return [config]
+
+    registry = StrategyRegistry()
+    registry.register("ma_cross", ConfigurableStrategy)
+    monkeypatch.setattr(strategy_api, "create_strategy_registry", lambda: registry)
+    monkeypatch.setattr(strategy_api, "Repository", FakeRepository, raising=False)
+
+    transport = ASGITransport(app=create_app())
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post("/api/strategies/ma_cross/start")
+
+    assert resp.status_code == 200
+    assert ConfigurableStrategy.created[0].name == "ma_cross"
+    assert ConfigurableStrategy.created[0].symbol == "ETH-USDT"
+    assert ConfigurableStrategy.created[0].fast_window == 5
+    assert ConfigurableStrategy.created[0].slow_window == 20
+
+
+@pytest.mark.asyncio
+async def test_start_persisted_strategy_config_broadcasts_startup_error(monkeypatch):
+    config = StrategyConfigRecord(
+        name="bad_ma_cross",
+        strategy_type="ma_cross",
+        symbol="BTC-USDT",
+        timeframe="1m",
+        params={"fast_window": 30, "slow_window": 10},
+        enabled=True,
+        created_at=1700000000000,
+        updated_at=1700000000000,
+    )
+
+    class FakeRepository:
+        def get_strategy_config(self, name):
+            if name == config.name:
+                return config
+            return None
+
+        def get_strategy_configs(self):
+            return [config]
+
+    messages = []
+
+    async def broadcast(message):
+        messages.append(message)
+
+    monkeypatch.setattr(strategy_api, "Repository", FakeRepository, raising=False)
+    monkeypatch.setattr(strategy_api, "current_timestamp_ms", lambda: 1700000000000, raising=False)
+    monkeypatch.setattr(web_app.ws_manager, "broadcast", broadcast)
+
+    app = create_app()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        start_resp = await client.post("/api/strategies/bad_ma_cross/start")
+        strategies_resp = await client.get("/api/strategies")
+
+    assert start_resp.status_code == 400
+    assert {"name": "bad_ma_cross", "status": "stopped"} in strategies_resp.json()
+    assert messages == [
+        {
+            "type": "strategy_status",
+            "strategy": "bad_ma_cross",
+            "status": "stopped",
+            "timestamp": 1700000000000,
+        },
+        {
+            "type": "strategy_error",
+            "strategy": "bad_ma_cross",
+            "error": "fast_window must be less than or equal to slow_window",
+            "timestamp": 1700000000000,
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_persisted_strategy_loop_fills_market_order_from_latest_bar(monkeypatch):
+    class FakeMarketDataService:
+        def __init__(self):
+            self.callbacks = []
+            self.latest_bar = None
+            self._running = False
+
+        def subscribe(self, symbol, timeframe, callback):
+            self.callbacks.append(callback)
+
+        def get_recent_bars(self, symbol, timeframe, count=1):
+            if self.latest_bar is None:
+                return []
+            return [self.latest_bar]
+
+        async def start(self):
+            self._running = True
+
+        async def stop(self):
+            self._running = False
+
+    class MarketBuyingStrategy(BaseStrategy):
+        def __init__(self, symbol="BTC-USDT"):
+            super().__init__()
+            self.symbol = symbol
+
+        async def on_bar(self, bar):
+            await self.buy(self.symbol, 0.1)
+
+    config = StrategyConfigRecord(
+        name="market_buyer_btc",
+        strategy_type="market_buyer",
+        symbol="BTC-USDT",
+        timeframe="1m",
+        params={},
+        enabled=True,
+        created_at=1700000000000,
+        updated_at=1700000000000,
+    )
+
+    class FakeRepository:
+        orders = []
+        trades = []
+        positions = {}
+        accounts = {}
+        ledger = []
+
+        def get_strategy_config(self, name):
+            if name == config.name:
+                return config
+            return None
+
+        def get_strategy_configs(self):
+            return [config]
+
+        def save_order(self, order):
+            self.orders.append(order)
+            return order
+
+        def save_trade(self, trade):
+            self.trades.append(trade)
+            return trade
+
+        def get_orders(self):
+            return self.orders
+
+        def get_account(self, strategy=None):
+            if strategy is None:
+                return next(iter(self.accounts.values()), None)
+            return self.accounts.get(strategy)
+
+        def upsert_account(self, account):
+            self.accounts[account.strategy] = account
+            return account
+
+        def get_position(self, strategy, symbol):
+            return self.positions.get((strategy, symbol))
+
+        def upsert_position(self, position):
+            self.positions[(position.strategy, position.symbol)] = position
+            return position
+
+        def delete_position(self, strategy, symbol):
+            self.positions.pop((strategy, symbol), None)
+
+        def get_open_positions(self, strategy=None):
+            return [
+                position
+                for position in self.positions.values()
+                if position.amount != 0 and (strategy is None or position.strategy == strategy)
+            ]
+
+        def save_cash_ledger(self, entry):
+            self.ledger.append(entry)
+            return entry
+
+    FakeRepository.orders = []
+    FakeRepository.trades = []
+    FakeRepository.positions = {}
+    FakeRepository.accounts = {}
+    FakeRepository.ledger = []
+    market_data = FakeMarketDataService()
+    registry = StrategyRegistry()
+    registry.register("market_buyer", MarketBuyingStrategy)
+    monkeypatch.setattr(strategy_api, "create_strategy_registry", lambda: registry)
+    monkeypatch.setattr(strategy_api, "Repository", FakeRepository, raising=False)
+    monkeypatch.setattr(
+        strategy_api,
+        "create_market_data_service",
+        lambda: market_data,
+        raising=False,
+    )
+    monkeypatch.setattr(strategy_api, "current_timestamp_ms", lambda: 1700000000000, raising=False)
+
+    app = create_app()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        start_resp = await client.post("/api/strategies/market_buyer_btc/start")
+        market_data.latest_bar = Bar(1, 50000.0, 50000.0, 50000.0, 50000.0, 1.0)
+        await market_data.callbacks[0](market_data.latest_bar)
+
+    assert start_resp.status_code == 200
+    assert FakeRepository.orders[0].status == "filled"
+    assert FakeRepository.orders[0].fill_price == 50000.0
+    assert FakeRepository.trades[0].price == 50000.0
+
+
+@pytest.mark.asyncio
+async def test_start_persisted_strategy_stays_stopped_when_initial_bar_fails(monkeypatch):
+    class ImmediateMarketDataService:
+        def __init__(self):
+            self.callbacks = []
+            self._running = False
+
+        def subscribe(self, symbol, timeframe, callback):
+            self.callbacks.append(callback)
+
+        async def start(self):
+            self._running = True
+            await self.callbacks[0](Bar(1, 1, 1, 1, 1, 1))
+
+        async def stop(self):
+            self._running = False
+
+    class BrokenStrategy(BaseStrategy):
+        def __init__(self, symbol="BTC-USDT"):
+            super().__init__()
+            self.symbol = symbol
+
+        async def on_bar(self, bar):
+            await asyncio.sleep(0)
+            raise RuntimeError("boom")
+
+    config = StrategyConfigRecord(
+        name="broken_on_start_btc",
+        strategy_type="broken_on_start",
+        symbol="BTC-USDT",
+        timeframe="1m",
+        params={},
+        enabled=True,
+        created_at=1700000000000,
+        updated_at=1700000000000,
+    )
+
+    class FakeRepository:
+        def get_strategy_config(self, name):
+            if name == config.name:
+                return config
+            return None
+
+        def get_strategy_configs(self):
+            return [config]
+
+        def get_open_positions(self, strategy=None):
+            return []
+
+        def get_orders(self):
+            return []
+
+        def get_account(self, strategy=None):
+            return None
+
+    market_data = ImmediateMarketDataService()
+    messages = []
+
+    async def broadcast(message):
+        messages.append(message)
+
+    registry = StrategyRegistry()
+    registry.register("broken_on_start", BrokenStrategy)
+    monkeypatch.setattr(strategy_api, "create_strategy_registry", lambda: registry)
+    monkeypatch.setattr(strategy_api, "Repository", FakeRepository, raising=False)
+    monkeypatch.setattr(
+        strategy_api,
+        "create_market_data_service",
+        lambda: market_data,
+        raising=False,
+    )
+    monkeypatch.setattr(strategy_api, "current_timestamp_ms", lambda: 1700000000000)
+    monkeypatch.setattr(web_app.ws_manager, "broadcast", broadcast)
+
+    app = create_app()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        start_resp = await client.post("/api/strategies/broken_on_start_btc/start")
+        strategies_resp = await client.get("/api/strategies")
+
+    assert start_resp.status_code == 400
+    assert start_resp.json()["detail"] == "boom"
+    assert {"name": "broken_on_start_btc", "status": "stopped"} in strategies_resp.json()
+    assert messages == [
+        {
+            "type": "strategy_status",
+            "strategy": "broken_on_start_btc",
+            "status": "stopped",
+            "timestamp": 1700000000000,
+        },
+        {
+            "type": "strategy_error",
+            "strategy": "broken_on_start_btc",
+            "error": "boom",
+            "timestamp": 1700000000000,
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_persisted_strategy_loop_broadcasts_error_and_stops_strategy(monkeypatch):
+    class FakeMarketDataService:
+        def __init__(self):
+            self.callbacks = []
+            self.subscription = None
+            self._running = False
+
+        def subscribe(self, symbol, timeframe, callback):
+            self.subscription = (symbol, timeframe)
+            self.callbacks.append(callback)
+
+        async def start(self):
+            self._running = True
+
+        async def stop(self):
+            self._running = False
+
+    class BrokenStrategy(BaseStrategy):
+        def __init__(self, symbol="BTC-USDT"):
+            super().__init__()
+            self.symbol = symbol
+
+        async def on_bar(self, bar):
+            raise RuntimeError("boom")
+
+    config = StrategyConfigRecord(
+        name="broken_btc",
+        strategy_type="broken",
+        symbol="BTC-USDT",
+        timeframe="1m",
+        params={},
+        enabled=True,
+        created_at=1700000000000,
+        updated_at=1700000000000,
+    )
+
+    class FakeRepository:
+        def get_strategy_config(self, name):
+            if name == config.name:
+                return config
+            return None
+
+        def get_strategy_configs(self):
+            return [config]
+
+        def get_open_positions(self, strategy=None):
+            return []
+
+        def get_orders(self):
+            return []
+
+        def get_account(self, strategy=None):
+            return None
+
+    market_data = FakeMarketDataService()
+    messages = []
+
+    async def broadcast(message):
+        messages.append(message)
+
+    registry = StrategyRegistry()
+    registry.register("broken", BrokenStrategy)
+    monkeypatch.setattr(strategy_api, "create_strategy_registry", lambda: registry)
+    monkeypatch.setattr(strategy_api, "Repository", FakeRepository, raising=False)
+    monkeypatch.setattr(
+        strategy_api,
+        "create_market_data_service",
+        lambda: market_data,
+        raising=False,
+    )
+    monkeypatch.setattr(strategy_api, "current_timestamp_ms", lambda: 1700000000000, raising=False)
+    monkeypatch.setattr(web_app.ws_manager, "broadcast", broadcast)
+
+    app = create_app()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        start_resp = await client.post("/api/strategies/broken_btc/start")
+        await market_data.callbacks[0](Bar(1, 1, 1, 1, 1, 1))
+        strategies_resp = await client.get("/api/strategies")
+
+    assert start_resp.status_code == 200
+    assert market_data.subscription == ("BTC-USDT", "1m")
+    assert {"name": "broken_btc", "status": "stopped"} in strategies_resp.json()
+    assert messages[-2:] == [
+        {
+            "type": "strategy_status",
+            "strategy": "broken_btc",
+            "status": "stopped",
+            "timestamp": 1700000000000,
+        },
+        {
+            "type": "strategy_error",
+            "strategy": "broken_btc",
+            "error": "boom",
+            "timestamp": 1700000000000,
+        },
+    ]
 
 
 @pytest.mark.asyncio
@@ -760,7 +1369,41 @@ def test_websocket_snapshot_reflects_running_strategy_status():
             snapshot = websocket.receive_json()
 
     assert resp.status_code == 200
-    assert snapshot["data"]["strategies"] == [{"name": "ma_cross", "status": "running"}]
+    assert {"name": "ma_cross", "status": "running"} in snapshot["data"]["strategies"]
+
+
+def test_websocket_snapshot_includes_persisted_strategy_configs(monkeypatch):
+    config = StrategyConfigRecord(
+        name="ma_cross_btc",
+        strategy_type="ma_cross",
+        symbol="BTC-USDT",
+        timeframe="1h",
+        params={"fast_window": 5, "slow_window": 20},
+        enabled=True,
+        created_at=1700000000000,
+        updated_at=1700000000000,
+    )
+
+    class FakeRepository:
+        def get_account(self, strategy=None):
+            return None
+
+        def get_open_positions(self, strategy=None):
+            return []
+
+        def get_orders(self):
+            return []
+
+        def get_strategy_configs(self):
+            return [config]
+
+    monkeypatch.setattr(web_app, "Repository", FakeRepository, raising=False)
+
+    with TestClient(create_app()) as client:
+        with client.websocket_connect("/ws") as websocket:
+            snapshot = websocket.receive_json()
+
+    assert {"name": "ma_cross_btc", "status": "stopped"} in snapshot["data"]["strategies"]
 
 
 @pytest.mark.asyncio

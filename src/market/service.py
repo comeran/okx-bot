@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections import deque
 from collections.abc import Awaitable, Callable
 
@@ -17,6 +18,7 @@ class MarketDataService:
         self._exchange = ccxt.okx({"apiKey": api_key, "secret": secret, "password": passphrase})
         self._subscriptions: dict[str, list[BarCallback]] = {}
         self._buffers: dict[str, deque[Bar]] = {}
+        self._last_bar_timestamps: dict[str, int] = {}
         self._running = False
 
     def subscribe(self, symbol: str, timeframe: str, callback: BarCallback) -> None:
@@ -45,14 +47,18 @@ class MarketDataService:
             raise RuntimeError("Exchange does not support OHLCV data")
 
         for row in rows:
+            timestamp = int(row[0])
+            if timestamp <= self._last_bar_timestamps.get(key, 0):
+                continue
             bar = Bar(
-                timestamp=int(row[0]),
+                timestamp=timestamp,
                 open=float(row[1]),
                 high=float(row[2]),
                 low=float(row[3]),
                 close=float(row[4]),
                 volume=float(row[5]),
             )
+            self._last_bar_timestamps[key] = timestamp
             self._buffers.setdefault(key, deque(maxlen=1000)).append(bar)
             for callback in self._subscriptions.get(key, []):
                 await callback(bar)
@@ -62,10 +68,10 @@ class MarketDataService:
         while self._running:
             for key in list(self._subscriptions):
                 symbol, timeframe = key.split(":", 1)
-                try:
+                with contextlib.suppress(Exception):
                     await self._poll_once(symbol, timeframe)
-                except Exception:
-                    await asyncio.sleep(1)
+            if self._running:
+                await asyncio.sleep(1)
 
     async def stop(self) -> None:
         self._running = False

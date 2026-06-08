@@ -8,9 +8,9 @@ class StrategyRegistry:
     def register(self, name: str, cls: type[BaseStrategy]) -> None:
         self._strategies[name] = cls
 
-    def create(self, name: str) -> BaseStrategy:
+    def create(self, name: str, **params) -> BaseStrategy:
         strategy_cls = self._strategies[name]
-        strategy = strategy_cls()
+        strategy = strategy_cls(**params)
         strategy.name = name
         return strategy
 

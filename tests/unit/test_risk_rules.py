@@ -108,3 +108,23 @@ def test_risk_manager_rejects_missing_stop_loss() -> None:
 
     assert not result.passed
     assert "stop" in result.reason.lower()
+
+
+def test_risk_manager_can_run_max_position_only() -> None:
+    manager = RiskManager(
+        max_position_pct=0.8,
+        enforce_daily_loss=False,
+        enforce_drawdown=False,
+    )
+
+    result = manager.check_order(
+        order=make_order(stop_loss=None),
+        current_position_value=5_000,
+        total_equity=100_000,
+        order_value=5_000,
+        daily_pnl=-99_000,
+        peak_equity=100_000,
+        current_equity=1_000,
+    )
+
+    assert result.passed

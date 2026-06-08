@@ -2,15 +2,20 @@ from __future__ import annotations
 
 import time
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
 
 from src.core.config import BacktestConfig, load_config
 from src.core.engine import BotEngine
 from src.core.types import Order, OrderStatus, OrderType
+from src.data.models import StrategyConfigRecord
 from src.data.repository import Repository
+from src.market.service import MarketDataService
 from src.order.manager import UnifiedOrderManager
 from src.order.router import OrderHandler, OrderRouter
+from src.risk.manager import RiskManager
 from src.strategy.builtin.ma_cross import register_ma_cross
 from src.strategy.registry import StrategyRegistry
 from src.web.api import trading
@@ -18,6 +23,15 @@ from src.web.api import trading
 PriceProvider = Callable[[str], float | None]
 RuntimeBroadcaster = Callable[[dict[str, object]], Awaitable[None]]
 OrderUpdateCallback = Callable[[str], Awaitable[None]]
+
+
+class StrategyConfigRequest(BaseModel):
+    name: str
+    strategy_type: str
+    symbol: str
+    timeframe: str
+    params: dict[str, Any] = Field(default_factory=dict)
+    enabled: bool = True
 
 
 def current_timestamp_ms() -> int:
@@ -61,6 +75,26 @@ def paper_backtest_config() -> BacktestConfig:
         return BacktestConfig()
 
 
+def create_market_data_service() -> MarketDataService:
+    try:
+        exchange = load_config("config/settings.yaml").exchange
+    except FileNotFoundError:
+        return MarketDataService("", "", "")
+    return MarketDataService(exchange.api_key, exchange.secret, exchange.passphrase)
+
+
+def create_risk_manager() -> RiskManager:
+    try:
+        risk = load_config("config/settings.yaml").risk
+    except FileNotFoundError:
+        return RiskManager(enforce_daily_loss=False, enforce_drawdown=False)
+    return RiskManager(
+        max_position_pct=risk.max_total_position_pct,
+        enforce_daily_loss=False,
+        enforce_drawdown=False,
+    )
+
+
 def create_order_manager(
     latest_price: PriceProvider | None = None,
     repository: Repository | None = None,
@@ -76,6 +110,8 @@ def create_order_manager(
         initial_equity=backtest_config.initial_capital,
         fee_rate=backtest_config.fee_rate,
         on_order_update=on_order_update,
+        risk_manager=create_risk_manager(),
+        price_provider=latest_price,
     )
 
 
@@ -93,6 +129,7 @@ class StrategyRuntimeState:
     def __init__(self, registry: StrategyRegistry | None = None) -> None:
         self.registry = registry or create_strategy_registry()
         self.strategy_status = {name: "stopped" for name in self.registry.list_strategies()}
+        self.strategy_errors: dict[str, str] = {}
         self.engines: dict[str, BotEngine] = {}
 
     def list_strategies(self) -> list[dict[str, str]]:
@@ -111,9 +148,49 @@ def create_router(
 ) -> APIRouter:
     router = APIRouter()
     runtime = runtime or StrategyRuntimeState()
+    config_repository = Repository()
+    market_data_service = create_market_data_service()
+
+    def get_persisted_strategy_config(name: str) -> StrategyConfigRecord | None:
+        get_strategy_config = getattr(config_repository, "get_strategy_config", None)
+        if get_strategy_config is not None:
+            return get_strategy_config(name)
+        get_strategy_configs = getattr(config_repository, "get_strategy_configs", None)
+        if get_strategy_configs is None:
+            return None
+        return next(
+            (config for config in get_strategy_configs() if config.name == name),
+            None,
+        )
 
     def strategy_exists(name: str) -> bool:
-        return name in runtime.strategy_status
+        return name in runtime.strategy_status or get_persisted_strategy_config(name) is not None
+
+    def create_strategy(name: str):
+        config = get_persisted_strategy_config(name)
+        if config is None:
+            return runtime.registry.create(name)
+        if config.strategy_type not in runtime.registry.list_strategies():
+            raise HTTPException(status_code=404, detail="Strategy not found")
+        params = {**config.params, "symbol": config.symbol}
+        strategy = runtime.registry.create(config.strategy_type, **params)
+        strategy.name = config.name
+        strategy.timeframe = config.timeframe
+        runtime.strategy_status.setdefault(config.name, "stopped")
+        return strategy
+
+    def latest_price_for_strategy(strategy) -> PriceProvider:
+        timeframe = getattr(strategy, "timeframe", None)
+
+        def latest_price(symbol: str) -> float | None:
+            if timeframe is None:
+                return None
+            bars = market_data_service.get_recent_bars(symbol, timeframe, count=1)
+            if not bars:
+                return None
+            return bars[-1].close
+
+        return latest_price
 
     async def broadcast_status(name: str) -> None:
         if broadcast is None:
@@ -126,6 +203,21 @@ def create_router(
                 "timestamp": current_timestamp_ms(),
             }
         )
+
+    async def handle_strategy_error(name: str, error: Exception) -> None:
+        runtime.strategy_status[name] = "stopped"
+        runtime.strategy_errors[name] = str(error)
+        runtime.engines.pop(name, None)
+        await broadcast_status(name)
+        if broadcast is not None:
+            await broadcast(
+                {
+                    "type": "strategy_error",
+                    "strategy": name,
+                    "error": str(error),
+                    "timestamp": current_timestamp_ms(),
+                }
+            )
 
     async def broadcast_trading_updates(repository: Repository, strategy: str) -> None:
         if broadcast is None:
@@ -146,32 +238,93 @@ def create_router(
             }
         )
 
+    def serialize_strategy_config(config: StrategyConfigRecord) -> dict[str, Any]:
+        return config.model_dump()
+
+    def list_persisted_strategy_statuses() -> list[dict[str, str]]:
+        return [
+            {
+                "name": config.name,
+                "status": runtime.strategy_status.get(config.name, "stopped"),
+            }
+            for config in config_repository.get_strategy_configs()
+        ]
+
     @router.get("")
     async def list_strategies() -> list[dict[str, str]]:
-        return runtime.list_strategies()
+        strategies = runtime.list_strategies()
+        known_names = {strategy["name"] for strategy in strategies}
+        for strategy in list_persisted_strategy_statuses():
+            if strategy["name"] not in known_names:
+                strategies.append(strategy)
+        return strategies
+
+    @router.get("/configs")
+    async def list_strategy_configs() -> list[dict[str, Any]]:
+        return [
+            serialize_strategy_config(config) for config in config_repository.get_strategy_configs()
+        ]
+
+    @router.post("/configs")
+    async def save_strategy_config(config: StrategyConfigRequest) -> dict[str, Any]:
+        if config.strategy_type != "ma_cross":
+            raise HTTPException(
+                status_code=400,
+                detail="Only ma_cross strategy configs are supported",
+            )
+        now = current_timestamp_ms()
+        saved = config_repository.upsert_strategy_config(
+            StrategyConfigRecord(
+                name=config.name,
+                strategy_type=config.strategy_type,
+                symbol=config.symbol,
+                timeframe=config.timeframe,
+                params=config.params,
+                enabled=config.enabled,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        runtime.strategy_status.setdefault(saved.name, "stopped")
+        return serialize_strategy_config(saved)
 
     @router.post("/{name}/start")
     async def start_strategy(name: str) -> dict[str, str]:
         if not strategy_exists(name):
             raise HTTPException(status_code=404, detail="Strategy not found")
         if name not in runtime.engines:
-            repository = Repository()
-            strategy = runtime.registry.create(name)
-            set_order_manager = getattr(strategy, "set_order_manager", None)
-            if set_order_manager is not None:
-                set_order_manager(
-                    create_order_manager(
-                        repository=repository,
-                        on_order_update=lambda strategy_name: broadcast_trading_updates(
-                            repository,
-                            strategy_name,
-                        ),
+            try:
+                repository = Repository()
+                strategy = create_strategy(name)
+                set_order_manager = getattr(strategy, "set_order_manager", None)
+                if set_order_manager is not None:
+                    set_order_manager(
+                        create_order_manager(
+                            latest_price=latest_price_for_strategy(strategy),
+                            repository=repository,
+                            on_order_update=lambda strategy_name: broadcast_trading_updates(
+                                repository,
+                                strategy_name,
+                            ),
+                        )
                     )
+                engine = BotEngine(
+                    strategies=[strategy],
+                    market_data_service=market_data_service,
+                    on_strategy_error=handle_strategy_error,
+                    stop_market_data_on_stop=False,
                 )
-            engine = BotEngine(strategies=[strategy])
-            await engine.start()
-            runtime.engines[name] = engine
+                await engine.start()
+                if name in runtime.strategy_errors:
+                    raise HTTPException(status_code=400, detail=runtime.strategy_errors[name])
+                runtime.engines[name] = engine
+            except HTTPException:
+                raise
+            except Exception as exc:
+                await handle_strategy_error(name, exc)
+                raise HTTPException(status_code=400, detail=str(exc)) from None
         runtime.strategy_status[name] = "running"
+        runtime.strategy_errors.pop(name, None)
         await broadcast_status(name)
         return {"status": "started", "strategy": name}
 

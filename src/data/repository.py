@@ -11,6 +11,7 @@ from src.data.models import (
     KlineCache,
     OrderRecord,
     PositionRecord,
+    StrategyConfigRecord,
     TradeRecord,
 )
 
@@ -103,6 +104,43 @@ class Repository:
         statement = select(TradeRecord)
         if strategy is not None:
             statement = statement.where(TradeRecord.strategy == strategy)
+        with Session(self.engine) as session:
+            return list(session.exec(statement).all())
+
+    def upsert_strategy_config(
+        self, config: StrategyConfigRecord
+    ) -> StrategyConfigRecord:
+        with Session(self.engine) as session:
+            existing = session.exec(
+                select(StrategyConfigRecord).where(StrategyConfigRecord.name == config.name)
+            ).first()
+            if existing is None:
+                session.add(config)
+                session.commit()
+                session.refresh(config)
+                return config
+
+            existing.strategy_type = config.strategy_type
+            existing.symbol = config.symbol
+            existing.timeframe = config.timeframe
+            existing.params = config.params
+            existing.enabled = config.enabled
+            existing.updated_at = config.updated_at
+            session.add(existing)
+            session.commit()
+            session.refresh(existing)
+            return existing
+
+    def get_strategy_config(self, name: str) -> StrategyConfigRecord | None:
+        with Session(self.engine) as session:
+            return session.exec(
+                select(StrategyConfigRecord).where(StrategyConfigRecord.name == name)
+            ).first()
+
+    def get_strategy_configs(self) -> list[StrategyConfigRecord]:
+        statement = select(StrategyConfigRecord).order_by(
+            StrategyConfigRecord.created_at.desc()
+        )
         with Session(self.engine) as session:
             return list(session.exec(statement).all())
 

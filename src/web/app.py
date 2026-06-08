@@ -19,13 +19,25 @@ def runtime_snapshot(strategy_runtime: strategies.StrategyRuntimeState) -> dict[
     )
     orders = repository.get_orders() if hasattr(repository, "get_orders") else []
     account = repository.get_account() if hasattr(repository, "get_account") else None
+    strategy_statuses = strategy_runtime.list_strategies()
+    known_strategy_names = {strategy["name"] for strategy in strategy_statuses}
+    get_strategy_configs = getattr(repository, "get_strategy_configs", None)
+    if get_strategy_configs is not None:
+        for config in get_strategy_configs():
+            if config.name not in known_strategy_names:
+                strategy_statuses.append(
+                    {
+                        "name": config.name,
+                        "status": strategy_runtime.strategy_status.get(config.name, "stopped"),
+                    }
+                )
     return {
         "type": "snapshot",
         "data": {
             "account": trading.serialize_account(account),
             "positions": trading.serialize_records(positions),
             "orders": trading.serialize_records(orders),
-            "strategies": strategy_runtime.list_strategies(),
+            "strategies": strategy_statuses,
         },
     }
 

@@ -1,3 +1,6 @@
+from typing import Any
+
+from sqlalchemy import JSON, Column
 from sqlmodel import Field, SQLModel
 
 
@@ -75,6 +78,18 @@ class KlineCache(SQLModel, table=True):
     low: float
     close: float
     volume: float
+
+
+class StrategyConfigRecord(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    name: str = Field(index=True, unique=True)
+    strategy_type: str = Field(index=True)
+    symbol: str
+    timeframe: str
+    params: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    enabled: bool = True
+    created_at: int = Field(index=True)
+    updated_at: int = Field(index=True)
 
 
 class BacktestResultRecord(SQLModel, table=True):
