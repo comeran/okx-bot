@@ -1,0 +1,20 @@
+.gitignore
+  s_b929a4cbd32e4b::t_5c59bb98905831 20-25
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "b4eee2fd5dcde5d038f69a301b01f00c76bee023",
+  "prompts": {},
+  "logical_commit_id": "b4eee2fd5dcde5d038f69a301b01f00c76bee023",
+  "sessions": {
+    "s_b929a4cbd32e4b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d82de29f-2dfc-4f86-bf3e-7ec2ace1cf0f",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Zane <zane@bigo.sg>"
+    }
+  }
+}
