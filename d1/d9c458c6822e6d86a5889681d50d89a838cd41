@@ -1,0 +1,127 @@
+tests/unit/test_engine.py
+  s_b929a4cbd32e4b::t_1cc80f88809c96 1-3
+  s_b929a4cbd32e4b::t_a38bd6e7866a2e 4-76,146-171
+  s_b929a4cbd32e4b::t_b4da6860d9fc81 77-111
+  s_b929a4cbd32e4b::t_8d8bd5932faac8 112-145
+src/order/manager.py
+  s_b929a4cbd32e4b::t_af71618acc3253 21
+  s_b929a4cbd32e4b::t_257d753f2ddfcf 56-62
+  s_b929a4cbd32e4b::t_039c56a95f8948 87-99,111-116,118,120-124
+  s_b929a4cbd32e4b::t_498da984183fce 103-110
+  s_b929a4cbd32e4b::t_e1c219d2cfaaaf 100-102
+  s_b929a4cbd32e4b::t_9b4438ddf83baf 20,29
+  s_b929a4cbd32e4b::t_f18497b775475f 117,119
+  s_b929a4cbd32e4b::t_5416d5e8157c9f 30
+tests/unit/test_repository.py
+  s_b929a4cbd32e4b::t_4cae9eb4510a0f 75-122
+  s_b929a4cbd32e4b::t_b1ba3e97fb9805 11
+src/strategy/registry.py
+  s_b929a4cbd32e4b::t_56bf169c1414d6 11,13
+src/data/repository.py
+  s_b929a4cbd32e4b::t_fe09f14e4bd3ea 110-143
+  s_b929a4cbd32e4b::t_c5a81594351cee 14
+src/risk/manager.py
+  s_b929a4cbd32e4b::t_472c01044151aa 25-26,33-34
+  s_b929a4cbd32e4b::t_d7868520b83a80 53,59
+tests/unit/test_market_service.py
+  s_b929a4cbd32e4b::t_e9859d94009a30 102-165
+src/web/api/strategies.py
+  s_b929a4cbd32e4b::t_b47732ddf60e41 318-319
+  s_b929a4cbd32e4b::t_da00838ad2698c 250,265
+  s_b929a4cbd32e4b::t_4398e22c5ff73a 5
+  s_b929a4cbd32e4b::t_3aae7c2602ecbf 182-193
+  s_b929a4cbd32e4b::t_81714feb3f51d9 296-309,311-315,317,320-325,327
+  s_b929a4cbd32e4b::t_e58dd71ae734f8 15,18
+  s_b929a4cbd32e4b::t_23aa13df0b299f 78-83,86-89,96-97
+  s_b929a4cbd32e4b::t_78296d3c04812c 270-274
+  s_b929a4cbd32e4b::t_1b9c766e1419fe 8
+  s_b929a4cbd32e4b::t_dfbf8afe3e95b7 28-32,34-36
+  s_b929a4cbd32e4b::t_1893972f8ff6e9 113
+  s_b929a4cbd32e4b::t_3346635519ee3d 13
+  s_b929a4cbd32e4b::t_00e7854196930b 114
+  s_b929a4cbd32e4b::t_c3518cee82cc19 154-157,161,163-164,167,170,174
+  s_b929a4cbd32e4b::t_0c97c1eacd7815 158-160,162
+  s_b929a4cbd32e4b::t_a65a0e8d229a9e 171-173
+  s_b929a4cbd32e4b::t_986c5adf2dbb61 90
+  s_b929a4cbd32e4b::t_afb609051c9e6d 132
+  s_b929a4cbd32e4b::t_cf7f6173eed578 168-169,175-177,179-180
+  s_b929a4cbd32e4b::t_a28357fba4817e 178
+  s_b929a4cbd32e4b::t_0c7b0469d16694 152
+  s_b929a4cbd32e4b::t_f020c6463d8735 241-249,251,255-264,266-269,275,277-289
+  s_b929a4cbd32e4b::t_b118d247416e66 151
+  s_b929a4cbd32e4b::t_799fbb072de55b 91-95
+  s_b929a4cbd32e4b::t_199c7fce279b39 33
+  s_b929a4cbd32e4b::t_658f41b93661ca 207-221
+  s_b929a4cbd32e4b::t_e97322c42d749f 276
+tests/integration/test_web_api.py
+  s_b929a4cbd32e4b::t_25846655959f00 1
+  s_b929a4cbd32e4b::t_25dcb808da370e 297-351
+  s_b929a4cbd32e4b::t_8f5c65a7b83906 12
+  s_b929a4cbd32e4b::t_022af9cee0e516 579-642,649-678
+  s_b929a4cbd32e4b::t_79961f8bc28e74 145-156
+  s_b929a4cbd32e4b::t_c4e5344816ef1f 643-648
+  s_b929a4cbd32e4b::t_6aa54f02c965d6 246-296
+  s_b929a4cbd32e4b::t_fefe17d2336554 71-144,157
+  s_b929a4cbd32e4b::t_9567d507a87737 184-245
+  s_b929a4cbd32e4b::t_dd0ba54e0bf378 158-183
+  s_b929a4cbd32e4b::t_c6bcb5dc034604 352-479
+  s_b929a4cbd32e4b::t_ccd5c3ce5098ee 1372
+  s_b929a4cbd32e4b::t_4e2e7bdcbf4197 480-501,503-578
+  s_b929a4cbd32e4b::t_cd7f2ca3471696 502
+  s_b929a4cbd32e4b::t_d23b8bda493f3f 1375-1406
+src/data/models.py
+  s_b929a4cbd32e4b::t_7072103fc2333a 83-92
+  s_b929a4cbd32e4b::t_bdf4d07f4c0876 1-3
+tests/unit/test_order_router.py
+  s_b929a4cbd32e4b::t_a1cad1241c7446 4,7
+  s_b929a4cbd32e4b::t_7fea623785f0b4 287-340
+  s_b929a4cbd32e4b::t_6a620c370099cc 341-386
+  s_b929a4cbd32e4b::t_ee845a3c720c72 387-436
+tests/unit/test_risk_rules.py
+  s_b929a4cbd32e4b::t_14502021dc18b1 111-130
+src/market/service.py
+  s_b929a4cbd32e4b::t_71b689305e640f 71,73-74
+  s_b929a4cbd32e4b::t_ad04ac60b1bc9b 50-52,54,61
+  s_b929a4cbd32e4b::t_dc0374974766b5 4
+  s_b929a4cbd32e4b::t_34fa6caeca614b 21
+src/web/app.py
+  s_b929a4cbd32e4b::t_a5c897d8ec1da8 22-33,40
+src/core/engine.py
+  s_b929a4cbd32e4b::t_bfedcdd03a6b9a 69
+  s_b929a4cbd32e4b::t_7542284cad61d4 43-44
+  s_b929a4cbd32e4b::t_c8087de530b07d 51-54
+  s_b929a4cbd32e4b::t_d126a287bb2a07 28
+  s_b929a4cbd32e4b::t_024d0fda3d8d54 39-40
+  s_b929a4cbd32e4b::t_27c1356db661d6 3-5,8,10-12,14-20,22-24,26-27,33,37,48-50,56-68,70-79,81,90-91,96-108
+  s_b929a4cbd32e4b::t_f115b604b6ac33 80,82-89,92-95
+  s_b929a4cbd32e4b::t_e000f9eb2aee4b 42
+  s_b929a4cbd32e4b::t_6a784fcd4e406c 41
+  s_b929a4cbd32e4b::t_f3e675323b27d4 29
+docs/superpowers/plans/2026-06-03-okx-bot-next-steps.md
+  s_b929a4cbd32e4b::t_4bbb1820b5dd08 61-62,64
+  s_b929a4cbd32e4b::t_8ab94a7a87d447 206,208-209,214
+  s_b929a4cbd32e4b::t_3332911a30d3a3 258,263
+  s_b929a4cbd32e4b::t_e2233c45a91bfc 335-340
+  s_b929a4cbd32e4b::t_fb348a3152cb48 82-84,88,93
+  s_b929a4cbd32e4b::t_965c7374e2c3ed 189-192,196,198
+  s_b929a4cbd32e4b::t_39ce0cd72f06b6 277-278
+  s_b929a4cbd32e4b::t_c3256330e208ff 224-225,229
+  s_b929a4cbd32e4b::t_512ee6e995b45e 274-276,279,284,289
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "d1d9c458c6822e6d86a5889681d50d89a838cd41",
+  "prompts": {},
+  "logical_commit_id": "d1d9c458c6822e6d86a5889681d50d89a838cd41",
+  "sessions": {
+    "s_b929a4cbd32e4b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d82de29f-2dfc-4f86-bf3e-7ec2ace1cf0f",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Zane <zane@bigo.sg>"
+    }
+  }
+}
