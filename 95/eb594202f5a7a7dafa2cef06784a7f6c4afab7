@@ -1,0 +1,66 @@
+frontend/src/utils/dashboard.test.ts
+  s_b929a4cbd32e4b::t_94e292bfff5c6a 1-52
+frontend/src/types/dashboard.ts
+  s_b929a4cbd32e4b::t_617b56dfca52bb 106-119
+  s_b929a4cbd32e4b::t_e93f104d0dbb85 137-138
+frontend/src/utils/dashboard.ts
+  s_b929a4cbd32e4b::t_ab6d3d47e38ef7 1-66
+frontend/src/views/Dashboard.vue
+  s_b929a4cbd32e4b::t_480c878c8c50ac 185,225
+  s_b929a4cbd32e4b::t_06b3ee3bbce7dd 24
+  s_b929a4cbd32e4b::t_d67434a3fdced8 198-210
+  s_b929a4cbd32e4b::t_b27ad058183fdc 141,144,167,170,173,182
+  s_b929a4cbd32e4b::t_30fb7230d2be8b 219-222
+  s_b929a4cbd32e4b::t_9e6c2bf54dab42 227-230
+  s_b929a4cbd32e4b::t_96a7e258950836 67,73,79,85,91,156
+  s_b929a4cbd32e4b::t_e076f638d876e7 7-15
+  s_b929a4cbd32e4b::t_a005c716dacfc7 147,150,153,176,179
+  s_b929a4cbd32e4b::t_a1eada322fc9c1 276-280
+frontend/src/main.ts
+  s_b929a4cbd32e4b::t_d1f76799e30297 8,10-11
+frontend/src/monaco.ts
+  s_b929a4cbd32e4b::t_8a61f8268e9e4f 1-26
+frontend/src/stores/dashboard.test.ts
+  s_b929a4cbd32e4b::t_0b3b07ef2d4009 109-152
+frontend/src/locales/zh-CN.ts
+  s_b929a4cbd32e4b::t_2a358d68960966 65
+  s_b929a4cbd32e4b::t_d62d194a6f7936 78
+frontend/src/i18n.test.ts
+  s_b929a4cbd32e4b::t_609db4e7000c0c 20-22,27-29
+frontend/src/monaco.test.ts
+  s_b929a4cbd32e4b::t_f6f6b651a3e98f 1-21
+docs/superpowers/plans/2026-06-08-runtime-ui-polish.md
+  s_b929a4cbd32e4b::t_8621f11409e224 710
+  s_b929a4cbd32e4b::t_972c8e98be30e1 1-654,707-709,711
+  s_b929a4cbd32e4b::t_6856d47264c2cf 655-706
+frontend/src/vite-env.d.ts
+  s_b929a4cbd32e4b::t_df184a29a81dff 1
+frontend/src/views/Strategy.vue
+  s_b929a4cbd32e4b::t_68e334a842f4d4 209-211
+  s_b929a4cbd32e4b::t_201e32fe1c37df 130-132
+frontend/src/locales/en.ts
+  s_b929a4cbd32e4b::t_92c6f928db6cb1 78
+  s_b929a4cbd32e4b::t_d1440094cb739d 65
+frontend/src/stores/dashboard.ts
+  s_b929a4cbd32e4b::t_250d4ad14c7ebc 77-91
+  s_b929a4cbd32e4b::t_2866872f1698ef 98
+  s_b929a4cbd32e4b::t_090a249b8ff5c4 20
+  s_b929a4cbd32e4b::t_faab2cfd2b91ea 186-201
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "95eb594202f5a7a7dafa2cef06784a7f6c4afab7",
+  "prompts": {},
+  "logical_commit_id": "95eb594202f5a7a7dafa2cef06784a7f6c4afab7",
+  "sessions": {
+    "s_b929a4cbd32e4b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d82de29f-2dfc-4f86-bf3e-7ec2ace1cf0f",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Zane <zane@bigo.sg>"
+    }
+  }
+}
