@@ -106,4 +106,48 @@ describe('dashboard store', () => {
       { type: 'connected', received_at: new Date('2026-06-03T12:00:00Z').getTime() },
     ]);
   });
+
+  it('applies strategy_status websocket messages to known strategies', () => {
+    const dashboard = useDashboardStore();
+    dashboard.strategies = [{ name: 'ma_cross', status: 'stopped' }];
+    dashboard.strategyErrors = { ma_cross: 'previous error' };
+
+    dashboard.addWebSocketMessage({
+      type: 'strategy_status',
+      strategy: 'ma_cross',
+      status: 'running',
+      timestamp: 1700000000000,
+    });
+
+    expect(dashboard.strategies).toEqual([{ name: 'ma_cross', status: 'running' }]);
+    expect(dashboard.strategyErrors).toEqual({});
+  });
+
+  it('adds unknown strategies from strategy_status websocket messages', () => {
+    const dashboard = useDashboardStore();
+
+    dashboard.addWebSocketMessage({
+      type: 'strategy_status',
+      strategy: 'ma_cross_btc',
+      status: 'stopped',
+      timestamp: 1700000000000,
+    });
+
+    expect(dashboard.strategies).toEqual([{ name: 'ma_cross_btc', status: 'stopped' }]);
+  });
+
+  it('records strategy_error websocket messages without fabricating status', () => {
+    const dashboard = useDashboardStore();
+    dashboard.strategies = [{ name: 'ma_cross_btc', status: 'stopped' }];
+
+    dashboard.addWebSocketMessage({
+      type: 'strategy_error',
+      strategy: 'ma_cross_btc',
+      error: 'boom',
+      timestamp: 1700000000000,
+    });
+
+    expect(dashboard.strategyErrors).toEqual({ ma_cross_btc: 'boom' });
+    expect(dashboard.strategies).toEqual([{ name: 'ma_cross_btc', status: 'stopped' }]);
+  });
 });

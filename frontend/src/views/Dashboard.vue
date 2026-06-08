@@ -4,7 +4,15 @@ import { useI18n } from 'vue-i18n';
 
 import { useWebSocket } from '@/composables/useWebSocket';
 import { useDashboardStore } from '@/stores/dashboard';
-import type { DashboardWebSocketMessage } from '@/types/dashboard';
+import {
+  formatRuntimeCurrency,
+  formatRuntimeNumber,
+  formatRuntimePayloadPreview,
+  formatRuntimeText,
+  formatRuntimeTime,
+  formatTickerPrice,
+  getDashboardStrategyStatusTagType,
+} from '@/utils/dashboard';
 
 const { t } = useI18n();
 const dashboard = useDashboardStore();
@@ -12,64 +20,8 @@ const websocket = useWebSocket('/ws', {
   onMessage: dashboard.addWebSocketMessage,
 });
 
-const emptyValue = '—';
-
-const formatCurrency = (value?: number) => {
-  if (value === undefined || !Number.isFinite(value)) {
-    return emptyValue;
-  }
-
-  return new Intl.NumberFormat('en-US', {
-    style: 'currency',
-    currency: 'USD',
-    maximumFractionDigits: 2,
-  }).format(value);
-};
-
-const formatTickerPrice = (value?: number | string) => {
-  if (value === undefined || value === '') {
-    return emptyValue;
-  }
-
-  const numberValue = typeof value === 'number' ? value : Number(value);
-  if (!Number.isFinite(numberValue)) {
-    return emptyValue;
-  }
-
-  return numberValue.toLocaleString('en-US', { maximumFractionDigits: 4 });
-};
-
-const formatNumber = (value?: number) => {
-  if (value === undefined || !Number.isFinite(value)) {
-    return emptyValue;
-  }
-
-  return value.toLocaleString('en-US', { maximumFractionDigits: 8 });
-};
-
-const formatText = (value?: string) => value || emptyValue;
-
-const formatTime = (timestamp?: number) => {
-  if (timestamp === undefined || !Number.isFinite(timestamp)) {
-    return emptyValue;
-  }
-
-  return new Date(timestamp).toLocaleString();
-};
-
-const formatPayloadPreview = (message: DashboardWebSocketMessage) => {
-  const { type, received_at, ...payload } = message;
-
-  if (Object.keys(payload).length === 0) {
-    return emptyValue;
-  }
-
-  const preview = JSON.stringify(payload);
-  return preview.length > 120 ? `${preview.slice(0, 120)}…` : preview;
-};
-
 const latestMessages = computed(() => dashboard.websocketMessages.slice(0, 5));
-const lastUpdatedText = computed(() => formatTime(dashboard.lastUpdatedAt ?? undefined));
+const lastUpdatedText = computed(() => formatRuntimeTime(dashboard.lastUpdatedAt ?? undefined));
 
 watch(websocket.connected, (connected) => {
   dashboard.setWebSocketConnected(connected);
@@ -112,31 +64,31 @@ onMounted(() => {
       <el-col :xs="24" :sm="12" :lg="4">
         <el-card shadow="hover" v-loading="dashboard.loading">
           <template #header>{{ t('dashboard.totalEquity') }}</template>
-          <div class="metric">{{ formatCurrency(dashboard.account?.equity) }}</div>
+          <div class="metric">{{ formatRuntimeCurrency(dashboard.account?.equity) }}</div>
         </el-card>
       </el-col>
       <el-col :xs="24" :sm="12" :lg="4">
         <el-card shadow="hover" v-loading="dashboard.loading">
           <template #header>{{ t('dashboard.cashBalance') }}</template>
-          <div class="metric">{{ formatCurrency(dashboard.account?.cash_balance) }}</div>
+          <div class="metric">{{ formatRuntimeCurrency(dashboard.account?.cash_balance) }}</div>
         </el-card>
       </el-col>
       <el-col :xs="24" :sm="12" :lg="4">
         <el-card shadow="hover" v-loading="dashboard.loading">
           <template #header>{{ t('dashboard.realizedPnl') }}</template>
-          <div class="metric">{{ formatCurrency(dashboard.account?.realized_pnl) }}</div>
+          <div class="metric">{{ formatRuntimeCurrency(dashboard.account?.realized_pnl) }}</div>
         </el-card>
       </el-col>
       <el-col :xs="24" :sm="12" :lg="4">
         <el-card shadow="hover" v-loading="dashboard.loading">
           <template #header>{{ t('dashboard.dailyPnl') }}</template>
-          <div class="metric">{{ formatCurrency(dashboard.account?.daily_pnl) }}</div>
+          <div class="metric">{{ formatRuntimeCurrency(dashboard.account?.daily_pnl) }}</div>
         </el-card>
       </el-col>
       <el-col :xs="24" :sm="12" :lg="4">
         <el-card shadow="hover" v-loading="dashboard.loading">
           <template #header>{{ t('dashboard.feesPaid') }}</template>
-          <div class="metric">{{ formatCurrency(dashboard.account?.fees_paid) }}</div>
+          <div class="metric">{{ formatRuntimeCurrency(dashboard.account?.fees_paid) }}</div>
         </el-card>
       </el-col>
       <el-col :xs="24" :sm="12" :lg="4">
@@ -186,22 +138,22 @@ onMounted(() => {
           <el-empty v-if="dashboard.positions.length === 0" :description="t('dashboard.noPositions')" />
           <el-table v-else :data="dashboard.positions" size="small">
             <el-table-column prop="symbol" :label="t('common.symbol')" min-width="110">
-              <template #default="{ row }">{{ formatText(row.symbol) }}</template>
+              <template #default="{ row }">{{ formatRuntimeText(row.symbol) }}</template>
             </el-table-column>
             <el-table-column :label="t('dashboard.side')" min-width="80">
-              <template #default="{ row }">{{ formatText(row.side) }}</template>
+              <template #default="{ row }">{{ formatRuntimeText(row.side) }}</template>
             </el-table-column>
             <el-table-column :label="t('dashboard.size')" min-width="100">
-              <template #default="{ row }">{{ formatNumber(row.amount) }}</template>
+              <template #default="{ row }">{{ formatRuntimeNumber(row.amount) }}</template>
             </el-table-column>
             <el-table-column :label="t('dashboard.entryPrice')" min-width="110">
-              <template #default="{ row }">{{ formatNumber(row.entry_price) }}</template>
+              <template #default="{ row }">{{ formatRuntimeNumber(row.entry_price) }}</template>
             </el-table-column>
             <el-table-column :label="t('dashboard.markPrice')" min-width="110">
-              <template #default="{ row }">{{ formatNumber(row.mark_price) }}</template>
+              <template #default="{ row }">{{ formatRuntimeNumber(row.mark_price) }}</template>
             </el-table-column>
             <el-table-column :label="t('dashboard.unrealizedPnl')" min-width="130">
-              <template #default="{ row }">{{ formatCurrency(row.unrealized_pnl) }}</template>
+              <template #default="{ row }">{{ formatRuntimeCurrency(row.unrealized_pnl) }}</template>
             </el-table-column>
           </el-table>
         </el-card>
@@ -212,25 +164,25 @@ onMounted(() => {
           <el-empty v-if="dashboard.orders.length === 0" :description="t('dashboard.noOrders')" />
           <el-table v-else :data="dashboard.orders" size="small">
             <el-table-column prop="symbol" :label="t('common.symbol')" min-width="110">
-              <template #default="{ row }">{{ formatText(row.symbol) }}</template>
+              <template #default="{ row }">{{ formatRuntimeText(row.symbol) }}</template>
             </el-table-column>
             <el-table-column :label="t('dashboard.side')" min-width="80">
-              <template #default="{ row }">{{ formatText(row.side) }}</template>
+              <template #default="{ row }">{{ formatRuntimeText(row.side) }}</template>
             </el-table-column>
             <el-table-column :label="t('dashboard.orderType')" min-width="90">
-              <template #default="{ row }">{{ formatText(row.type) }}</template>
+              <template #default="{ row }">{{ formatRuntimeText(row.type) }}</template>
             </el-table-column>
             <el-table-column :label="t('dashboard.price')" min-width="100">
-              <template #default="{ row }">{{ formatNumber(row.price) }}</template>
+              <template #default="{ row }">{{ formatRuntimeNumber(row.price) }}</template>
             </el-table-column>
             <el-table-column :label="t('dashboard.amount')" min-width="100">
-              <template #default="{ row }">{{ formatNumber(row.amount) }}</template>
+              <template #default="{ row }">{{ formatRuntimeNumber(row.amount) }}</template>
             </el-table-column>
             <el-table-column :label="t('common.status')" min-width="100">
-              <template #default="{ row }">{{ formatText(row.status) }}</template>
+              <template #default="{ row }">{{ formatRuntimeText(row.status) }}</template>
             </el-table-column>
             <el-table-column :label="t('dashboard.timestamp')" min-width="160">
-              <template #default="{ row }">{{ formatTime(row.timestamp) }}</template>
+              <template #default="{ row }">{{ formatRuntimeTime(row.timestamp) }}</template>
             </el-table-column>
           </el-table>
         </el-card>
@@ -243,8 +195,19 @@ onMounted(() => {
           <template #header>{{ t('dashboard.strategies') }}</template>
           <el-empty v-if="dashboard.strategies.length === 0" :description="t('dashboard.noStrategies')" />
           <el-table v-else :data="dashboard.strategies" size="small">
-            <el-table-column prop="name" :label="t('common.name')" />
-            <el-table-column prop="status" :label="t('common.status')" />
+            <el-table-column prop="name" :label="t('common.name')" min-width="140" />
+            <el-table-column :label="t('common.status')" min-width="110">
+              <template #default="{ row }">
+                <el-tag :type="getDashboardStrategyStatusTagType(row.status)" effect="plain">
+                  {{ row.status }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column :label="t('dashboard.lastError')" min-width="180">
+              <template #default="{ row }">
+                {{ formatRuntimeText(dashboard.strategyErrors[row.name]) }}
+              </template>
+            </el-table-column>
           </el-table>
         </el-card>
       </el-col>
@@ -253,14 +216,18 @@ onMounted(() => {
           <template #header>{{ t('dashboard.websocketMessages') }}</template>
           <el-empty v-if="latestMessages.length === 0" :description="t('dashboard.noMessages')" />
           <el-table v-else :data="latestMessages" size="small">
-            <el-table-column :label="t('dashboard.messageType')" min-width="100">
-              <template #default="{ row }">{{ row.type }}</template>
+            <el-table-column :label="t('dashboard.messageType')" min-width="120">
+              <template #default="{ row }">
+                <el-tag size="small" effect="plain">{{ row.type }}</el-tag>
+              </template>
             </el-table-column>
             <el-table-column :label="t('dashboard.messageReceived')" min-width="160">
-              <template #default="{ row }">{{ formatTime(row.received_at) }}</template>
+              <template #default="{ row }">{{ formatRuntimeTime(row.received_at) }}</template>
             </el-table-column>
-            <el-table-column :label="t('dashboard.messagePayload')" min-width="220">
-              <template #default="{ row }">{{ formatPayloadPreview(row) }}</template>
+            <el-table-column :label="t('dashboard.messagePayload')" min-width="260">
+              <template #default="{ row }">
+                <code class="dashboard-message-payload">{{ formatRuntimePayloadPreview(row) }}</code>
+              </template>
             </el-table-column>
           </el-table>
         </el-card>
@@ -305,5 +272,11 @@ h2 {
 
 .dashboard-section {
   margin-top: 16px;
+}
+
+.dashboard-message-payload {
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+  color: #606266;
 }
 </style>

@@ -5,7 +5,10 @@ import 'element-plus/dist/index.css';
 
 import App from './App.vue';
 import { createI18nInstance } from './i18n';
+import { configureMonacoEnvironment } from './monaco';
 import router from './router';
+
+configureMonacoEnvironment();
 
 const i18n = createI18nInstance();
 document.documentElement.lang = i18n.global.locale.value;

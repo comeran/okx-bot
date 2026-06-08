@@ -127,6 +127,9 @@ onMounted(() => {
         <el-card shadow="never">
           <template #header>{{ t('strategies.strategyList') }}</template>
 
+          <p class="strategy-page__hint strategy-page__hint--list">
+            {{ t('strategies.runtimeControlHint') }}
+          </p>
           <el-empty v-if="!loading && strategies.length === 0" :description="t('strategies.noStrategiesFound')" />
           <el-table
             v-else
@@ -202,5 +205,9 @@ h2 {
 
 .strategy-page__hint {
   margin-bottom: 16px;
+}
+
+.strategy-page__hint--list {
+  margin-bottom: 12px;
 }
 </style>

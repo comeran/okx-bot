@@ -62,6 +62,7 @@ export default {
     messageType: '类型',
     messageReceived: '接收时间',
     messagePayload: '内容',
+    lastError: '最近错误',
   },
   strategies: {
     title: '策略',
@@ -74,6 +75,7 @@ export default {
     yamlForm: '策略 YAML 草稿',
     strategyYaml: '生成的策略 YAML',
     yamlDraftHint: '此编辑器内容是根据表单生成的草稿，暂未保存到后端配置。',
+    runtimeControlHint: '此页面只用于启动和停止现有运行态策略，暂不保存或编辑持久化策略配置。',
     loadError: '策略加载失败',
     started: '已启动 {name}',
     stopped: '已停止 {name}',

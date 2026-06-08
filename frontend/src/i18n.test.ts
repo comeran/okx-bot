@@ -17,10 +17,16 @@ describe('i18n', () => {
     const i18n = createI18nInstance();
 
     expect(i18n.global.t('nav.dashboard')).toBe('Dashboard');
+    expect(i18n.global.t('strategies.runtimeControlHint')).toBe(
+      'Start and stop existing runtime strategies here. Saving or editing persisted strategy configs is not part of this page yet.',
+    );
 
     setLocale(i18n, 'zh-CN');
 
     expect(i18n.global.t('nav.dashboard')).toBe('仪表盘');
+    expect(i18n.global.t('strategies.runtimeControlHint')).toBe(
+      '此页面只用于启动和停止现有运行态策略，暂不保存或编辑持久化策略配置。',
+    );
     expect(getSavedLocale()).toBe('zh-CN');
   });
 

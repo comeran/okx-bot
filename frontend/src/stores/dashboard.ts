@@ -17,6 +17,7 @@ interface DashboardState {
   positions: Position[];
   orders: Order[];
   strategies: StrategySummary[];
+  strategyErrors: Record<string, string>;
   tickers: MarketTicker[];
   websocketConnected: boolean;
   websocketMessages: DashboardWebSocketMessage[];
@@ -73,12 +74,28 @@ function payloadFor(message: DashboardWebSocketMessage, key: string): unknown {
   return record[key] ?? record.data;
 }
 
+function upsertStrategyStatus(
+  strategies: StrategySummary[],
+  name: string,
+  status: string,
+): StrategySummary[] {
+  const existingIndex = strategies.findIndex((strategy) => strategy.name === name);
+  if (existingIndex === -1) {
+    return [...strategies, { name, status }];
+  }
+
+  return strategies.map((strategy, index) => (
+    index === existingIndex ? { ...strategy, status } : strategy
+  ));
+}
+
 export const useDashboardStore = defineStore('dashboard', {
   state: (): DashboardState => ({
     account: null,
     positions: [],
     orders: [],
     strategies: [],
+    strategyErrors: {},
     tickers: [],
     websocketConnected: false,
     websocketMessages: [],
@@ -163,6 +180,25 @@ export const useDashboardStore = defineStore('dashboard', {
           const strategies = payloadFor(message, 'strategies');
           if (isStrategyArray(strategies)) {
             this.strategies = strategies;
+          }
+          break;
+        }
+        case 'strategy_status': {
+          if (typeof message.strategy === 'string' && typeof message.status === 'string') {
+            this.strategies = upsertStrategyStatus(this.strategies, message.strategy, message.status);
+            if (message.status === 'running') {
+              const { [message.strategy]: _cleared, ...remainingErrors } = this.strategyErrors;
+              this.strategyErrors = remainingErrors;
+            }
+          }
+          break;
+        }
+        case 'strategy_error': {
+          if (typeof message.strategy === 'string' && typeof message.error === 'string') {
+            this.strategyErrors = {
+              ...this.strategyErrors,
+              [message.strategy]: message.error,
+            };
           }
           break;
         }

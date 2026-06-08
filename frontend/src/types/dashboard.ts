@@ -103,6 +103,20 @@ export interface StrategiesDashboardWebSocketMessage extends DashboardMessageBas
   data?: StrategySummary[];
 }
 
+export interface StrategyStatusDashboardWebSocketMessage extends DashboardMessageBase {
+  type: 'strategy_status';
+  strategy: string;
+  status: string;
+  timestamp?: number;
+}
+
+export interface StrategyErrorDashboardWebSocketMessage extends DashboardMessageBase {
+  type: 'strategy_error';
+  strategy: string;
+  error: string;
+  timestamp?: number;
+}
+
 export interface SnapshotDashboardWebSocketMessage extends DashboardMessageBase, DashboardSnapshot {
   type: 'snapshot';
   data?: DashboardSnapshot;
@@ -120,5 +134,7 @@ export type DashboardWebSocketMessage =
   | PositionsDashboardWebSocketMessage
   | OrdersDashboardWebSocketMessage
   | StrategiesDashboardWebSocketMessage
+  | StrategyStatusDashboardWebSocketMessage
+  | StrategyErrorDashboardWebSocketMessage
   | SnapshotDashboardWebSocketMessage
   | UnknownDashboardWebSocketMessage;

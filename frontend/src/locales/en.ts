@@ -62,6 +62,7 @@ export default {
     messageType: 'Type',
     messageReceived: 'Received',
     messagePayload: 'Payload',
+    lastError: 'Last Error',
   },
   strategies: {
     title: 'Strategies',
@@ -74,6 +75,7 @@ export default {
     yamlForm: 'Strategy YAML Draft',
     strategyYaml: 'Generated Strategy YAML',
     yamlDraftHint: 'This editor is a draft generated from the form. It is not saved to backend configuration yet.',
+    runtimeControlHint: 'Start and stop existing runtime strategies here. Saving or editing persisted strategy configs is not part of this page yet.',
     loadError: 'Failed to load strategies',
     started: 'Started {name}',
     stopped: 'Stopped {name}',
