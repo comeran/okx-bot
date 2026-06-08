@@ -17,3 +17,9 @@ frontend/dist/
 # IDE
 .vscode/
 .idea/
+
+# Local tool artifacts
+.claude/worktrees/
+.claude/settings.local.json
+.playwright-cli/
+.playwright-mcp/
