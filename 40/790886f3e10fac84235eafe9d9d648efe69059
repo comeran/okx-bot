@@ -1,0 +1,20 @@
+docs/superpowers/specs/2026-06-08-risk-account-runtime-design.md
+  s_b929a4cbd32e4b::t_dd9458432594ca 1-170
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "40790886f3e10fac84235eafe9d9d648efe69059",
+  "prompts": {},
+  "logical_commit_id": "40790886f3e10fac84235eafe9d9d648efe69059",
+  "sessions": {
+    "s_b929a4cbd32e4b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d82de29f-2dfc-4f86-bf3e-7ec2ace1cf0f",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Zane <zane@bigo.sg>"
+    }
+  }
+}
