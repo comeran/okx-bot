@@ -51,12 +51,16 @@ The callback payload must be a dictionary with these fields:
   "side": "buy",
   "order_type": "market",
   "amount": 1.0,
-  "price": null,
+  "price": 50000.0,
+  "requested_price": null,
+  "order_value": 50000.0,
   "reason": "Order exceeds maximum position size",
   "reason_code": "max_position_exceeded",
   "timestamp": 1700000000000
 }
 ```
+
+`price` is the effective valuation price used by the risk gate. For market orders, it comes from the latest runtime bar close when available. `requested_price` preserves the order's requested price and may be `null` for market orders. `order_value` is the resulting position notional used by the risk check.
 
 `reason` should use the current `RiskManager` English reason string. `reason_code` should be a stable machine value derived from the reason:
 
@@ -84,7 +88,8 @@ For each bar delivered to a strategy:
    - `mark_price = bar.close`
    - `unrealized_pnl = computed_unrealized_pnl`
    - `timestamp = bar.timestamp`
-6. Update the existing account for that strategy with:
+6. Update the account for that strategy with:
+   - If an open position exists but the account row is missing, create the account using the paper initial equity and apply the mark-to-market update.
    - `unrealized_pnl = sum(unrealized_pnl for open positions in that strategy after the position update)`
    - `equity = cash_balance + open_position_cost_basis + unrealized_pnl`
    - `updated_at = bar.timestamp`
@@ -122,12 +127,14 @@ The strategy API should provide this callback and use the repository associated 
 
 ## WebSocket Behavior
 
-Risk rejection broadcasts this sequence:
+Risk rejection broadcasts this sequence when the strategy has an existing account row:
 
 1. `risk_event`
 2. `orders`
 3. `positions`
 4. `account`
+
+When the strategy has no real account row yet, risk rejection broadcasts only `risk_event`, `orders`, and `positions`. It must not broadcast a placeholder zero account as if it were real paper trading state.
 
 The rejected order is already persisted before `risk_event` is broadcast, so consumers can associate the event with `order_id`.
 
@@ -142,7 +149,7 @@ It does not broadcast `orders`, `trades`, or any new event type.
 
 Backend tests should drive the behavior at the smallest useful boundaries:
 
-- Unit tests for reason-to-code mapping and `UnifiedOrderManager` risk rejection callback payload.
+- Unit tests for reason-to-code mapping and `UnifiedOrderManager` risk rejection callback payload, including `price`, `requested_price`, and `order_value`.
 - Unit tests for mark-to-market long and short unrealized PnL formulas.
 - Unit tests that account equity becomes `cash_balance + open_position_cost_basis + unrealized_pnl`.
 - Integration tests through the strategies API showing:
@@ -164,7 +171,10 @@ uv run ruff format --check .
 - No frontend UI changes in this slice.
 - No risk event persistence in this slice.
 - No rolling daily PnL in this slice.
-- `risk_event` includes both `reason` and `reason_code`.
+- `risk_event` includes `reason`, `reason_code`, effective `price`, `requested_price`, and `order_value`.
+- Market-order `risk_event.price` uses the effective risk valuation price; `requested_price` remains `null` unless the order requested a price.
 - Mark-to-market uses latest runtime bar close as the paper mark price.
-- Mark-to-market runs before `strategy.on_bar(bar)`.
+- Mark-to-market runs before `strategy.on_bar(bar)` and uses the existing strategy error isolation path if it fails.
 - Mark-to-market updates only existing open positions for the strategy/symbol receiving the bar.
+- Mark-to-market creates an account when an open position exists but the account row is missing; no open position remains a no-op.
+- Risk rejection does not broadcast placeholder account state when there is no real account row.

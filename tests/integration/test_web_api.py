@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from httpx import ASGITransport, AsyncClient
 
 from src.core.types import Bar, Order, OrderSide, OrderStatus, OrderType
-from src.data.models import KlineCache, StrategyConfigRecord
+from src.data.models import AccountRecord, KlineCache, PositionRecord, StrategyConfigRecord
 from src.strategy.base import BaseStrategy
 from src.strategy.registry import StrategyRegistry
 from src.web import app as web_app
@@ -140,6 +140,23 @@ async def test_strategy_config_api_saves_and_lists_configs(monkeypatch):
     }
     assert list_resp.status_code == 200
     assert [item["name"] for item in list_resp.json()] == ["ma_cross_btc"]
+
+
+def test_create_order_manager_uses_falsy_repository_instance(monkeypatch):
+    class FalsyRepository:
+        def __bool__(self):
+            return False
+
+    repository = FalsyRepository()
+    monkeypatch.setattr(
+        strategy_api,
+        "paper_backtest_config",
+        lambda: strategy_api.BacktestConfig(),
+    )
+
+    manager = strategy_api.create_order_manager(repository=repository)
+
+    assert manager.repository is repository
 
 
 def test_create_risk_manager_without_settings_uses_max_position_only(monkeypatch):
@@ -474,6 +491,401 @@ async def test_persisted_strategy_loop_fills_market_order_from_latest_bar(monkey
     assert FakeRepository.orders[0].status == "filled"
     assert FakeRepository.orders[0].fill_price == 50000.0
     assert FakeRepository.trades[0].price == 50000.0
+
+
+@pytest.mark.asyncio
+async def test_runtime_risk_rejection_broadcasts_risk_event_before_trading_updates(monkeypatch):
+    class FakeMarketDataService:
+        def __init__(self):
+            self.callbacks = []
+            self.latest_bar = None
+            self._running = False
+
+        def subscribe(self, symbol, timeframe, callback):
+            self.callbacks.append(callback)
+
+        def get_recent_bars(self, symbol, timeframe, count=1):
+            if self.latest_bar is None:
+                return []
+            return [self.latest_bar]
+
+        async def start(self):
+            self._running = True
+
+        async def stop(self):
+            self._running = False
+
+    class OversizedBuyingStrategy(BaseStrategy):
+        def __init__(self, symbol="BTC-USDT"):
+            super().__init__()
+            self.symbol = symbol
+
+        async def on_bar(self, bar):
+            await self.buy(self.symbol, 10.0)
+
+    config = StrategyConfigRecord(
+        name="oversized_buyer_btc",
+        strategy_type="oversized_buyer",
+        symbol="BTC-USDT",
+        timeframe="1m",
+        params={},
+        enabled=True,
+        created_at=1700000000000,
+        updated_at=1700000000000,
+    )
+
+    class FakeRepository:
+        orders = []
+
+        def get_strategy_config(self, name):
+            if name == config.name:
+                return config
+            return None
+
+        def get_strategy_configs(self):
+            return [config]
+
+        def save_order(self, order):
+            self.orders.append(order)
+            return order
+
+        def get_orders(self):
+            return self.orders
+
+        def get_account(self, strategy=None):
+            return None
+
+        def get_position(self, strategy, symbol):
+            return None
+
+        def get_open_positions(self, strategy=None):
+            return []
+
+    FakeRepository.orders = []
+    market_data = FakeMarketDataService()
+    messages = []
+
+    async def broadcast(message):
+        messages.append(message)
+
+    registry = StrategyRegistry()
+    registry.register("oversized_buyer", OversizedBuyingStrategy)
+    monkeypatch.setattr(strategy_api, "create_strategy_registry", lambda: registry)
+    monkeypatch.setattr(strategy_api, "Repository", FakeRepository, raising=False)
+    monkeypatch.setattr(
+        strategy_api,
+        "create_market_data_service",
+        lambda: market_data,
+        raising=False,
+    )
+    monkeypatch.setattr(strategy_api, "current_timestamp_ms", lambda: 1700000000000, raising=False)
+    monkeypatch.setattr(web_app.ws_manager, "broadcast", broadcast)
+
+    app = create_app()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        start_resp = await client.post("/api/strategies/oversized_buyer_btc/start")
+        messages.clear()
+        market_data.latest_bar = Bar(1700003600000, 50000.0, 50000.0, 50000.0, 50000.0, 1.0)
+        await market_data.callbacks[0](market_data.latest_bar)
+
+    assert start_resp.status_code == 200
+    assert [message["type"] for message in messages] == ["risk_event", "orders", "positions"]
+    assert messages[0] == {
+        "type": "risk_event",
+        "strategy": "oversized_buyer_btc",
+        "order_id": FakeRepository.orders[0].order_id,
+        "symbol": "BTC-USDT",
+        "side": "buy",
+        "order_type": "market",
+        "amount": 10.0,
+        "price": 50000.0,
+        "requested_price": None,
+        "order_value": 500000.0,
+        "reason": "Order exceeds maximum position size",
+        "reason_code": "max_position_exceeded",
+        "timestamp": 1700000000000,
+    }
+    assert messages[1] == {
+        "type": "orders",
+        "orders": [order.model_dump() for order in FakeRepository.orders],
+    }
+    assert messages[2] == {"type": "positions", "positions": []}
+
+
+@pytest.mark.asyncio
+async def test_runtime_bar_marks_open_position_and_broadcasts_positions_then_account(monkeypatch):
+    class FakeMarketDataService:
+        def __init__(self):
+            self.callbacks = []
+            self._running = False
+
+        def subscribe(self, symbol, timeframe, callback):
+            self.callbacks.append(callback)
+
+        def get_recent_bars(self, symbol, timeframe, count=1):
+            return []
+
+        async def start(self):
+            self._running = True
+
+        async def stop(self):
+            self._running = False
+
+    class PassiveStrategy(BaseStrategy):
+        def __init__(self, symbol="BTC-USDT"):
+            super().__init__()
+            self.symbol = symbol
+            self.bars = []
+
+        async def on_bar(self, bar):
+            self.bars.append(bar)
+
+    config = StrategyConfigRecord(
+        name="passive_btc",
+        strategy_type="passive",
+        symbol="BTC-USDT",
+        timeframe="1m",
+        params={},
+        enabled=True,
+        created_at=1700000000000,
+        updated_at=1700000000000,
+    )
+
+    class FakeRepository:
+        positions = {
+            ("passive_btc", "BTC-USDT"): PositionRecord(
+                strategy="passive_btc",
+                symbol="BTC-USDT",
+                side="long",
+                amount=0.1,
+                entry_price=50000.0,
+                leverage=1,
+                timestamp=1700000000000,
+            )
+        }
+        accounts = {
+            "passive_btc": AccountRecord(
+                strategy="passive_btc",
+                initial_equity=100000.0,
+                cash_balance=95000.0,
+                equity=100000.0,
+                realized_pnl=0.0,
+                unrealized_pnl=0.0,
+                daily_pnl=0.0,
+                fees_paid=0.0,
+                updated_at=1700000000000,
+            )
+        }
+
+        def get_strategy_config(self, name):
+            if name == config.name:
+                return config
+            return None
+
+        def get_strategy_configs(self):
+            return [config]
+
+        def get_position(self, strategy, symbol):
+            return self.positions.get((strategy, symbol))
+
+        def upsert_position(self, position):
+            self.positions[(position.strategy, position.symbol)] = position
+            return position
+
+        def get_open_positions(self, strategy=None):
+            return [
+                position
+                for position in self.positions.values()
+                if position.amount != 0 and (strategy is None or position.strategy == strategy)
+            ]
+
+        def get_account(self, strategy=None):
+            if strategy is None:
+                return next(iter(self.accounts.values()), None)
+            return self.accounts.get(strategy)
+
+        def upsert_account(self, account):
+            self.accounts[account.strategy] = account
+            return account
+
+        def get_orders(self):
+            return []
+
+    FakeRepository.positions = {
+        ("passive_btc", "BTC-USDT"): PositionRecord(
+            strategy="passive_btc",
+            symbol="BTC-USDT",
+            side="long",
+            amount=0.1,
+            entry_price=50000.0,
+            leverage=1,
+            timestamp=1700000000000,
+        )
+    }
+    FakeRepository.accounts = {
+        "passive_btc": AccountRecord(
+            strategy="passive_btc",
+            initial_equity=100000.0,
+            cash_balance=95000.0,
+            equity=100000.0,
+            realized_pnl=0.0,
+            unrealized_pnl=0.0,
+            daily_pnl=0.0,
+            fees_paid=0.0,
+            updated_at=1700000000000,
+        )
+    }
+    market_data = FakeMarketDataService()
+    messages = []
+
+    async def broadcast(message):
+        messages.append(message)
+
+    registry = StrategyRegistry()
+    registry.register("passive", PassiveStrategy)
+    monkeypatch.setattr(strategy_api, "create_strategy_registry", lambda: registry)
+    monkeypatch.setattr(strategy_api, "Repository", FakeRepository, raising=False)
+    monkeypatch.setattr(
+        strategy_api,
+        "create_market_data_service",
+        lambda: market_data,
+        raising=False,
+    )
+    monkeypatch.setattr(strategy_api, "current_timestamp_ms", lambda: 1700000000000, raising=False)
+    monkeypatch.setattr(web_app.ws_manager, "broadcast", broadcast)
+
+    app = create_app()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        start_resp = await client.post("/api/strategies/passive_btc/start")
+        messages.clear()
+        await market_data.callbacks[0](Bar(1700003600000, 51000.0, 51000.0, 51000.0, 51000.0, 1.0))
+
+    position = FakeRepository.positions[("passive_btc", "BTC-USDT")]
+    account = FakeRepository.accounts["passive_btc"]
+    assert start_resp.status_code == 200
+    assert [message["type"] for message in messages] == ["positions", "account"]
+    assert position.mark_price == 51000.0
+    assert position.unrealized_pnl == pytest.approx(100.0)
+    assert position.timestamp == 1700003600000
+    assert account.unrealized_pnl == pytest.approx(100.0)
+    assert account.equity == pytest.approx(100100.0)
+    assert messages == [
+        {
+            "type": "positions",
+            "positions": [position.model_dump()],
+        },
+        {
+            "type": "account",
+            "account": {
+                "cash_balance": 95000.0,
+                "equity": 100100.0,
+                "realized_pnl": 0.0,
+                "unrealized_pnl": 100.0,
+                "daily_pnl": 0.0,
+                "fees_paid": 0.0,
+            },
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_runtime_bar_without_open_position_does_not_create_account_or_broadcast(monkeypatch):
+    class FakeMarketDataService:
+        def __init__(self):
+            self.callbacks = []
+            self._running = False
+
+        def subscribe(self, symbol, timeframe, callback):
+            self.callbacks.append(callback)
+
+        def get_recent_bars(self, symbol, timeframe, count=1):
+            return []
+
+        async def start(self):
+            self._running = True
+
+        async def stop(self):
+            self._running = False
+
+    class PassiveStrategy(BaseStrategy):
+        def __init__(self, symbol="BTC-USDT"):
+            super().__init__()
+            self.symbol = symbol
+
+        async def on_bar(self, bar):
+            pass
+
+    config = StrategyConfigRecord(
+        name="flat_passive_btc",
+        strategy_type="flat_passive",
+        symbol="BTC-USDT",
+        timeframe="1m",
+        params={},
+        enabled=True,
+        created_at=1700000000000,
+        updated_at=1700000000000,
+    )
+
+    class FakeRepository:
+        accounts = {}
+
+        def get_strategy_config(self, name):
+            if name == config.name:
+                return config
+            return None
+
+        def get_strategy_configs(self):
+            return [config]
+
+        def get_position(self, strategy, symbol):
+            return None
+
+        def get_open_positions(self, strategy=None):
+            return []
+
+        def get_account(self, strategy=None):
+            if strategy is None:
+                return next(iter(self.accounts.values()), None)
+            return self.accounts.get(strategy)
+
+        def upsert_account(self, account):
+            self.accounts[account.strategy] = account
+            return account
+
+        def get_orders(self):
+            return []
+
+    FakeRepository.accounts = {}
+    market_data = FakeMarketDataService()
+    messages = []
+
+    async def broadcast(message):
+        messages.append(message)
+
+    registry = StrategyRegistry()
+    registry.register("flat_passive", PassiveStrategy)
+    monkeypatch.setattr(strategy_api, "create_strategy_registry", lambda: registry)
+    monkeypatch.setattr(strategy_api, "Repository", FakeRepository, raising=False)
+    monkeypatch.setattr(
+        strategy_api,
+        "create_market_data_service",
+        lambda: market_data,
+        raising=False,
+    )
+    monkeypatch.setattr(web_app.ws_manager, "broadcast", broadcast)
+
+    app = create_app()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        start_resp = await client.post("/api/strategies/flat_passive_btc/start")
+        messages.clear()
+        await market_data.callbacks[0](Bar(1700003600000, 51000.0, 51000.0, 51000.0, 51000.0, 1.0))
+
+    assert start_resp.status_code == 200
+    assert messages == []
+    assert FakeRepository.accounts == {}
 
 
 @pytest.mark.asyncio

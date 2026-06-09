@@ -52,7 +52,6 @@ class PaperAccountingService:
         account.realized_pnl += realized_delta
         account.daily_pnl += realized_delta
         account.fees_paid += actual_fee
-        account.unrealized_pnl = 0.0
         account.updated_at = timestamp
 
         if new_position is None:
@@ -61,7 +60,12 @@ class PaperAccountingService:
             new_position.realized_pnl = _float_attr(existing, "realized_pnl") + realized_delta
             self.repository.upsert_position(new_position)
 
-        account.equity = account.cash_balance + self._open_position_cost_basis(strategy_name)
+        account.unrealized_pnl = self._open_position_unrealized_pnl(strategy_name)
+        account.equity = (
+            account.cash_balance
+            + self._open_position_cost_basis(strategy_name)
+            + account.unrealized_pnl
+        )
         self.repository.save_trade(
             TradeRecord(
                 strategy=strategy_name,
@@ -130,6 +134,14 @@ class PaperAccountingService:
             value = abs(_float_attr(position, "amount")) * _float_attr(position, "entry_price")
             total += -value if getattr(position, "side") == "short" else value
         return total
+
+    def _open_position_unrealized_pnl(self, strategy_name: str) -> float:
+        if not hasattr(self.repository, "get_open_positions"):
+            return 0.0
+        return sum(
+            _float_attr(position, "unrealized_pnl")
+            for position in self.repository.get_open_positions(strategy_name)
+        )
 
 
 def _net_position(

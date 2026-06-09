@@ -169,3 +169,56 @@ async def test_engine_stops_only_failing_strategy_and_reports_error():
     assert failing.shutdown_count == 1
     assert len(healthy.bars) == 1
     assert healthy.shutdown_count == 0
+
+
+async def test_engine_runs_before_strategy_bar_before_on_bar():
+    class EventStrategy(RecordingStrategy):
+        async def on_bar(self, bar):
+            events.append(("on_bar", self.name, len(self.bars)))
+            await super().on_bar(bar)
+
+    market_data = FakeMarketDataService()
+    events = []
+    strategy = EventStrategy("ma_cross")
+
+    async def before_strategy_bar(strategy, bar):
+        events.append(("before", strategy.name, len(strategy.bars)))
+
+    engine = BotEngine(
+        [strategy],
+        market_data_service=market_data,
+        before_strategy_bar=before_strategy_bar,
+    )
+
+    await engine.start()
+    await market_data.subscriptions[("BTC-USDT", "1m")][0](make_bar())
+
+    assert events == [("before", "ma_cross", 0), ("on_bar", "ma_cross", 0)]
+    assert len(strategy.bars) == 1
+
+
+async def test_engine_before_strategy_bar_failure_uses_strategy_error_path():
+    market_data = FakeMarketDataService()
+    strategy = RecordingStrategy("ma_cross")
+    errors = []
+
+    async def before_strategy_bar(strategy, bar):
+        raise RuntimeError("mark failed")
+
+    async def on_strategy_error(name, error):
+        errors.append((name, str(error)))
+
+    engine = BotEngine(
+        [strategy],
+        market_data_service=market_data,
+        before_strategy_bar=before_strategy_bar,
+        on_strategy_error=on_strategy_error,
+    )
+
+    await engine.start()
+    await market_data.subscriptions[("BTC-USDT", "1m")][0](make_bar())
+    await market_data.subscriptions[("BTC-USDT", "1m")][0](make_bar())
+
+    assert errors == [("ma_cross", "mark failed")]
+    assert strategy.bars == []
+    assert strategy.shutdown_count == 1

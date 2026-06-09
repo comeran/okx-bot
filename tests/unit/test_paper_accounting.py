@@ -1,7 +1,9 @@
 import pytest
 
 from src.core.types import Order, OrderSide, OrderStatus, OrderType
+from src.data.models import AccountRecord, PositionRecord
 from src.order.accounting import PaperAccountingService
+from src.order.mark_to_market import PaperMarkToMarketService
 
 
 class FakeRepository:
@@ -211,6 +213,38 @@ def test_fees_reduce_cash_and_accumulate_separately_from_realized_pnl():
     assert account.cash_balance == pytest.approx(100007.9)
 
 
+def test_fill_preserves_marked_unrealized_pnl_from_other_open_positions():
+    repo = FakeRepository()
+    repo.accounts["ma_cross"] = AccountRecord(
+        strategy="ma_cross",
+        initial_equity=100000.0,
+        cash_balance=96000.0,
+        equity=100050.0,
+        realized_pnl=0.0,
+        unrealized_pnl=50.0,
+        daily_pnl=0.0,
+        fees_paid=0.0,
+        updated_at=1700000000000,
+    )
+    repo.positions[("ma_cross", "ETH-USDT")] = PositionRecord(
+        strategy="ma_cross",
+        symbol="ETH-USDT",
+        side="long",
+        amount=2.0,
+        entry_price=2000.0,
+        leverage=1,
+        timestamp=1700000000000,
+        mark_price=2025.0,
+        unrealized_pnl=50.0,
+    )
+
+    process(repo, filled_order(OrderSide.BUY, 1.0, 100.0, "btc-order"))
+
+    account = repo.get_account("ma_cross")
+    assert account.unrealized_pnl == pytest.approx(50.0)
+    assert account.equity == pytest.approx(100050.0)
+
+
 def test_non_filled_order_does_not_mutate_account_position_or_trade():
     repo = FakeRepository()
     order = filled_order(OrderSide.BUY, 1.0, 100.0)
@@ -222,3 +256,181 @@ def test_non_filled_order_does_not_mutate_account_position_or_trade():
     assert repo.accounts == {}
     assert repo.positions == {}
     assert repo.trades == []
+
+
+def test_mark_to_market_updates_long_position_and_account_equity():
+    repo = FakeRepository()
+    repo.accounts["ma_cross"] = AccountRecord(
+        strategy="ma_cross",
+        initial_equity=100000.0,
+        cash_balance=95000.0,
+        equity=100000.0,
+        realized_pnl=0.0,
+        unrealized_pnl=0.0,
+        daily_pnl=0.0,
+        fees_paid=0.0,
+        updated_at=1700000000000,
+    )
+    repo.positions[("ma_cross", "BTC-USDT")] = PositionRecord(
+        strategy="ma_cross",
+        symbol="BTC-USDT",
+        side="long",
+        amount=0.1,
+        entry_price=50000.0,
+        leverage=1,
+        timestamp=1700000000000,
+    )
+
+    updated = PaperMarkToMarketService(repo).mark(
+        strategy_name="ma_cross",
+        symbol="BTC-USDT",
+        mark_price=51000.0,
+        timestamp=1700003600000,
+    )
+
+    position = repo.get_position("ma_cross", "BTC-USDT")
+    account = repo.get_account("ma_cross")
+    assert updated is True
+    assert position.mark_price == 51000.0
+    assert position.unrealized_pnl == pytest.approx(100.0)
+    assert position.timestamp == 1700003600000
+    assert account.unrealized_pnl == pytest.approx(100.0)
+    assert account.equity == pytest.approx(100100.0)
+    assert account.updated_at == 1700003600000
+
+
+def test_mark_to_market_updates_short_position_and_account_equity():
+    repo = FakeRepository()
+    repo.accounts["ma_cross"] = AccountRecord(
+        strategy="ma_cross",
+        initial_equity=100000.0,
+        cash_balance=110000.0,
+        equity=100000.0,
+        realized_pnl=0.0,
+        unrealized_pnl=0.0,
+        daily_pnl=0.0,
+        fees_paid=0.0,
+        updated_at=1700000000000,
+    )
+    repo.positions[("ma_cross", "BTC-USDT")] = PositionRecord(
+        strategy="ma_cross",
+        symbol="BTC-USDT",
+        side="short",
+        amount=0.2,
+        entry_price=50000.0,
+        leverage=1,
+        timestamp=1700000000000,
+    )
+
+    updated = PaperMarkToMarketService(repo).mark(
+        strategy_name="ma_cross",
+        symbol="BTC-USDT",
+        mark_price=49000.0,
+        timestamp=1700003600000,
+    )
+
+    position = repo.get_position("ma_cross", "BTC-USDT")
+    account = repo.get_account("ma_cross")
+    assert updated is True
+    assert position.mark_price == 49000.0
+    assert position.unrealized_pnl == pytest.approx(200.0)
+    assert account.unrealized_pnl == pytest.approx(200.0)
+    assert account.equity == pytest.approx(100200.0)
+
+
+def test_mark_to_market_sums_existing_unrealized_pnl_for_all_strategy_positions():
+    repo = FakeRepository()
+    repo.accounts["ma_cross"] = AccountRecord(
+        strategy="ma_cross",
+        initial_equity=100000.0,
+        cash_balance=99000.0,
+        equity=100000.0,
+        realized_pnl=0.0,
+        unrealized_pnl=0.0,
+        daily_pnl=0.0,
+        fees_paid=0.0,
+        updated_at=1700000000000,
+    )
+    repo.positions[("ma_cross", "BTC-USDT")] = PositionRecord(
+        strategy="ma_cross",
+        symbol="BTC-USDT",
+        side="long",
+        amount=0.1,
+        entry_price=50000.0,
+        leverage=1,
+        timestamp=1700000000000,
+    )
+    repo.positions[("ma_cross", "ETH-USDT")] = PositionRecord(
+        strategy="ma_cross",
+        symbol="ETH-USDT",
+        side="short",
+        amount=2.0,
+        entry_price=2000.0,
+        leverage=1,
+        timestamp=1700000000000,
+        mark_price=1975.0,
+        unrealized_pnl=50.0,
+    )
+    repo.positions[("other", "BTC-USDT")] = PositionRecord(
+        strategy="other",
+        symbol="BTC-USDT",
+        side="long",
+        amount=10.0,
+        entry_price=1.0,
+        leverage=1,
+        timestamp=1700000000000,
+        unrealized_pnl=999.0,
+    )
+
+    PaperMarkToMarketService(repo).mark(
+        strategy_name="ma_cross",
+        symbol="BTC-USDT",
+        mark_price=51000.0,
+        timestamp=1700003600000,
+    )
+
+    account = repo.get_account("ma_cross")
+    assert account.unrealized_pnl == pytest.approx(150.0)
+    assert account.equity == pytest.approx(100150.0)
+
+
+def test_mark_to_market_creates_account_when_position_exists_without_account():
+    repo = FakeRepository()
+    repo.positions[("ma_cross", "BTC-USDT")] = PositionRecord(
+        strategy="ma_cross",
+        symbol="BTC-USDT",
+        side="long",
+        amount=1.0,
+        entry_price=100.0,
+        leverage=1,
+        timestamp=1700000000000,
+    )
+
+    updated = PaperMarkToMarketService(repo, initial_equity=100000.0).mark(
+        strategy_name="ma_cross",
+        symbol="BTC-USDT",
+        mark_price=110.0,
+        timestamp=1700003600000,
+    )
+
+    account = repo.get_account("ma_cross")
+    assert updated is True
+    assert account.cash_balance == 100000.0
+    assert account.unrealized_pnl == pytest.approx(10.0)
+    assert account.equity == pytest.approx(100110.0)
+    assert account.updated_at == 1700003600000
+
+
+def test_mark_to_market_noops_without_open_position_and_does_not_create_account():
+    repo = FakeRepository()
+
+    updated = PaperMarkToMarketService(repo).mark(
+        strategy_name="ma_cross",
+        symbol="BTC-USDT",
+        mark_price=51000.0,
+        timestamp=1700003600000,
+    )
+
+    assert updated is False
+    assert repo.accounts == {}
+    assert repo.positions == {}

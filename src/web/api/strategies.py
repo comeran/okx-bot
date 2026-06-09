@@ -14,6 +14,7 @@ from src.data.models import StrategyConfigRecord
 from src.data.repository import Repository
 from src.market.service import MarketDataService
 from src.order.manager import UnifiedOrderManager
+from src.order.mark_to_market import PaperMarkToMarketService
 from src.order.router import OrderHandler, OrderRouter
 from src.risk.manager import RiskManager
 from src.strategy.builtin.ma_cross import register_ma_cross
@@ -23,6 +24,7 @@ from src.web.api import trading
 PriceProvider = Callable[[str], float | None]
 RuntimeBroadcaster = Callable[[dict[str, object]], Awaitable[None]]
 OrderUpdateCallback = Callable[[str], Awaitable[None]]
+RiskEventCallback = Callable[[dict[str, object]], Awaitable[None]]
 
 
 class StrategyConfigRequest(BaseModel):
@@ -99,17 +101,19 @@ def create_order_manager(
     latest_price: PriceProvider | None = None,
     repository: Repository | None = None,
     on_order_update: OrderUpdateCallback | None = None,
+    on_risk_event: RiskEventCallback | None = None,
 ) -> UnifiedOrderManager:
     handler = LocalPaperOrderHandler(latest_price=latest_price)
     router = OrderRouter(backtest=handler, mode="backtest")
     backtest_config = paper_backtest_config()
     return UnifiedOrderManager(
         router=router,
-        repository=repository or Repository(),
+        repository=repository if repository is not None else Repository(),
         timestamp_ms=current_timestamp_ms,
         initial_equity=backtest_config.initial_capital,
         fee_rate=backtest_config.fee_rate,
         on_order_update=on_order_update,
+        on_risk_event=on_risk_event,
         risk_manager=create_risk_manager(),
         price_provider=latest_price,
     )
@@ -219,7 +223,11 @@ def create_router(
                 }
             )
 
-    async def broadcast_trading_updates(repository: Repository, strategy: str) -> None:
+    async def broadcast_trading_updates(
+        repository: Repository,
+        strategy: str,
+        include_orders: bool = True,
+    ) -> None:
         if broadcast is None:
             return
         positions = (
@@ -227,16 +235,64 @@ def create_router(
             if hasattr(repository, "get_open_positions")
             else repository.get_positions(strategy)
         )
-        await broadcast(
-            {"type": "orders", "orders": trading.serialize_records(repository.get_orders())}
-        )
+        if include_orders:
+            await broadcast(
+                {"type": "orders", "orders": trading.serialize_records(repository.get_orders())}
+            )
+        account = repository.get_account(strategy)
+        if account is None:
+            await broadcast(
+                {"type": "positions", "positions": trading.serialize_records(positions)}
+            )
+        else:
+            await broadcast_position_account_updates(positions, account)
+
+    async def broadcast_position_account_updates(positions, account) -> None:
+        if broadcast is None:
+            return
         await broadcast({"type": "positions", "positions": trading.serialize_records(positions)})
         await broadcast(
             {
                 "type": "account",
-                "account": trading.serialize_account(repository.get_account(strategy)),
+                "account": trading.serialize_account(account),
             }
         )
+
+    async def broadcast_risk_event(payload: dict[str, object]) -> None:
+        if broadcast is not None:
+            await broadcast(payload)
+
+    def create_mark_to_market_service(repository: Repository) -> PaperMarkToMarketService | None:
+        required_repository_methods = (
+            "get_position",
+            "upsert_position",
+            "get_open_positions",
+            "get_account",
+            "upsert_account",
+        )
+        if not all(hasattr(repository, method) for method in required_repository_methods):
+            return None
+        return PaperMarkToMarketService(
+            repository,
+            initial_equity=paper_backtest_config().initial_capital,
+        )
+
+    async def mark_to_market_before_bar(
+        mark_to_market: PaperMarkToMarketService | None,
+        strategy,
+        bar,
+    ) -> None:
+        symbol = getattr(strategy, "symbol", None)
+        if symbol is None or mark_to_market is None:
+            return
+        update = mark_to_market.mark_update(
+            strategy_name=strategy.name,
+            symbol=symbol,
+            mark_price=bar.close,
+            timestamp=bar.timestamp,
+        )
+        if update is not None:
+            await broadcast_position_account_updates(update.positions, update.account)
 
     def serialize_strategy_config(config: StrategyConfigRecord) -> dict[str, Any]:
         return config.model_dump()
@@ -295,6 +351,7 @@ def create_router(
         if name not in runtime.engines:
             try:
                 repository = Repository()
+                mark_to_market = create_mark_to_market_service(repository)
                 strategy = create_strategy(name)
                 set_order_manager = getattr(strategy, "set_order_manager", None)
                 if set_order_manager is not None:
@@ -306,12 +363,18 @@ def create_router(
                                 repository,
                                 strategy_name,
                             ),
+                            on_risk_event=broadcast_risk_event,
                         )
                     )
                 engine = BotEngine(
                     strategies=[strategy],
                     market_data_service=market_data_service,
                     on_strategy_error=handle_strategy_error,
+                    before_strategy_bar=lambda strategy, bar: mark_to_market_before_bar(
+                        mark_to_market,
+                        strategy,
+                        bar,
+                    ),
                     stop_market_data_on_stop=False,
                 )
                 await engine.start()

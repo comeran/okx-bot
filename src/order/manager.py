@@ -1,11 +1,31 @@
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 
 from src.core.types import Order, OrderSide, OrderStatus, OrderType
 from src.data.models import OrderRecord
 from src.order.accounting import PaperAccountingService
 from src.order.router import OrderRouter
+
+RiskEventCallback = Callable[[dict[str, object]], Awaitable[None]]
+
+
+@dataclass(frozen=True)
+class RiskGateResult:
+    passed: bool
+    reason: str = ""
+    order_value: float = 0.0
+    effective_price: float | None = None
+
+
+def risk_reason_code(reason: str) -> str:
+    return {
+        "Order exceeds maximum position size": "max_position_exceeded",
+        "Daily loss exceeds maximum allowed loss": "daily_loss_exceeded",
+        "Drawdown exceeds maximum allowed drawdown": "drawdown_exceeded",
+        "Order requires a stop loss": "stop_loss_required",
+    }.get(reason, "risk_rejected")
 
 
 class UnifiedOrderManager:
@@ -17,6 +37,7 @@ class UnifiedOrderManager:
         initial_equity: float = 100000.0,
         fee_rate: float = 0.0,
         on_order_update: Callable[[str], Awaitable[None]] | None = None,
+        on_risk_event: RiskEventCallback | None = None,
         risk_manager: Any | None = None,
         price_provider: Callable[[str], float | None] | None = None,
     ) -> None:
@@ -26,6 +47,7 @@ class UnifiedOrderManager:
         self.initial_equity = initial_equity
         self.fee_rate = fee_rate
         self.on_order_update = on_order_update
+        self.on_risk_event = on_risk_event
         self.risk_manager = risk_manager
         self.price_provider = price_provider
         self._balances: dict[str, float] = {}
@@ -53,11 +75,19 @@ class UnifiedOrderManager:
             stop_loss=stop_loss,
             take_profit=take_profit,
         )
-        if not self._passes_risk_gate(order, strategy_name):
+        risk_result = self._check_risk_gate(order, strategy_name)
+        if not risk_result.passed:
             order.status = OrderStatus.REJECTED
-            self._persist_order(order, strategy_name)
-            if self.on_order_update is not None:
-                await self.on_order_update(strategy_name)
+            timestamp = self.timestamp_ms()
+            self._persist_order(order, strategy_name, timestamp=timestamp)
+            try:
+                if self.on_risk_event is not None:
+                    await self.on_risk_event(
+                        self._risk_event_payload(order, strategy_name, risk_result, timestamp)
+                    )
+            finally:
+                if self.on_order_update is not None:
+                    await self.on_order_update(strategy_name)
             return order
 
         submitted_order = await self.router.submit(order)
@@ -84,9 +114,9 @@ class UnifiedOrderManager:
     def set_balance(self, strategy_name: str, amount: float) -> None:
         self._balances[strategy_name] = amount
 
-    def _passes_risk_gate(self, order: Order, strategy_name: str) -> bool:
+    def _check_risk_gate(self, order: Order, strategy_name: str) -> RiskGateResult:
         if self.risk_manager is None:
-            return True
+            return RiskGateResult(passed=True)
 
         account = None
         position = None
@@ -96,7 +126,6 @@ class UnifiedOrderManager:
             if hasattr(self.repository, "get_position"):
                 position = self.repository.get_position(strategy_name, order.symbol)
 
-        total_equity = account.equity if account is not None else self.initial_equity
         order_price = order.price
         if order_price is None and self.price_provider is not None:
             order_price = self.price_provider(order.symbol)
@@ -108,6 +137,15 @@ class UnifiedOrderManager:
                 current_amount = -current_amount
         order_amount = order.amount if order.side == OrderSide.BUY else -order.amount
         resulting_position_value = abs(current_amount + order_amount) * (order_price or 0.0)
+
+        if self.risk_manager is None:
+            return RiskGateResult(
+                passed=True,
+                order_value=resulting_position_value,
+                effective_price=order_price,
+            )
+
+        total_equity = account.equity if account is not None else self.initial_equity
         daily_pnl = account.daily_pnl if account is not None else 0.0
         current_equity = account.equity if account is not None else self.initial_equity
         initial_equity = account.initial_equity if account is not None else self.initial_equity
@@ -121,13 +159,47 @@ class UnifiedOrderManager:
             peak_equity=max(initial_equity, current_equity),
             current_equity=current_equity,
         )
-        return result.passed
+        return RiskGateResult(
+            passed=result.passed,
+            reason=result.reason,
+            order_value=resulting_position_value,
+            effective_price=order_price,
+        )
 
-    def _persist_order(self, order: Order, strategy_name: str) -> None:
+    def _risk_event_payload(
+        self,
+        order: Order,
+        strategy_name: str,
+        result: RiskGateResult,
+        timestamp: int,
+    ) -> dict[str, object]:
+        return {
+            "type": "risk_event",
+            "strategy": strategy_name,
+            "order_id": order.id,
+            "symbol": order.symbol,
+            "side": order.side.value,
+            "order_type": order.type.value,
+            "amount": order.amount,
+            "price": result.effective_price,
+            "requested_price": order.price,
+            "order_value": result.order_value,
+            "reason": result.reason,
+            "reason_code": risk_reason_code(result.reason),
+            "timestamp": timestamp,
+        }
+
+    def _persist_order(
+        self,
+        order: Order,
+        strategy_name: str,
+        timestamp: int | None = None,
+    ) -> None:
         if self.repository is None:
             return
 
-        timestamp = order.fill_time or self.timestamp_ms()
+        if timestamp is None:
+            timestamp = order.fill_time or self.timestamp_ms()
         self.repository.save_order(
             OrderRecord(
                 order_id=order.id,
