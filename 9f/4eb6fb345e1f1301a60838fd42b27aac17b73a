@@ -1,0 +1,26 @@
+frontend/src/stores/dashboard.test.ts
+  s_f841fcf15eba47::t_d6d4f097e1ba03 129-169
+  s_f841fcf15eba47::t_ef765cd43a92a1 63-93
+frontend/src/stores/dashboard.ts
+  s_f841fcf15eba47::t_7a9f38043b8b7e 72-98
+  s_f841fcf15eba47::t_5544414ca3638f 188
+  s_f841fcf15eba47::t_98a47aa91d3c84 242-243,246,250-258
+  s_f841fcf15eba47::t_7871aa17902ead 151
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "9f4eb6fb345e1f1301a60838fd42b27aac17b73a",
+  "prompts": {},
+  "logical_commit_id": "9f4eb6fb345e1f1301a60838fd42b27aac17b73a",
+  "sessions": {
+    "s_f841fcf15eba47": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f75d6f44-2436-423c-9422-3d79d1a2a905",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Zane <zane@bigo.sg>"
+    }
+  }
+}
