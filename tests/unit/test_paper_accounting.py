@@ -117,6 +117,29 @@ def test_sell_partially_closes_long_and_realizes_price_difference_pnl():
     assert account.daily_pnl == pytest.approx(20.0)
 
 
+def test_sell_partially_closes_marked_long_and_preserves_remaining_unrealized_pnl():
+    repo = FakeRepository()
+
+    process(repo, filled_order(OrderSide.BUY, 1.0, 100.0, "order-1"))
+    PaperMarkToMarketService(repo).mark(
+        strategy_name="ma_cross",
+        symbol="BTC-USDT",
+        mark_price=120.0,
+        timestamp=1700003600000,
+    )
+    process(repo, filled_order(OrderSide.SELL, 0.4, 110.0, "order-2"))
+
+    position = repo.get_position("ma_cross", "BTC-USDT")
+    account = repo.get_account("ma_cross")
+    assert position.side == "long"
+    assert position.amount == pytest.approx(0.6)
+    assert position.mark_price == 120.0
+    assert position.unrealized_pnl == pytest.approx(12.0)
+    assert account.realized_pnl == pytest.approx(4.0)
+    assert account.unrealized_pnl == pytest.approx(12.0)
+    assert account.equity == pytest.approx(100016.0)
+
+
 def test_sell_fully_closes_long_and_removes_open_position():
     repo = FakeRepository()
 

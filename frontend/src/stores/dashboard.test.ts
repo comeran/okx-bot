@@ -91,6 +91,35 @@ describe('dashboard store', () => {
     expect(dashboard.error).toBeNull();
   });
 
+  it('keeps rejected orders while treating all-zero account responses as missing account state', async () => {
+    const fetchMock = vi.fn((url: string) => {
+      const responses: Record<string, unknown> = {
+        '/api/trading/account': {
+          cash_balance: 0,
+          equity: 0,
+          realized_pnl: 0,
+          unrealized_pnl: 0,
+          daily_pnl: 0,
+          fees_paid: 0,
+        },
+        '/api/trading/positions': [],
+        '/api/trading/orders': [{ order_id: 'risk-1', status: 'rejected' }],
+        '/api/strategies': [{ name: 'ma_cross', status: 'stopped' }],
+        '/api/market/tickers': [],
+      };
+
+      return jsonResponse(responses[url]);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const dashboard = useDashboardStore();
+
+    await dashboard.loadInitialData();
+
+    expect(dashboard.account).toBeNull();
+    expect(dashboard.orders).toEqual([{ order_id: 'risk-1', status: 'rejected' }]);
+  });
+
   it('loads public market tickers with the dashboard snapshot data', async () => {
     const fetchMock = vi.fn((url: string) => {
       const responses: Record<string, unknown> = {

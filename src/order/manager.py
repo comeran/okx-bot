@@ -28,6 +28,13 @@ def risk_reason_code(reason: str) -> str:
     }.get(reason, "risk_rejected")
 
 
+def position_notional(position: Any) -> float:
+    price = float(
+        getattr(position, "mark_price", None) or getattr(position, "entry_price", 0.0) or 0.0
+    )
+    return abs(float(getattr(position, "amount", 0.0) or 0.0)) * price
+
+
 class UnifiedOrderManager:
     def __init__(
         self,
@@ -136,14 +143,19 @@ class UnifiedOrderManager:
             if getattr(position, "side", "long") == "short":
                 current_amount = -current_amount
         order_amount = order.amount if order.side == OrderSide.BUY else -order.amount
+        current_position_value = abs(current_amount) * (order_price or 0.0)
+        if position is not None and order_price is None:
+            current_position_value = position_notional(position)
         resulting_position_value = abs(current_amount + order_amount) * (order_price or 0.0)
-
-        if self.risk_manager is None:
-            return RiskGateResult(
-                passed=True,
-                order_value=resulting_position_value,
-                effective_price=order_price,
-            )
+        current_other_position_value = self._other_position_notional(strategy_name, order.symbol)
+        current_total_position_value = current_other_position_value + current_position_value
+        resulting_total_position_value = current_other_position_value + resulting_position_value
+        if resulting_total_position_value < current_total_position_value:
+            risk_position_value = 0.0
+            risk_order_value = 0.0
+        else:
+            risk_position_value = current_other_position_value
+            risk_order_value = resulting_position_value
 
         total_equity = account.equity if account is not None else self.initial_equity
         daily_pnl = account.daily_pnl if account is not None else 0.0
@@ -152,9 +164,9 @@ class UnifiedOrderManager:
 
         result = self.risk_manager.check_order(
             order=order,
-            current_position_value=0.0,
+            current_position_value=risk_position_value,
             total_equity=total_equity,
-            order_value=resulting_position_value,
+            order_value=risk_order_value,
             daily_pnl=daily_pnl,
             peak_equity=max(initial_equity, current_equity),
             current_equity=current_equity,
@@ -164,6 +176,15 @@ class UnifiedOrderManager:
             reason=result.reason,
             order_value=resulting_position_value,
             effective_price=order_price,
+        )
+
+    def _other_position_notional(self, strategy_name: str, symbol: str) -> float:
+        if self.repository is None or not hasattr(self.repository, "get_open_positions"):
+            return 0.0
+        return sum(
+            position_notional(position)
+            for position in self.repository.get_open_positions(strategy_name)
+            if getattr(position, "symbol", None) != symbol
         )
 
     def _risk_event_payload(

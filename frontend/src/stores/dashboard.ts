@@ -72,18 +72,16 @@ function isMarketTickerArray(value: unknown): value is MarketTicker[] {
 function isZeroAccountPlaceholder(
   account: AccountSummary,
   positions: Position[],
-  orders: Order[],
 ): boolean {
   return (
     positions.length === 0
-    && orders.length === 0
     && [
-      account.cash_balance,
+      account.cash_balance ?? 0,
       account.equity,
-      account.realized_pnl,
-      account.unrealized_pnl,
+      account.realized_pnl ?? 0,
+      account.unrealized_pnl ?? 0,
       account.daily_pnl,
-      account.fees_paid,
+      account.fees_paid ?? 0,
     ].every((value) => value === 0)
   );
 }
@@ -91,9 +89,8 @@ function isZeroAccountPlaceholder(
 function normalizeAccount(
   account: AccountSummary,
   positions: Position[],
-  orders: Order[],
 ): AccountSummary | null {
-  return isZeroAccountPlaceholder(account, positions, orders) ? null : account;
+  return isZeroAccountPlaceholder(account, positions) ? null : account;
 }
 
 function payloadFor(message: DashboardWebSocketMessage, key: string): unknown {
@@ -148,7 +145,7 @@ export const useDashboardStore = defineStore('dashboard', {
           fetchJson<StrategySummary[]>('/api/strategies'),
         ]);
 
-        this.account = normalizeAccount(account, positions, orders);
+        this.account = normalizeAccount(account, positions);
         this.positions = positions;
         this.orders = orders;
         this.strategies = strategies;
@@ -185,7 +182,7 @@ export const useDashboardStore = defineStore('dashboard', {
         case 'account': {
           const account = payloadFor(message, 'account');
           if (isAccountSummary(account)) {
-            this.account = normalizeAccount(account, this.positions, this.orders);
+            this.account = normalizeAccount(account, this.positions);
           }
           break;
         }
@@ -193,6 +190,9 @@ export const useDashboardStore = defineStore('dashboard', {
           const positions = payloadFor(message, 'positions');
           if (isPositionArray(positions)) {
             this.positions = positions;
+            if (this.account !== null) {
+              this.account = normalizeAccount(this.account, this.positions);
+            }
           }
           break;
         }
@@ -254,7 +254,7 @@ export const useDashboardStore = defineStore('dashboard', {
         if (snapshot.account === null) {
           this.account = null;
         } else if (isAccountSummary(snapshot.account)) {
-          this.account = normalizeAccount(snapshot.account, positions, orders);
+          this.account = normalizeAccount(snapshot.account, positions);
         }
       }
 

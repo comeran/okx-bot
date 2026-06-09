@@ -338,6 +338,58 @@ async def test_order_manager_rejects_order_when_risk_gate_blocks_position_size()
 
 
 @pytest.mark.asyncio
+async def test_order_manager_rejects_when_total_position_exposure_exceeds_limit():
+    class ShouldNotSubmitHandler(OrderHandler):
+        async def submit(self, order: Order) -> Order:
+            raise AssertionError("risk-blocked order should not reach router")
+
+        async def cancel(self, order_id: str, symbol: str | None = None) -> bool:
+            return True
+
+    repository = FakeRepository()
+    repository.accounts["ma_cross"] = AccountRecord(
+        strategy="ma_cross",
+        initial_equity=100000.0,
+        cash_balance=100000.0,
+        equity=100000.0,
+        realized_pnl=0.0,
+        unrealized_pnl=0.0,
+        daily_pnl=0.0,
+        fees_paid=0.0,
+        updated_at=1700000000000,
+    )
+    repository.positions[("ma_cross", "BTC-USDT")] = PositionRecord(
+        strategy="ma_cross",
+        symbol="BTC-USDT",
+        side="long",
+        amount=1.4,
+        entry_price=50000.0,
+        leverage=1,
+        timestamp=1700000000000,
+    )
+    router = OrderRouter(backtest=ShouldNotSubmitHandler(), mode="backtest")
+    manager = UnifiedOrderManager(
+        router=router,
+        repository=repository,
+        timestamp_ms=lambda: 1700000000000,
+        initial_equity=100000.0,
+        risk_manager=RiskManager(max_position_pct=0.8),
+    )
+
+    order = await manager.submit(
+        symbol="ETH-USDT",
+        side=OrderSide.BUY,
+        order_type=OrderType.LIMIT,
+        amount=1.0,
+        price=50000.0,
+        strategy_name="ma_cross",
+    )
+
+    assert order.status == OrderStatus.REJECTED
+    assert repository.orders[0].status == "rejected"
+
+
+@pytest.mark.asyncio
 async def test_order_manager_allows_reducing_order_when_position_is_at_limit():
     handler = MockHandler()
     repository = FakeRepository()
@@ -376,6 +428,61 @@ async def test_order_manager_allows_reducing_order_when_position_is_at_limit():
         side=OrderSide.SELL,
         order_type=OrderType.MARKET,
         amount=0.2,
+        strategy_name="ma_cross",
+    )
+
+    assert order.status == OrderStatus.FILLED
+    assert len(handler.submitted) == 1
+
+
+@pytest.mark.asyncio
+async def test_order_manager_allows_reducing_order_when_total_exposure_is_over_limit():
+    handler = MockHandler()
+    repository = FakeRepository()
+    repository.accounts["ma_cross"] = AccountRecord(
+        strategy="ma_cross",
+        initial_equity=100000.0,
+        cash_balance=100000.0,
+        equity=100000.0,
+        realized_pnl=0.0,
+        unrealized_pnl=0.0,
+        daily_pnl=0.0,
+        fees_paid=0.0,
+        updated_at=1700000000000,
+    )
+    repository.positions[("ma_cross", "BTC-USDT")] = PositionRecord(
+        strategy="ma_cross",
+        symbol="BTC-USDT",
+        side="long",
+        amount=1.6,
+        entry_price=50000.0,
+        leverage=1,
+        timestamp=1700000000000,
+    )
+    repository.positions[("ma_cross", "ETH-USDT")] = PositionRecord(
+        strategy="ma_cross",
+        symbol="ETH-USDT",
+        side="long",
+        amount=0.2,
+        entry_price=50000.0,
+        leverage=1,
+        timestamp=1700000000000,
+    )
+    router = OrderRouter(backtest=handler, mode="backtest")
+    manager = UnifiedOrderManager(
+        router=router,
+        repository=repository,
+        timestamp_ms=lambda: 1700000000000,
+        initial_equity=100000.0,
+        risk_manager=RiskManager(max_position_pct=0.8),
+    )
+
+    order = await manager.submit(
+        symbol="ETH-USDT",
+        side=OrderSide.SELL,
+        order_type=OrderType.LIMIT,
+        amount=0.1,
+        price=50000.0,
         strategy_name="ma_cross",
     )
 

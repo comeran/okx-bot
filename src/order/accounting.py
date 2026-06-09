@@ -58,6 +58,7 @@ class PaperAccountingService:
             self._delete_or_flatten_position(strategy_name, symbol, timestamp)
         else:
             new_position.realized_pnl = _float_attr(existing, "realized_pnl") + realized_delta
+            _apply_existing_mark(existing, new_position)
             self.repository.upsert_position(new_position)
 
         account.unrealized_pnl = self._open_position_unrealized_pnl(strategy_name)
@@ -240,6 +241,24 @@ def _position(
         leverage=1,
         timestamp=timestamp,
     )
+
+
+def _apply_existing_mark(existing: Any, position: PositionRecord) -> None:
+    if existing is None or getattr(existing, "side", None) != position.side:
+        return
+    mark_price = getattr(existing, "mark_price", None)
+    if mark_price is None:
+        return
+    position.mark_price = float(mark_price)
+    position.unrealized_pnl = _marked_unrealized_pnl(position, position.mark_price)
+
+
+def _marked_unrealized_pnl(position: PositionRecord, mark_price: float) -> float:
+    amount = abs(_float_attr(position, "amount"))
+    entry_price = _float_attr(position, "entry_price")
+    if position.side == "short":
+        return (entry_price - mark_price) * amount
+    return (mark_price - entry_price) * amount
 
 
 def _fill_price(order: Any) -> float:
