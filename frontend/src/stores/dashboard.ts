@@ -69,6 +69,33 @@ function isMarketTickerArray(value: unknown): value is MarketTicker[] {
   return Array.isArray(value) && value.every(isMarketTicker);
 }
 
+function isZeroAccountPlaceholder(
+  account: AccountSummary,
+  positions: Position[],
+  orders: Order[],
+): boolean {
+  return (
+    positions.length === 0
+    && orders.length === 0
+    && [
+      account.cash_balance,
+      account.equity,
+      account.realized_pnl,
+      account.unrealized_pnl,
+      account.daily_pnl,
+      account.fees_paid,
+    ].every((value) => value === 0)
+  );
+}
+
+function normalizeAccount(
+  account: AccountSummary,
+  positions: Position[],
+  orders: Order[],
+): AccountSummary | null {
+  return isZeroAccountPlaceholder(account, positions, orders) ? null : account;
+}
+
 function payloadFor(message: DashboardWebSocketMessage, key: string): unknown {
   const record = message as Record<string, unknown>;
   return record[key] ?? record.data;
@@ -121,7 +148,7 @@ export const useDashboardStore = defineStore('dashboard', {
           fetchJson<StrategySummary[]>('/api/strategies'),
         ]);
 
-        this.account = account;
+        this.account = normalizeAccount(account, positions, orders);
         this.positions = positions;
         this.orders = orders;
         this.strategies = strategies;
@@ -158,7 +185,7 @@ export const useDashboardStore = defineStore('dashboard', {
         case 'account': {
           const account = payloadFor(message, 'account');
           if (isAccountSummary(account)) {
-            this.account = account;
+            this.account = normalizeAccount(account, this.positions, this.orders);
           }
           break;
         }
@@ -212,20 +239,23 @@ export const useDashboardStore = defineStore('dashboard', {
       }
     },
     applySnapshot(snapshot: DashboardSnapshot | Record<string, unknown>) {
+      const positions = isPositionArray(snapshot.positions) ? snapshot.positions : this.positions;
+      const orders = isOrderArray(snapshot.orders) ? snapshot.orders : this.orders;
+
+      if (isPositionArray(snapshot.positions)) {
+        this.positions = positions;
+      }
+
+      if (isOrderArray(snapshot.orders)) {
+        this.orders = orders;
+      }
+
       if ('account' in snapshot) {
         if (snapshot.account === null) {
           this.account = null;
         } else if (isAccountSummary(snapshot.account)) {
-          this.account = snapshot.account;
+          this.account = normalizeAccount(snapshot.account, positions, orders);
         }
-      }
-
-      if (isPositionArray(snapshot.positions)) {
-        this.positions = snapshot.positions;
-      }
-
-      if (isOrderArray(snapshot.orders)) {
-        this.orders = snapshot.orders;
       }
 
       if (isStrategyArray(snapshot.strategies)) {
