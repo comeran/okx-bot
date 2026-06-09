@@ -1,0 +1,20 @@
+docs/superpowers/plans/2026-06-08-runtime-ui-polish.md
+  s_f841fcf15eba47::t_fd80c92b72d020 3,42,92,102,138,195,214,273,283,356,377,421,435,455,482,503,521,531,545,563,580,590,600,616,629,642,663,667,677,681,689,693
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "d9d64298e48a9fdca9fdd0da9a745d47a7c76fe7",
+  "prompts": {},
+  "logical_commit_id": "d9d64298e48a9fdca9fdd0da9a745d47a7c76fe7",
+  "sessions": {
+    "s_f841fcf15eba47": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f75d6f44-2436-423c-9422-3d79d1a2a905",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Zane <zane@bigo.sg>"
+    }
+  }
+}
