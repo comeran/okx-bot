@@ -1,0 +1,20 @@
+docs/superpowers/plans/2026-05-27-okx-quant-bot.md
+  s_f841fcf15eba47::t_166f93cef66c57 3-3997
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "d97b94d1ff91aa49f6582c5b5859b4e2cc4e954c",
+  "prompts": {},
+  "logical_commit_id": "d97b94d1ff91aa49f6582c5b5859b4e2cc4e954c",
+  "sessions": {
+    "s_f841fcf15eba47": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f75d6f44-2436-423c-9422-3d79d1a2a905",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Zane <zane@bigo.sg>"
+    }
+  }
+}
