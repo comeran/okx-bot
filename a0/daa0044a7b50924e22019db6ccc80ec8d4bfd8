@@ -1,0 +1,40 @@
+src/order/manager.py
+  s_1b54d669a2935c::t_08acd89f2ad0d8 146-148,151-158
+  s_1b54d669a2935c::t_586646743b95d2 31-37
+  s_1b54d669a2935c::t_be80384b16284c 150
+  s_1b54d669a2935c::t_9783b0ba501f8d 167,169
+  s_1b54d669a2935c::t_9ee2f6fade04aa 181-187
+src/order/accounting.py
+  s_1b54d669a2935c::t_6033a7c79762bc 246-261
+  s_1b54d669a2935c::t_043f6944242c87 61
+frontend/src/stores/dashboard.ts
+  s_1b54d669a2935c::t_50167bbd4ff5ee 79,81-82,84,93
+  s_1b54d669a2935c::t_5630e34f413e11 148
+  s_1b54d669a2935c::t_6fe24fff4d3624 257
+  s_1b54d669a2935c::t_d7720c81768b54 185
+  s_1b54d669a2935c::t_52f56359244672 193-195
+tests/unit/test_order_router.py
+  s_1b54d669a2935c::t_664e950df07cf7 341-392
+  s_1b54d669a2935c::t_f2aab627b385d5 439-465,467-485
+frontend/src/stores/dashboard.test.ts
+  s_1b54d669a2935c::t_c30fa147d11699 94-122
+tests/unit/test_paper_accounting.py
+  s_1b54d669a2935c::t_435bb2cd24188d 120-142
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "a0daa0044a7b50924e22019db6ccc80ec8d4bfd8",
+  "prompts": {},
+  "logical_commit_id": "a0daa0044a7b50924e22019db6ccc80ec8d4bfd8",
+  "sessions": {
+    "s_1b54d669a2935c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d9ab9f1b-debc-47d6-8a68-16503eb9faef",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Zane <zane@bigo.sg>"
+    }
+  }
+}
