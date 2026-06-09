@@ -8,6 +8,7 @@ from typing import Any
 from src.core.types import Bar
 
 StrategyErrorCallback = Callable[[str, Exception], Awaitable[None]]
+BeforeStrategyBarCallback = Callable[[Any, Bar], Awaitable[None]]
 
 
 class BotEngine:
@@ -16,11 +17,13 @@ class BotEngine:
         strategies: list[Any] | None = None,
         market_data_service: Any | None = None,
         on_strategy_error: StrategyErrorCallback | None = None,
+        before_strategy_bar: BeforeStrategyBarCallback | None = None,
         stop_market_data_on_stop: bool = True,
     ) -> None:
         self.strategies = strategies or []
         self.market_data_service = market_data_service
         self.on_strategy_error = on_strategy_error
+        self.before_strategy_bar = before_strategy_bar
         self.stop_market_data_on_stop = stop_market_data_on_stop
         self.running = False
         self._active_strategies: dict[str, bool] = {}
@@ -82,6 +85,8 @@ class BotEngine:
                 if not self._active_strategies.get(strategy.name, False):
                     return
                 try:
+                    if self.before_strategy_bar is not None:
+                        await self.before_strategy_bar(strategy, bar)
                     await strategy.on_bar(bar)
                 except Exception as exc:
                     await self._handle_strategy_error(strategy, exc)

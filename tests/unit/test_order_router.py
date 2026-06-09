@@ -2,7 +2,7 @@ import pytest
 
 from src.core.types import Order, OrderSide, OrderStatus, OrderType
 from src.data.models import AccountRecord, PositionRecord
-from src.order.manager import UnifiedOrderManager
+from src.order.manager import UnifiedOrderManager, risk_reason_code
 from src.order.router import OrderHandler, OrderRouter
 from src.risk.manager import RiskManager
 
@@ -338,6 +338,58 @@ async def test_order_manager_rejects_order_when_risk_gate_blocks_position_size()
 
 
 @pytest.mark.asyncio
+async def test_order_manager_rejects_when_total_position_exposure_exceeds_limit():
+    class ShouldNotSubmitHandler(OrderHandler):
+        async def submit(self, order: Order) -> Order:
+            raise AssertionError("risk-blocked order should not reach router")
+
+        async def cancel(self, order_id: str, symbol: str | None = None) -> bool:
+            return True
+
+    repository = FakeRepository()
+    repository.accounts["ma_cross"] = AccountRecord(
+        strategy="ma_cross",
+        initial_equity=100000.0,
+        cash_balance=100000.0,
+        equity=100000.0,
+        realized_pnl=0.0,
+        unrealized_pnl=0.0,
+        daily_pnl=0.0,
+        fees_paid=0.0,
+        updated_at=1700000000000,
+    )
+    repository.positions[("ma_cross", "BTC-USDT")] = PositionRecord(
+        strategy="ma_cross",
+        symbol="BTC-USDT",
+        side="long",
+        amount=1.4,
+        entry_price=50000.0,
+        leverage=1,
+        timestamp=1700000000000,
+    )
+    router = OrderRouter(backtest=ShouldNotSubmitHandler(), mode="backtest")
+    manager = UnifiedOrderManager(
+        router=router,
+        repository=repository,
+        timestamp_ms=lambda: 1700000000000,
+        initial_equity=100000.0,
+        risk_manager=RiskManager(max_position_pct=0.8),
+    )
+
+    order = await manager.submit(
+        symbol="ETH-USDT",
+        side=OrderSide.BUY,
+        order_type=OrderType.LIMIT,
+        amount=1.0,
+        price=50000.0,
+        strategy_name="ma_cross",
+    )
+
+    assert order.status == OrderStatus.REJECTED
+    assert repository.orders[0].status == "rejected"
+
+
+@pytest.mark.asyncio
 async def test_order_manager_allows_reducing_order_when_position_is_at_limit():
     handler = MockHandler()
     repository = FakeRepository()
@@ -376,6 +428,61 @@ async def test_order_manager_allows_reducing_order_when_position_is_at_limit():
         side=OrderSide.SELL,
         order_type=OrderType.MARKET,
         amount=0.2,
+        strategy_name="ma_cross",
+    )
+
+    assert order.status == OrderStatus.FILLED
+    assert len(handler.submitted) == 1
+
+
+@pytest.mark.asyncio
+async def test_order_manager_allows_reducing_order_when_total_exposure_is_over_limit():
+    handler = MockHandler()
+    repository = FakeRepository()
+    repository.accounts["ma_cross"] = AccountRecord(
+        strategy="ma_cross",
+        initial_equity=100000.0,
+        cash_balance=100000.0,
+        equity=100000.0,
+        realized_pnl=0.0,
+        unrealized_pnl=0.0,
+        daily_pnl=0.0,
+        fees_paid=0.0,
+        updated_at=1700000000000,
+    )
+    repository.positions[("ma_cross", "BTC-USDT")] = PositionRecord(
+        strategy="ma_cross",
+        symbol="BTC-USDT",
+        side="long",
+        amount=1.6,
+        entry_price=50000.0,
+        leverage=1,
+        timestamp=1700000000000,
+    )
+    repository.positions[("ma_cross", "ETH-USDT")] = PositionRecord(
+        strategy="ma_cross",
+        symbol="ETH-USDT",
+        side="long",
+        amount=0.2,
+        entry_price=50000.0,
+        leverage=1,
+        timestamp=1700000000000,
+    )
+    router = OrderRouter(backtest=handler, mode="backtest")
+    manager = UnifiedOrderManager(
+        router=router,
+        repository=repository,
+        timestamp_ms=lambda: 1700000000000,
+        initial_equity=100000.0,
+        risk_manager=RiskManager(max_position_pct=0.8),
+    )
+
+    order = await manager.submit(
+        symbol="ETH-USDT",
+        side=OrderSide.SELL,
+        order_type=OrderType.LIMIT,
+        amount=0.1,
+        price=50000.0,
         strategy_name="ma_cross",
     )
 
@@ -434,6 +541,187 @@ async def test_order_manager_values_market_order_with_price_provider_for_risk_ga
     assert order.status == OrderStatus.REJECTED
     assert repository.orders[0].status == "rejected"
     assert repository.trades == []
+
+
+def test_risk_reason_code_maps_known_and_unknown_reasons():
+    assert risk_reason_code("Order exceeds maximum position size") == "max_position_exceeded"
+    assert risk_reason_code("Daily loss exceeds maximum allowed loss") == "daily_loss_exceeded"
+    assert risk_reason_code("Drawdown exceeds maximum allowed drawdown") == "drawdown_exceeded"
+    assert risk_reason_code("Order requires a stop loss") == "stop_loss_required"
+    assert risk_reason_code("Unexpected rule failure") == "risk_rejected"
+    assert risk_reason_code("") == "risk_rejected"
+
+
+@pytest.mark.asyncio
+async def test_order_manager_emits_risk_event_before_order_update_for_gate_rejection():
+    class ShouldNotSubmitHandler(OrderHandler):
+        async def submit(self, order: Order) -> Order:
+            raise AssertionError("risk-blocked market order should not reach router")
+
+        async def cancel(self, order_id: str, symbol: str | None = None) -> bool:
+            return True
+
+    repository = FakeRepository()
+    repository.accounts["ma_cross"] = AccountRecord(
+        strategy="ma_cross",
+        initial_equity=100000.0,
+        cash_balance=100000.0,
+        equity=100000.0,
+        realized_pnl=0.0,
+        unrealized_pnl=0.0,
+        daily_pnl=0.0,
+        fees_paid=0.0,
+        updated_at=1700000000000,
+    )
+    repository.positions[("ma_cross", "BTC-USDT")] = PositionRecord(
+        strategy="ma_cross",
+        symbol="BTC-USDT",
+        side="long",
+        amount=0.2,
+        entry_price=50000.0,
+        leverage=1,
+        timestamp=1700000000000,
+    )
+    calls = []
+    risk_events = []
+
+    async def on_risk_event(payload):
+        calls.append("risk_event")
+        assert repository.orders[0].status == "rejected"
+        risk_events.append(payload)
+
+    async def on_order_update(strategy_name: str):
+        calls.append("order_update")
+        assert strategy_name == "ma_cross"
+
+    router = OrderRouter(backtest=ShouldNotSubmitHandler(), mode="backtest")
+    manager = UnifiedOrderManager(
+        router=router,
+        repository=repository,
+        timestamp_ms=lambda: 1700000000000,
+        initial_equity=100000.0,
+        risk_manager=RiskManager(max_position_pct=0.25),
+        price_provider=lambda symbol: 50000.0,
+        on_risk_event=on_risk_event,
+        on_order_update=on_order_update,
+    )
+
+    order = await manager.submit(
+        symbol="BTC-USDT",
+        side=OrderSide.BUY,
+        order_type=OrderType.MARKET,
+        amount=0.4,
+        strategy_name="ma_cross",
+    )
+
+    assert order.status == OrderStatus.REJECTED
+    assert calls == ["risk_event", "order_update"]
+    assert risk_events == [
+        {
+            "type": "risk_event",
+            "strategy": "ma_cross",
+            "order_id": order.id,
+            "symbol": "BTC-USDT",
+            "side": "buy",
+            "order_type": "market",
+            "amount": 0.4,
+            "price": 50000.0,
+            "requested_price": None,
+            "order_value": pytest.approx(30000.0),
+            "reason": "Order exceeds maximum position size",
+            "reason_code": "max_position_exceeded",
+            "timestamp": 1700000000000,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_order_manager_skips_repository_and_price_provider_when_risk_manager_is_disabled():
+    class ExplodingRiskRepository:
+        orders = []
+
+        def save_order(self, order):
+            self.orders.append(order)
+            return order
+
+        def get_account(self, strategy):
+            raise AssertionError("risk-disabled submit should not read account")
+
+        def get_position(self, strategy, symbol):
+            raise AssertionError("risk-disabled submit should not read position")
+
+    class PendingHandler(OrderHandler):
+        async def submit(self, order: Order) -> Order:
+            return order
+
+        async def cancel(self, order_id: str, symbol: str | None = None) -> bool:
+            return True
+
+    def exploding_price_provider(symbol: str):
+        raise AssertionError("risk-disabled submit should not read latest price")
+
+    router = OrderRouter(backtest=PendingHandler(), mode="backtest")
+    manager = UnifiedOrderManager(
+        router=router,
+        repository=ExplodingRiskRepository(),
+        risk_manager=None,
+        price_provider=exploding_price_provider,
+    )
+
+    order = await manager.submit(
+        symbol="BTC-USDT",
+        side=OrderSide.BUY,
+        order_type=OrderType.MARKET,
+        amount=0.1,
+        strategy_name="ma_cross",
+    )
+
+    assert order.status == OrderStatus.PENDING
+
+
+@pytest.mark.asyncio
+async def test_order_manager_runs_order_update_when_risk_event_callback_fails():
+    class ShouldNotSubmitHandler(OrderHandler):
+        async def submit(self, order: Order) -> Order:
+            raise AssertionError("risk-blocked order should not reach router")
+
+        async def cancel(self, order_id: str, symbol: str | None = None) -> bool:
+            return True
+
+    repository = FakeRepository()
+    calls = []
+
+    async def on_risk_event(payload):
+        calls.append("risk_event")
+        raise RuntimeError("risk broadcast failed")
+
+    async def on_order_update(strategy_name: str):
+        calls.append("order_update")
+        assert strategy_name == "ma_cross"
+
+    router = OrderRouter(backtest=ShouldNotSubmitHandler(), mode="backtest")
+    manager = UnifiedOrderManager(
+        router=router,
+        repository=repository,
+        timestamp_ms=lambda: 1700000000000,
+        initial_equity=100000.0,
+        risk_manager=RiskManager(max_position_pct=0.25),
+        price_provider=lambda symbol: 50000.0,
+        on_risk_event=on_risk_event,
+        on_order_update=on_order_update,
+    )
+
+    with pytest.raises(RuntimeError, match="risk broadcast failed"):
+        await manager.submit(
+            symbol="BTC-USDT",
+            side=OrderSide.BUY,
+            order_type=OrderType.MARKET,
+            amount=10.0,
+            strategy_name="ma_cross",
+        )
+
+    assert repository.orders[0].status == "rejected"
+    assert calls == ["risk_event", "order_update"]
 
 
 @pytest.mark.asyncio

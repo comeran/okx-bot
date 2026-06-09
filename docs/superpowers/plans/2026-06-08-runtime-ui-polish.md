@@ -1,6 +1,6 @@
 # Runtime UI Polish Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Polish Dashboard and Strategies as truthful runtime-control pages using existing backend REST/WebSocket contracts only.
 
@@ -39,7 +39,7 @@
 - Modify: `frontend/src/stores/dashboard.ts`
 - Test: `frontend/src/stores/dashboard.test.ts`
 
-- [ ] **Step 1: Write failing store tests**
+- [x] **Step 1: Write failing store tests**
 
 Add these tests after the existing `adds received timestamps to websocket messages` test in `frontend/src/stores/dashboard.test.ts`:
 
@@ -89,7 +89,7 @@ Add these tests after the existing `adds received timestamps to websocket messag
   });
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run:
 
@@ -99,7 +99,7 @@ npm --prefix frontend exec vitest run src/stores/dashboard.test.ts
 
 Expected: FAIL because `strategyErrors` does not exist and `strategy_status` / `strategy_error` messages are ignored.
 
-- [ ] **Step 3: Add message types**
+- [x] **Step 3: Add message types**
 
 In `frontend/src/types/dashboard.ts`, add these interfaces after `StrategiesDashboardWebSocketMessage`:
 
@@ -135,7 +135,7 @@ export type DashboardWebSocketMessage =
   | UnknownDashboardWebSocketMessage;
 ```
 
-- [ ] **Step 4: Add store state and reducer helpers**
+- [x] **Step 4: Add store state and reducer helpers**
 
 In `frontend/src/stores/dashboard.ts`, add `strategyErrors` to `DashboardState`:
 
@@ -192,7 +192,7 @@ In `applyWebSocketMessage`, add cases before `snapshot`:
         }
 ```
 
-- [ ] **Step 5: Run store tests to verify green**
+- [x] **Step 5: Run store tests to verify green**
 
 Run:
 
@@ -211,7 +211,7 @@ Expected: PASS.
 - Create: `frontend/src/utils/dashboard.test.ts`
 - Modify: `frontend/src/views/Dashboard.vue`
 
-- [ ] **Step 1: Write failing utility tests**
+- [x] **Step 1: Write failing utility tests**
 
 Create `frontend/src/utils/dashboard.test.ts`:
 
@@ -270,7 +270,7 @@ describe('dashboard runtime UI helpers', () => {
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run:
 
@@ -280,7 +280,7 @@ npm --prefix frontend exec vitest run src/utils/dashboard.test.ts
 
 Expected: FAIL because `frontend/src/utils/dashboard.ts` does not exist.
 
-- [ ] **Step 3: Create helper module**
+- [x] **Step 3: Create helper module**
 
 Create `frontend/src/utils/dashboard.ts`:
 
@@ -353,7 +353,7 @@ export function getDashboardStrategyStatusTagType(status: string): 'success' | '
 }
 ```
 
-- [ ] **Step 4: Run utility tests to verify green**
+- [x] **Step 4: Run utility tests to verify green**
 
 Run:
 
@@ -374,7 +374,7 @@ Expected: PASS.
 - Test: `frontend/src/utils/dashboard.test.ts`
 - Test: `frontend/src/stores/dashboard.test.ts`
 
-- [ ] **Step 1: Replace inline Dashboard helpers with imports**
+- [x] **Step 1: Replace inline Dashboard helpers with imports**
 
 In `frontend/src/views/Dashboard.vue`, replace the inline helper constants/functions from `const emptyValue = '—';` through `formatPayloadPreview` with this import block after the existing type import:
 
@@ -418,7 +418,7 @@ Update `lastUpdatedText` to:
 const lastUpdatedText = computed(() => formatRuntimeTime(dashboard.lastUpdatedAt ?? undefined));
 ```
 
-- [ ] **Step 2: Add localized label for last strategy error**
+- [x] **Step 2: Add localized label for last strategy error**
 
 In `frontend/src/locales/en.ts`, add under `dashboard`:
 
@@ -432,7 +432,7 @@ In `frontend/src/locales/zh-CN.ts`, add under `dashboard`:
     lastError: '最近错误',
 ```
 
-- [ ] **Step 3: Render strategy status tags and last error**
+- [x] **Step 3: Render strategy status tags and last error**
 
 Replace the Dashboard strategies table columns in `frontend/src/views/Dashboard.vue` with:
 
@@ -452,7 +452,7 @@ Replace the Dashboard strategies table columns in `frontend/src/views/Dashboard.
 </el-table-column>
 ```
 
-- [ ] **Step 4: Render message type as a tag and payload as monospace preview**
+- [x] **Step 4: Render message type as a tag and payload as monospace preview**
 
 Replace the message table type/payload templates in `frontend/src/views/Dashboard.vue` with:
 
@@ -479,7 +479,7 @@ Add scoped CSS:
 }
 ```
 
-- [ ] **Step 5: Run targeted tests and build check**
+- [x] **Step 5: Run targeted tests and build check**
 
 Run:
 
@@ -500,7 +500,7 @@ Expected: both commands PASS.
 - Modify: `frontend/src/locales/zh-CN.ts`
 - Modify: `frontend/src/i18n.test.ts`
 
-- [ ] **Step 1: Write failing i18n assertions**
+- [x] **Step 1: Write failing i18n assertions**
 
 In `frontend/src/i18n.test.ts`, extend the first test with:
 
@@ -518,7 +518,7 @@ In `frontend/src/i18n.test.ts`, extend the first test with:
 
 Keep the existing `nav.dashboard` assertions intact; if needed, move the existing `setLocale(i18n, 'zh-CN')` call earlier only once.
 
-- [ ] **Step 2: Run i18n test to verify it fails**
+- [x] **Step 2: Run i18n test to verify it fails**
 
 Run:
 
@@ -528,7 +528,7 @@ npm --prefix frontend exec vitest run src/i18n.test.ts
 
 Expected: FAIL because `strategies.runtimeControlHint` is missing.
 
-- [ ] **Step 3: Add localized runtime-control hint**
+- [x] **Step 3: Add localized runtime-control hint**
 
 In `frontend/src/locales/en.ts`, add under `strategies`:
 
@@ -542,7 +542,7 @@ In `frontend/src/locales/zh-CN.ts`, add under `strategies`:
     runtimeControlHint: '此页面只用于启动和停止现有运行态策略，暂不保存或编辑持久化策略配置。',
 ```
 
-- [ ] **Step 4: Render hint below strategy list header**
+- [x] **Step 4: Render hint below strategy list header**
 
 In `frontend/src/views/Strategy.vue`, add this paragraph immediately after the `strategyList` card header:
 
@@ -560,7 +560,7 @@ Update scoped CSS:
 }
 ```
 
-- [ ] **Step 5: Run i18n and helper tests**
+- [x] **Step 5: Run i18n and helper tests**
 
 Run:
 
@@ -577,7 +577,7 @@ Expected: PASS.
 **Files:**
 - No production file changes in this task.
 
-- [ ] **Step 1: Run all frontend unit tests**
+- [x] **Step 1: Run all frontend unit tests**
 
 Run:
 
@@ -587,7 +587,7 @@ npm --prefix frontend exec vitest run
 
 Expected: PASS with all frontend tests passing.
 
-- [ ] **Step 2: Run production build**
+- [x] **Step 2: Run production build**
 
 Run:
 
@@ -597,7 +597,7 @@ npm --prefix frontend run build
 
 Expected: PASS with `vue-tsc --noEmit` and Vite build success.
 
-- [ ] **Step 3: Start backend and frontend dev servers**
+- [x] **Step 3: Start backend and frontend dev servers**
 
 Run backend in one background process:
 
@@ -613,7 +613,7 @@ npm --prefix frontend run dev -- --host 127.0.0.1 --port 5173
 
 Expected: backend serves FastAPI, frontend serves Vite at `http://127.0.0.1:5173`.
 
-- [ ] **Step 4: Browser verify Dashboard `/`**
+- [x] **Step 4: Browser verify Dashboard `/`**
 
 Open `http://127.0.0.1:5173/` and verify:
 
@@ -626,7 +626,7 @@ Open `http://127.0.0.1:5173/` and verify:
 - WebSocket message log shows message type, received time, and short payload preview.
 - Browser console has no error/warn messages from this page.
 
-- [ ] **Step 5: Browser verify Strategies `/strategies`**
+- [x] **Step 5: Browser verify Strategies `/strategies`**
 
 Open `http://127.0.0.1:5173/strategies` and verify:
 
@@ -639,7 +639,7 @@ Open `http://127.0.0.1:5173/strategies` and verify:
 - Runtime-control hint is visible.
 - Browser console has no error/warn messages from this page.
 
-- [ ] **Step 6: Review git diff before reporting completion**
+- [x] **Step 6: Review git diff before reporting completion**
 
 Run:
 
@@ -660,11 +660,11 @@ Expected: only frontend UI/test/locale files and the new plan file changed.
 - Create: `frontend/src/vite-env.d.ts`
 - Modify: `frontend/src/main.ts`
 
-- [ ] **Step 1: Write failing Monaco environment tests**
+- [x] **Step 1: Write failing Monaco environment tests**
 
 Create `frontend/src/monaco.test.ts` to verify the app can assign `MonacoEnvironment.getWorker` through a testable initializer.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run:
 
@@ -674,11 +674,11 @@ npm --prefix frontend exec vitest run src/monaco.test.ts
 
 Expected: FAIL because `frontend/src/monaco.ts` does not exist.
 
-- [ ] **Step 3: Add Monaco worker environment setup**
+- [x] **Step 3: Add Monaco worker environment setup**
 
 Create `frontend/src/monaco.ts` with `createMonacoEnvironment()` and `configureMonacoEnvironment()`, using Vite's `?worker` import for `monaco-editor/esm/vs/editor/editor.worker`.
 
-- [ ] **Step 4: Add Vite client type reference**
+- [x] **Step 4: Add Vite client type reference**
 
 Create `frontend/src/vite-env.d.ts` with:
 
@@ -686,11 +686,11 @@ Create `frontend/src/vite-env.d.ts` with:
 /// <reference types="vite/client" />
 ```
 
-- [ ] **Step 5: Configure Monaco before mounting Vue**
+- [x] **Step 5: Configure Monaco before mounting Vue**
 
 Import and call `configureMonacoEnvironment()` in `frontend/src/main.ts` before creating the app.
 
-- [ ] **Step 6: Verify tests, build, and browser console**
+- [x] **Step 6: Verify tests, build, and browser console**
 
 Run:
 
