@@ -1,0 +1,20 @@
+README.md
+  s_d15a62b7847646::t_d5de47af389ef8 1-152
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "cd97ed19410bfc93497815a055a4fcd804ceb7d1",
+  "prompts": {},
+  "logical_commit_id": "cd97ed19410bfc93497815a055a4fcd804ceb7d1",
+  "sessions": {
+    "s_d15a62b7847646": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8efe042b-524d-47e7-911b-a6b3f3798d1d",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Zane <zane@bigo.sg>"
+    }
+  }
+}
