@@ -7,7 +7,7 @@ import { runBacktest, fetchBacktestResults } from '@/services/backtest';
 import { listStrategies } from '@/services/strategies';
 import type { BacktestMetrics, BacktestRequest, BacktestResult } from '@/types/backtest';
 import type { StrategySummary } from '@/types/strategy';
-import { getBacktestValidationError } from '@/utils/backtest';
+import { getBacktestApiErrorMessage, getBacktestValidationError } from '@/utils/backtest';
 
 const { t } = useI18n();
 
@@ -138,8 +138,8 @@ async function handleRun(): Promise<void> {
     latestMetrics.value = await runBacktest(buildRequest());
     ElMessage.success(t('backtest.runSuccess'));
     await loadResults();
-  } catch {
-    ElMessage.error(t('backtest.runError'));
+  } catch (error) {
+    ElMessage.error(getBacktestApiErrorMessage(error) ?? t('backtest.runError'));
   } finally {
     running.value = false;
   }

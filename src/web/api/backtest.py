@@ -7,7 +7,12 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from src.backtest.engine import BacktestEngine
-from src.backtest.historical_data import MAX_PAGE_LIMIT, ensure_historical_bars
+from src.backtest.historical_data import (
+    MAX_PAGE_LIMIT,
+    InsufficientHistoricalDataError,
+    UnsupportedTimeframeError,
+    ensure_historical_bars,
+)
 from src.backtest.matcher import OrderMatcher
 from src.core.config import BacktestConfig, load_config
 from src.data.models import BacktestResultRecord
@@ -53,12 +58,17 @@ async def run_backtest(req: BacktestRequest) -> dict[str, float | int]:
             ),
             page_limit=MAX_PAGE_LIMIT,
         )
+    except UnsupportedTimeframeError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail="unsupported timeframe for historical backtest data",
+        ) from exc
+    except InsufficientHistoricalDataError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail="insufficient historical data for requested backtest range",
+        ) from exc
     except ValueError as exc:
-        if str(exc) == "unsupported timeframe":
-            raise HTTPException(
-                status_code=422,
-                detail="unsupported timeframe for historical backtest data",
-            ) from exc
         raise HTTPException(
             status_code=502,
             detail="failed to fetch historical market data",

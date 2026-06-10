@@ -1,6 +1,37 @@
 import { describe, expect, it } from 'vitest';
 
-import { getBacktestValidationError } from './backtest';
+import { getBacktestApiErrorMessage, getBacktestValidationError } from './backtest';
+
+function axiosErrorWithDetail(detail?: unknown): unknown {
+  return {
+    isAxiosError: true,
+    response: {
+      data: detail === undefined ? {} : { detail },
+    },
+  };
+}
+
+describe('backtest API error messages', () => {
+  it('returns a trimmed FastAPI detail string from an Axios error', () => {
+    expect(getBacktestApiErrorMessage(axiosErrorWithDetail(' insufficient historical data '))).toBe(
+      'insufficient historical data',
+    );
+  });
+
+  it('returns null for a non-Axios error', () => {
+    expect(getBacktestApiErrorMessage(new Error('failed'))).toBeNull();
+  });
+
+  it('returns null when detail is missing or not a string', () => {
+    expect(getBacktestApiErrorMessage(axiosErrorWithDetail())).toBeNull();
+    expect(getBacktestApiErrorMessage(axiosErrorWithDetail({ message: 'failed' }))).toBeNull();
+  });
+
+  it('returns null when detail is empty or whitespace', () => {
+    expect(getBacktestApiErrorMessage(axiosErrorWithDetail(''))).toBeNull();
+    expect(getBacktestApiErrorMessage(axiosErrorWithDetail('   '))).toBeNull();
+  });
+});
 
 describe('backtest validation', () => {
   it('rejects missing start or end time', () => {
