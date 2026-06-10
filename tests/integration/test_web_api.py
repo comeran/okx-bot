@@ -1674,6 +1674,81 @@ async def test_run_backtest_rejects_insufficient_cached_bars(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_run_backtest_rejects_partial_historical_fetch_without_persisting(monkeypatch):
+    class FakeRepository:
+        results = []
+        klines = []
+
+        def get_klines(self, symbol, timeframe, start, end):
+            return [
+                kline
+                for kline in self.klines
+                if kline.symbol == symbol
+                and kline.timeframe == timeframe
+                and start <= kline.timestamp <= end
+            ]
+
+        def save_kline(self, kline):
+            self.klines.append(kline)
+            return kline
+
+        def save_backtest_result(self, result):
+            self.results.append(result)
+            return result
+
+    class EmptyStrategy(BaseStrategy):
+        name = "partial_fetch"
+
+        async def on_bar(self, bar):
+            return None
+
+    class PartialAdapter:
+        async def fetch_ohlcv(self, symbol, timeframe, limit=100, since=None):
+            return [
+                Bar(
+                    timestamp=1700002800000,
+                    open=100,
+                    high=101,
+                    low=99,
+                    close=100,
+                    volume=1,
+                )
+            ]
+
+        async def close(self):
+            pass
+
+    FakeRepository.results = []
+    FakeRepository.klines = []
+    registry = StrategyRegistry()
+    registry.register("partial_fetch", EmptyStrategy)
+    monkeypatch.setattr(backtest_api, "Repository", FakeRepository, raising=False)
+    monkeypatch.setattr(
+        backtest_api, "OKXSpotAdapter", lambda **kwargs: PartialAdapter(), raising=False
+    )
+    monkeypatch.setattr(backtest_api, "create_strategy_registry", lambda: registry, raising=False)
+
+    transport = ASGITransport(app=create_app())
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/api/backtest/run",
+            json={
+                "strategy": "partial_fetch",
+                "symbol": "BTC-USDT",
+                "timeframe": "1h",
+                "start_time": 1700002800000,
+                "end_time": 1700006400000,
+                "initial_capital": 100000,
+            },
+        )
+
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == "insufficient historical data for requested backtest range"
+    assert FakeRepository.klines == []
+    assert FakeRepository.results == []
+
+
+@pytest.mark.asyncio
 async def test_run_backtest_rejects_unknown_strategy(app):
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:

@@ -17,6 +17,14 @@ DEFAULT_PAGE_LIMIT = 100
 MAX_PAGE_LIMIT = 300
 
 
+class UnsupportedTimeframeError(ValueError):
+    pass
+
+
+class InsufficientHistoricalDataError(ValueError):
+    pass
+
+
 class HistoricalDataAdapter(Protocol):
     async def fetch_ohlcv(
         self,
@@ -31,7 +39,7 @@ class HistoricalDataAdapter(Protocol):
 
 def timeframe_to_ms(timeframe: str) -> int:
     if timeframe not in TIMEFRAME_MS:
-        raise ValueError("unsupported timeframe")
+        raise UnsupportedTimeframeError("unsupported timeframe")
     return TIMEFRAME_MS[timeframe]
 
 
@@ -71,13 +79,20 @@ async def ensure_historical_bars(
     finally:
         await adapter.close()
 
+    merged_by_timestamp = cached_by_timestamp | fetched_by_timestamp
+    remaining_missing = [
+        timestamp for timestamp in expected if timestamp not in merged_by_timestamp
+    ]
+    if remaining_missing:
+        raise InsufficientHistoricalDataError("insufficient historical data")
+
     new_bars = [
         bar
         for timestamp, bar in fetched_by_timestamp.items()
         if timestamp not in cached_by_timestamp and start <= timestamp <= end
     ]
     datasource.save_bars_to_cache(new_bars)
-    return _sorted_bars(cached_by_timestamp | fetched_by_timestamp)
+    return _sorted_bars(merged_by_timestamp)
 
 
 def _expected_timestamps(start: int, end: int, interval: int) -> list[int]:
