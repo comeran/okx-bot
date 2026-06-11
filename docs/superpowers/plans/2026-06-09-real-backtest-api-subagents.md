@@ -104,7 +104,7 @@ Subagent constraints:
 
 - Modify: `tests/unit/test_historical_data.py`
 
-- [ ] **Step 1: Add imports for the new exception class**
+- [x] **Step 1: Add imports for the new exception class**
 
 Change the import at the top of `tests/unit/test_historical_data.py` from:
 
@@ -122,7 +122,7 @@ from src.backtest.historical_data import (
 )
 ```
 
-- [ ] **Step 2: Add disjoint missing-range test**
+- [x] **Step 2: Add disjoint missing-range test**
 
 Append this test after `test_ensure_historical_bars_fetches_missing_range_and_persists`:
 
@@ -157,7 +157,7 @@ async def test_ensure_historical_bars_fetches_disjoint_missing_ranges(repo: Repo
     ]
 ```
 
-- [ ] **Step 3: Add unaligned start-time test**
+- [x] **Step 3: Add unaligned start-time test**
 
 Append this test after the disjoint missing-range test:
 
@@ -181,7 +181,7 @@ async def test_ensure_historical_bars_aligns_unaligned_start_time(repo: Reposito
     ]
 ```
 
-- [ ] **Step 4: Add page-limit clamp test**
+- [x] **Step 4: Add page-limit clamp test**
 
 Append this test after `test_ensure_historical_bars_paginates_missing_ranges`:
 
@@ -210,7 +210,7 @@ async def test_ensure_historical_bars_clamps_page_limit_to_max(repo: Repository)
     }
 ```
 
-- [ ] **Step 5: Add adapter-close-on-error test**
+- [x] **Step 5: Add adapter-close-on-error test**
 
 Append this test after `test_ensure_historical_bars_does_not_fetch_when_cache_is_complete`:
 
@@ -240,7 +240,7 @@ async def test_ensure_historical_bars_closes_adapter_when_fetch_fails(repo: Repo
     assert adapter.closed is True
 ```
 
-- [ ] **Step 6: Add incomplete-fetch rejection test**
+- [x] **Step 6: Add incomplete-fetch rejection test**
 
 Append this test after the adapter-close-on-error test:
 
@@ -263,7 +263,7 @@ async def test_ensure_historical_bars_raises_when_missing_rows_remain_after_fetc
     assert repo.get_klines("BTC-USDT", "1m", 0, 180_000) == []
 ```
 
-- [ ] **Step 7: Run the historical-data tests and confirm the intended failure**
+- [x] **Step 7: Run the historical-data tests and confirm the intended failure**
 
 Run:
 
@@ -276,7 +276,7 @@ Expected before implementation:
 - Existing tests pass.
 - `test_ensure_historical_bars_raises_when_missing_rows_remain_after_fetch` fails because `InsufficientHistoricalDataError` does not exist or because incomplete data is returned instead of rejected.
 
-- [ ] **Step 8: Commit only if this is an isolated TDD checkpoint**
+- [x] **Step 8: Commit only if this is an isolated TDD checkpoint**
 
 If the subagent is committing tests separately, run:
 
@@ -296,7 +296,7 @@ If the implementation will be committed in the same lane, continue to Task 2 and
 - Modify: `src/backtest/historical_data.py`
 - Test: `tests/unit/test_historical_data.py`
 
-- [ ] **Step 1: Add explicit exception classes**
+- [x] **Step 1: Add explicit exception classes**
 
 In `src/backtest/historical_data.py`, insert these classes after `MAX_PAGE_LIMIT = 300`:
 
@@ -309,7 +309,7 @@ class InsufficientHistoricalDataError(ValueError):
     pass
 ```
 
-- [ ] **Step 2: Raise the explicit unsupported-timeframe exception**
+- [x] **Step 2: Raise the explicit unsupported-timeframe exception**
 
 Change `timeframe_to_ms()` from:
 
@@ -329,7 +329,7 @@ def timeframe_to_ms(timeframe: str) -> int:
     return TIMEFRAME_MS[timeframe]
 ```
 
-- [ ] **Step 3: Validate merged coverage before saving fetched rows**
+- [x] **Step 3: Validate merged coverage before saving fetched rows**
 
 In `ensure_historical_bars()`, replace the block after the `finally` clause:
 
@@ -373,7 +373,7 @@ This preserves the existing OKX cache-miss algorithm:
 9. Save fetched bars only when the merged cached/fetched set covers every expected timestamp.
 10. Return merged bars sorted by timestamp.
 
-- [ ] **Step 4: Run the historical-data tests**
+- [x] **Step 4: Run the historical-data tests**
 
 Run:
 
@@ -386,7 +386,7 @@ Expected after implementation:
 - All tests in `tests/unit/test_historical_data.py` pass.
 - The incomplete-fetch test proves partial OKX responses are rejected and not cached.
 
-- [ ] **Step 5: Run ruff on the changed files**
+- [x] **Step 5: Run ruff on the changed files**
 
 Run:
 
@@ -398,7 +398,7 @@ Expected:
 
 - Ruff exits with code 0.
 
-- [ ] **Step 6: Commit the historical-data lane**
+- [x] **Step 6: Commit the historical-data lane**
 
 Run:
 
@@ -416,7 +416,7 @@ git commit -m "fix: reject incomplete historical backtest data"
 - Modify: `src/web/api/backtest.py`
 - Modify: `tests/integration/test_web_api.py`
 
-- [ ] **Step 1: Add an integration test for partial historical fetches**
+- [x] **Step 1: Add an integration test for partial historical fetches**
 
 Append this test in `tests/integration/test_web_api.py` after `test_run_backtest_fetches_missing_historical_bars_before_running`:
 
@@ -499,7 +499,7 @@ Why this test matters:
 - The expected `1h` timestamps include the middle candle, so the request must fail as insufficient historical data.
 - The test proves partial fetched data is not cached and no summary is persisted.
 
-- [ ] **Step 2: Run the new integration test and confirm failure before API mapping is updated**
+- [x] **Step 2: Run the new integration test and confirm failure before API mapping is updated**
 
 Run:
 
@@ -512,7 +512,7 @@ Expected before API mapping is updated:
 - If Task 2 is merged first, the test fails with HTTP 502 because `InsufficientHistoricalDataError` is still caught by the generic `ValueError` branch.
 - If Task 2 is not merged yet, the test fails with HTTP 200 because incomplete data is still allowed.
 
-- [ ] **Step 3: Import the explicit historical-data exceptions**
+- [x] **Step 3: Import the explicit historical-data exceptions**
 
 In `src/web/api/backtest.py`, change the historical-data import from:
 
@@ -531,7 +531,7 @@ from src.backtest.historical_data import (
 )
 ```
 
-- [ ] **Step 4: Replace ValueError string matching with explicit exception mapping**
+- [x] **Step 4: Replace ValueError string matching with explicit exception mapping**
 
 In `run_backtest()`, replace this `except ValueError` block:
 
@@ -570,7 +570,7 @@ with these blocks:
 
 Keep the existing generic `except Exception` block unchanged so provider failures still return 502.
 
-- [ ] **Step 5: Run targeted integration tests**
+- [x] **Step 5: Run targeted integration tests**
 
 Run:
 
@@ -592,7 +592,7 @@ Expected:
 - Provider failure returns 502.
 - Successful cache-miss fetch persists fetched bars and a result summary.
 
-- [ ] **Step 6: Run ruff on the changed backend API files**
+- [x] **Step 6: Run ruff on the changed backend API files**
 
 Run:
 
@@ -604,7 +604,7 @@ Expected:
 
 - Ruff exits with code 0.
 
-- [ ] **Step 7: Commit the API lane**
+- [x] **Step 7: Commit the API lane**
 
 Run:
 
@@ -622,7 +622,7 @@ git commit -m "fix: map incomplete backtest history to 422"
 - Create: `tests/unit/test_exchange_base.py`
 - Test: `src/exchange/base.py`
 
-- [ ] **Step 1: Create the OKX adapter unit test file**
+- [x] **Step 1: Create the OKX adapter unit test file**
 
 Create `tests/unit/test_exchange_base.py` with this content:
 
@@ -676,7 +676,7 @@ async def test_okx_base_adapter_fetch_ohlcv_passes_since_and_limit(monkeypatch):
     assert fake.closed is True
 ```
 
-- [ ] **Step 2: Run the new adapter test**
+- [x] **Step 2: Run the new adapter test**
 
 Run:
 
@@ -689,7 +689,7 @@ Expected:
 - The test passes with the current `OKXBaseAdapter.fetch_ohlcv()` implementation.
 - If it fails, adjust only `src/exchange/base.py` so `fetch_ohlcv()` calls `self._exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)` and maps the returned row fields to `Bar` exactly as the assertions expect.
 
-- [ ] **Step 3: Run ruff on the new test**
+- [x] **Step 3: Run ruff on the new test**
 
 Run:
 
@@ -701,7 +701,7 @@ Expected:
 
 - Ruff exits with code 0.
 
-- [ ] **Step 4: Commit the OKX adapter lane**
+- [x] **Step 4: Commit the OKX adapter lane**
 
 Run:
 
@@ -722,7 +722,7 @@ If `src/exchange/base.py` did not change, Git will commit only `tests/unit/test_
 - Modify: `frontend/src/utils/backtest.test.ts`
 - Modify: `frontend/src/views/Backtest.vue`
 
-- [ ] **Step 1: Add frontend tests for FastAPI detail extraction**
+- [x] **Step 1: Add frontend tests for FastAPI detail extraction**
 
 In `frontend/src/utils/backtest.test.ts`, append these tests inside the existing `describe('backtest validation', () => { ... })` block after `it('accepts valid backtest inputs', ...)`:
 
@@ -771,7 +771,7 @@ to:
 import { getBacktestApiErrorMessage, getBacktestValidationError } from './backtest';
 ```
 
-- [ ] **Step 2: Run the frontend utility test and confirm failure**
+- [x] **Step 2: Run the frontend utility test and confirm failure**
 
 Run:
 
@@ -783,7 +783,7 @@ Expected before implementation:
 
 - The test fails because `getBacktestApiErrorMessage` is not exported.
 
-- [ ] **Step 3: Add the Axios-aware helper**
+- [x] **Step 3: Add the Axios-aware helper**
 
 In `frontend/src/utils/backtest.ts`, add this import at the top:
 
@@ -809,7 +809,7 @@ export function getBacktestApiErrorMessage(error: unknown): string | null {
 }
 ```
 
-- [ ] **Step 4: Use the helper in the Backtest page**
+- [x] **Step 4: Use the helper in the Backtest page**
 
 In `frontend/src/views/Backtest.vue`, change the utility import from:
 
@@ -839,7 +839,7 @@ to:
   } finally {
 ```
 
-- [ ] **Step 5: Run the frontend utility test**
+- [x] **Step 5: Run the frontend utility test**
 
 Run:
 
@@ -851,7 +851,7 @@ Expected:
 
 - All tests in `frontend/src/utils/backtest.test.ts` pass.
 
-- [ ] **Step 6: Run the backtest service contract tests**
+- [x] **Step 6: Run the backtest service contract tests**
 
 Run:
 
@@ -864,7 +864,7 @@ Expected:
 - `runBacktest()` still posts to `/api/backtest/run` and returns metrics.
 - `fetchBacktestResults()` still gets `/api/backtest/results` and returns flat persisted summaries.
 
-- [ ] **Step 7: Build the frontend**
+- [x] **Step 7: Build the frontend**
 
 Run:
 
@@ -877,7 +877,7 @@ Expected:
 - `vue-tsc --noEmit` passes.
 - Vite production build completes.
 
-- [ ] **Step 8: Commit the frontend lane**
+- [x] **Step 8: Commit the frontend lane**
 
 Run:
 
@@ -895,7 +895,7 @@ git commit -m "fix: show backtest api error details"
 - Verify: backend and frontend test suites.
 - Verify: browser golden path for the Backtest page.
 
-- [ ] **Step 1: Merge subagent lane commits into the integration branch**
+- [x] **Step 1: Merge subagent lane commits into the integration branch**
 
 Run the merge command that matches the branch names created by the subagents. Example if the lane branches are named as below:
 
@@ -912,7 +912,7 @@ Expected:
 - If `src/web/api/backtest.py` import ordering conflicts with Task 3, keep the grouped import shown in Task 3.
 - If frontend import ordering conflicts with Task 5, keep the grouped utility import shown in Task 5.
 
-- [ ] **Step 2: Run the full backend unit and integration suite**
+- [x] **Step 2: Run the full backend unit and integration suite**
 
 Run:
 
@@ -924,7 +924,7 @@ Expected:
 
 - All backend tests pass.
 
-- [ ] **Step 3: Run backend lint**
+- [x] **Step 3: Run backend lint**
 
 Run:
 
@@ -936,7 +936,7 @@ Expected:
 
 - Ruff exits with code 0.
 
-- [ ] **Step 4: Run the full frontend Vitest suite**
+- [x] **Step 4: Run the full frontend Vitest suite**
 
 Run:
 
@@ -948,7 +948,7 @@ Expected:
 
 - All frontend tests pass.
 
-- [ ] **Step 5: Run the frontend production build**
+- [x] **Step 5: Run the frontend production build**
 
 Run:
 
@@ -961,7 +961,7 @@ Expected:
 - Type checking passes.
 - Vite build completes.
 
-- [ ] **Step 6: Browser smoke test the Backtest page**
+- [x] **Step 6: Browser smoke test the Backtest page**
 
 Start the backend API server in one terminal:
 
@@ -991,7 +991,7 @@ In a browser:
 
 If a real OKX network call is unavailable in the local environment, use the automated API tests as the error-path proof and record that the live browser error-path depended on external OKX availability.
 
-- [ ] **Step 7: Inspect git status and final diff**
+- [x] **Step 7: Inspect git status and final diff**
 
 Run:
 
@@ -1006,7 +1006,7 @@ Expected:
 - No generated build artifacts are staged.
 - No local database files are staged.
 
-- [ ] **Step 8: Final integration commit if lanes were not already committed**
+- [x] **Step 8: Final integration commit if lanes were not already committed**
 
 If subagent lanes were merged as commits, do not create a duplicate commit. If changes were applied inline without lane commits, run:
 
