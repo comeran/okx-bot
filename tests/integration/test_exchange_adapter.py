@@ -33,71 +33,113 @@ def test_okx_adapters_configure_market_type(adapter_cls, default_type):
 
 
 @pytest.mark.asyncio
-async def test_fetch_ohlcv_maps_rows_to_bars():
+async def test_fetch_spot_ohlcv_uses_raw_public_candles_and_maps_rows_to_bars():
     with patch("src.exchange.base.ccxt") as ccxt:
         exchange = AsyncMock()
-        exchange.fetch_ohlcv.return_value = [
-            [1700000000000, 50000, 51000, 49000, 50500, 100.5],
-            [1700000060000, 50500, 51500, 50000, 51200, 80.25],
-        ]
+        exchange.public_get_market_candles.return_value = {
+            "data": [
+                ["1700000060000", "50500", "51500", "50000", "51200", "80.25"],
+                ["1700000000000", "50000", "51000", "49000", "50500", "100.5"],
+            ]
+        }
         ccxt.okx.return_value = exchange
         adapter = OKXSpotAdapter("api-key", "secret", "passphrase")
 
     bars = await adapter.fetch_ohlcv("BTC-USDT", "1m", limit=2)
 
-    exchange.fetch_ohlcv.assert_awaited_once_with("BTC-USDT", "1m", since=None, limit=2)
+    exchange.fetch_ohlcv.assert_not_awaited()
+    exchange.public_get_market_candles.assert_awaited_once_with(
+        {"instId": "BTC-USDT", "bar": "1m", "limit": 2}
+    )
     assert [bar.timestamp for bar in bars] == [1700000000000, 1700000060000]
     assert bars[0].open == 50000.0
     assert bars[1].close == 51200.0
 
 
 @pytest.mark.asyncio
-async def test_fetch_ohlcv_forwards_since_to_exchange():
+async def test_fetch_spot_ohlcv_with_since_uses_raw_history_candles():
+    with patch("src.exchange.base.ccxt") as ccxt:
+        exchange = AsyncMock()
+        exchange.public_get_market_history_candles.return_value = {
+            "data": [
+                ["1700000060000", "50500", "51500", "50000", "51200", "80.25"],
+            ]
+        }
+        ccxt.okx.return_value = exchange
+        adapter = OKXSpotAdapter("api-key", "secret", "passphrase")
+
+    bars = await adapter.fetch_ohlcv("BTC-USDT", "1m", limit=1, since=1700000060000)
+
+    exchange.fetch_ohlcv.assert_not_awaited()
+    exchange.public_get_market_candles.assert_not_awaited()
+    exchange.public_get_market_history_candles.assert_awaited_once_with(
+        {
+            "instId": "BTC-USDT",
+            "bar": "1m",
+            "limit": 1,
+            "before": 1700000059999,
+            "after": 1700000120000,
+        }
+    )
+    assert [bar.timestamp for bar in bars] == [1700000060000]
+
+
+@pytest.mark.asyncio
+async def test_fetch_non_spot_ohlcv_uses_ccxt_symbol_unchanged():
     with patch("src.exchange.base.ccxt") as ccxt:
         exchange = AsyncMock()
         exchange.fetch_ohlcv.return_value = [
             [1700000060000, 50500, 51500, 50000, 51200, 80.25],
         ]
         ccxt.okx.return_value = exchange
-        adapter = OKXSpotAdapter("api-key", "secret", "passphrase")
+        adapter = OKXSwapAdapter("api-key", "secret", "passphrase")
 
-    bars = await adapter.fetch_ohlcv("BTC-USDT", "1m", limit=1, since=1700000060000)
+    bars = await adapter.fetch_ohlcv(
+        "BTC-USDT-SWAP",
+        "1h",
+        limit=1,
+        since=1700000060000,
+    )
 
     exchange.fetch_ohlcv.assert_awaited_once_with(
-        "BTC-USDT",
-        "1m",
+        "BTC-USDT-SWAP",
+        "1h",
         since=1700000060000,
         limit=1,
     )
+    exchange.public_get_market_candles.assert_not_awaited()
     assert [bar.timestamp for bar in bars] == [1700000060000]
 
 
 @pytest.mark.asyncio
-async def test_fetch_tickers_maps_public_ticker_fields():
+async def test_fetch_spot_tickers_maps_raw_public_ticker_fields():
     with patch("src.exchange.base.ccxt") as ccxt:
         exchange = AsyncMock()
-        exchange.fetch_tickers.return_value = {
-            "BTC-USDT": {
-                "symbol": "BTC-USDT",
-                "last": 68000,
-                "bid": 67999.5,
-                "ask": 68000.5,
-                "baseVolume": 123.45,
-            },
-            "ETH-USDT": {
-                "symbol": "ETH-USDT",
-                "last": 3800,
-                "bid": 3799.5,
-                "ask": 3800.5,
-                "baseVolume": 456.78,
-            },
+        exchange.public_get_market_tickers.return_value = {
+            "data": [
+                {
+                    "instId": "ETH-USDT",
+                    "last": "3800",
+                    "bidPx": "3799.5",
+                    "askPx": "3800.5",
+                    "vol24h": "456.78",
+                },
+                {
+                    "instId": "BTC-USDT",
+                    "last": "68000",
+                    "bidPx": "67999.5",
+                    "askPx": "68000.5",
+                    "vol24h": "123.45",
+                },
+            ]
         }
         ccxt.okx.return_value = exchange
         adapter = OKXSpotAdapter("api-key", "secret", "passphrase")
 
-    tickers = await adapter.fetch_tickers(["BTC-USDT", "ETH-USDT"])
+    tickers = await adapter.fetch_tickers(["BTC-USDT", "MISSING-USDT", "ETH-USDT"])
 
-    exchange.fetch_tickers.assert_awaited_once_with(["BTC-USDT", "ETH-USDT"])
+    exchange.fetch_tickers.assert_not_awaited()
+    exchange.public_get_market_tickers.assert_awaited_once_with({"instType": "SPOT"})
     assert tickers == [
         {
             "symbol": "BTC-USDT",
@@ -117,24 +159,26 @@ async def test_fetch_tickers_maps_public_ticker_fields():
 
 
 @pytest.mark.asyncio
-async def test_fetch_tickers_preserves_requested_okx_symbols_when_ccxt_normalizes_keys():
+async def test_fetch_spot_tickers_preserves_requested_okx_symbols():
     with patch("src.exchange.base.ccxt") as ccxt:
         exchange = AsyncMock()
-        exchange.fetch_tickers.return_value = {
-            "BTC/USDT": {
-                "symbol": "BTC/USDT",
-                "last": 68000,
-                "bid": 67999.5,
-                "ask": 68000.5,
-                "baseVolume": 123.45,
-            },
-            "ETH/USDT": {
-                "symbol": "ETH/USDT",
-                "last": 3800,
-                "bid": 3799.5,
-                "ask": 3800.5,
-                "baseVolume": 456.78,
-            },
+        exchange.public_get_market_tickers.return_value = {
+            "data": [
+                {
+                    "instId": "BTC-USDT",
+                    "last": "68000",
+                    "bidPx": "67999.5",
+                    "askPx": "68000.5",
+                    "vol24h": "123.45",
+                },
+                {
+                    "instId": "ETH-USDT",
+                    "last": "3800",
+                    "bidPx": "3799.5",
+                    "askPx": "3800.5",
+                    "vol24h": "456.78",
+                },
+            ]
         }
         ccxt.okx.return_value = exchange
         adapter = OKXSpotAdapter("api-key", "secret", "passphrase")
@@ -142,6 +186,37 @@ async def test_fetch_tickers_preserves_requested_okx_symbols_when_ccxt_normalize
     tickers = await adapter.fetch_tickers(["BTC-USDT", "ETH-USDT"])
 
     assert [ticker["symbol"] for ticker in tickers] == ["BTC-USDT", "ETH-USDT"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_non_spot_tickers_uses_ccxt_symbols_unchanged():
+    with patch("src.exchange.base.ccxt") as ccxt:
+        exchange = AsyncMock()
+        exchange.fetch_tickers.return_value = {
+            "BTC-USDT-SWAP": {
+                "symbol": "BTC-USDT-SWAP",
+                "last": 68000,
+                "bid": 67999.5,
+                "ask": 68000.5,
+                "baseVolume": 123.45,
+            },
+        }
+        ccxt.okx.return_value = exchange
+        adapter = OKXSwapAdapter("api-key", "secret", "passphrase")
+
+    tickers = await adapter.fetch_tickers(["BTC-USDT-SWAP"])
+
+    exchange.fetch_tickers.assert_awaited_once_with(["BTC-USDT-SWAP"])
+    exchange.public_get_market_tickers.assert_not_awaited()
+    assert tickers == [
+        {
+            "symbol": "BTC-USDT-SWAP",
+            "last": 68000.0,
+            "bidPx": 67999.5,
+            "askPx": 68000.5,
+            "vol24h": 123.45,
+        },
+    ]
 
 
 @pytest.mark.asyncio

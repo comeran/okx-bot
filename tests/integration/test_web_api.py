@@ -2538,6 +2538,66 @@ async def test_market_tickers_returns_rows_from_real_public_adapter(monkeypatch,
 
 
 @pytest.mark.asyncio
+async def test_market_klines_returns_502_when_adapter_fetch_fails(monkeypatch, app):
+    events = []
+
+    class FailingOKXSpotAdapter:
+        def __init__(self, api_key: str, secret: str, passphrase: str) -> None:
+            events.append(("init", api_key, secret, passphrase))
+
+        async def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100):
+            events.append(("fetch_ohlcv", symbol, timeframe, limit))
+            raise RuntimeError("provider unavailable")
+
+        async def close(self) -> None:
+            events.append(("close",))
+
+    monkeypatch.setattr(market_api, "OKXSpotAdapter", FailingOKXSpotAdapter, raising=False)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/market/klines?symbol=ETH-USDT&timeframe=1m&limit=2")
+
+    assert resp.status_code == 502
+    assert resp.json()["detail"] == "failed to fetch market data"
+    assert events == [
+        ("init", "", "", ""),
+        ("fetch_ohlcv", "ETH-USDT", "1m", 2),
+        ("close",),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_market_tickers_returns_502_when_adapter_fetch_fails(monkeypatch, app):
+    events = []
+
+    class FailingOKXSpotAdapter:
+        def __init__(self, api_key: str, secret: str, passphrase: str) -> None:
+            events.append(("init", api_key, secret, passphrase))
+
+        async def fetch_tickers(self, symbols: list[str]):
+            events.append(("fetch_tickers", symbols))
+            raise RuntimeError("provider unavailable")
+
+        async def close(self) -> None:
+            events.append(("close",))
+
+    monkeypatch.setattr(market_api, "OKXSpotAdapter", FailingOKXSpotAdapter, raising=False)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/market/tickers")
+
+    assert resp.status_code == 502
+    assert resp.json()["detail"] == "failed to fetch market data"
+    assert events == [
+        ("init", "", "", ""),
+        ("fetch_tickers", ["BTC-USDT", "ETH-USDT", "OKB-USDT", "SOL-USDT"]),
+        ("close",),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_get_market_data(monkeypatch, app):
     class FakeOKXSpotAdapter:
         def __init__(self, api_key: str, secret: str, passphrase: str) -> None:
