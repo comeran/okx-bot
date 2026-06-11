@@ -1,0 +1,20 @@
+docs/superpowers/plans/2026-06-09-real-backtest-api-subagents.md
+  s_d15a62b7847646::t_c0cd24c739b369 107,125,160,184,213,243,266,279,299,312,332,376,389,401,419,502,515,534,573,595,607,625,679,692,704,725,774,786,812,842,854,867,880,898,915,927,939,951,964,994,1009
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "c2f89ab43870bb22c9d5e6d0eb27943d166434be",
+  "prompts": {},
+  "logical_commit_id": "c2f89ab43870bb22c9d5e6d0eb27943d166434be",
+  "sessions": {
+    "s_d15a62b7847646": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8efe042b-524d-47e7-911b-a6b3f3798d1d",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Zane <zane@bigo.sg>"
+    }
+  }
+}
