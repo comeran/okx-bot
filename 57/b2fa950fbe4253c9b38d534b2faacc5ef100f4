@@ -1,0 +1,20 @@
+tests/unit/test_exchange_base.py
+  s_d15a62b7847646::t_2e3dc308e5b4fc 1-62
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "57b2fa950fbe4253c9b38d534b2faacc5ef100f4",
+  "prompts": {},
+  "logical_commit_id": "57b2fa950fbe4253c9b38d534b2faacc5ef100f4",
+  "sessions": {
+    "s_d15a62b7847646": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8efe042b-524d-47e7-911b-a6b3f3798d1d",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Zane <zane@bigo.sg>"
+    }
+  }
+}
