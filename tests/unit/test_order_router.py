@@ -153,6 +153,25 @@ async def test_order_manager_generates_unique_order_ids_for_repeated_submits():
 
 
 @pytest.mark.asyncio
+async def test_order_manager_propagates_trigger_price_to_order():
+    handler = MockHandler()
+    router = OrderRouter(backtest=handler, mode="backtest")
+    manager = UnifiedOrderManager(router=router)
+
+    order = await manager.submit(
+        symbol="BTC-USDT",
+        side=OrderSide.SELL,
+        order_type=OrderType.STOP,
+        amount=0.1,
+        trigger_price=49000.0,
+        strategy_name="test",
+    )
+
+    assert order.trigger_price == 49000.0
+    assert handler.submitted[0].trigger_price == 49000.0
+
+
+@pytest.mark.asyncio
 async def test_order_manager_persists_filled_order_and_applies_accounting():
     handler = MockHandler()
     repository = FakeRepository()
@@ -548,6 +567,15 @@ def test_risk_reason_code_maps_known_and_unknown_reasons():
     assert risk_reason_code("Daily loss exceeds maximum allowed loss") == "daily_loss_exceeded"
     assert risk_reason_code("Drawdown exceeds maximum allowed drawdown") == "drawdown_exceeded"
     assert risk_reason_code("Order requires a stop loss") == "stop_loss_required"
+    assert risk_reason_code("Live opening orders are disabled") == "live_opening_disabled"
+    assert (
+        risk_reason_code("Live order exceeds configured notional cap")
+        == "live_order_notional_exceeded"
+    )
+    assert (
+        risk_reason_code("Live spot sell requires existing position")
+        == "live_spot_position_required"
+    )
     assert risk_reason_code("Unexpected rule failure") == "risk_rejected"
     assert risk_reason_code("") == "risk_rejected"
 
@@ -733,3 +761,450 @@ async def test_order_manager_cancel_forwards_symbol():
     assert await manager.cancel("exchange-order-1", symbol="BTC-USDT") is True
 
     assert handler.cancelled == [("exchange-order-1", "BTC-USDT")]
+
+
+@pytest.mark.asyncio
+async def test_live_order_manager_refreshes_state_before_live_risk_check():
+    class PendingLiveHandler(OrderHandler):
+        def __init__(self):
+            self.submitted = []
+
+        async def submit(self, order: Order) -> Order:
+            self.submitted.append(order)
+            return order
+
+        async def cancel(self, order_id: str, symbol: str | None = None) -> bool:
+            return True
+
+    repository = FakeRepository()
+    refresh_calls = []
+
+    async def live_state_refresher(strategy_name: str, symbol: str) -> None:
+        refresh_calls.append((strategy_name, symbol))
+        repository.accounts[strategy_name] = AccountRecord(
+            strategy=strategy_name,
+            initial_equity=100000.0,
+            cash_balance=100000.0,
+            equity=100000.0,
+            realized_pnl=0.0,
+            unrealized_pnl=0.0,
+            daily_pnl=0.0,
+            fees_paid=0.0,
+            updated_at=1700000000000,
+        )
+        repository.positions[(strategy_name, symbol)] = PositionRecord(
+            strategy=strategy_name,
+            symbol=symbol,
+            side="long",
+            amount=1.0,
+            entry_price=50000.0,
+            leverage=1,
+            timestamp=1700000000000,
+        )
+
+    handler = PendingLiveHandler()
+    router = OrderRouter(backtest=None, live=handler, mode="live")
+    manager = UnifiedOrderManager(
+        router=router,
+        repository=repository,
+        timestamp_ms=lambda: 1700000000000,
+        initial_equity=100000.0,
+        risk_manager=RiskManager(max_position_pct=0.8, max_daily_loss_pct=0.05),
+        price_provider=lambda symbol: 50000.0,
+        live_safeguards=True,
+        live_market_type="swap",
+        live_state_refresher=live_state_refresher,
+    )
+
+    order = await manager.submit(
+        symbol="BTC-USDT-SWAP",
+        side=OrderSide.SELL,
+        order_type=OrderType.MARKET,
+        amount=0.25,
+        strategy_name="ma_cross",
+    )
+
+    assert order.status == OrderStatus.PENDING
+    assert refresh_calls == [("ma_cross", "BTC-USDT-SWAP")]
+    assert len(handler.submitted) == 1
+    assert handler.submitted[0].reduce_only is True
+    assert handler.submitted[0].params == {"reduceOnly": True}
+
+
+@pytest.mark.asyncio
+async def test_live_order_manager_skips_paper_accounting_for_live_fills(monkeypatch):
+    class ExplodingPaperAccountingService:
+        def __init__(self, **kwargs):
+            pass
+
+        def process_filled_order(self, order, strategy_name, timestamp):
+            raise AssertionError("live fills should not run paper accounting")
+
+    monkeypatch.setattr(
+        "src.order.manager.PaperAccountingService",
+        ExplodingPaperAccountingService,
+    )
+    handler = MockHandler()
+    repository = FakeRepository()
+    refresh_calls = []
+
+    async def live_state_refresher(strategy_name: str, symbol: str) -> None:
+        refresh_calls.append((strategy_name, symbol))
+
+    repository.accounts["ma_cross"] = AccountRecord(
+        strategy="ma_cross",
+        initial_equity=100000.0,
+        cash_balance=100000.0,
+        equity=100000.0,
+        realized_pnl=0.0,
+        unrealized_pnl=0.0,
+        daily_pnl=0.0,
+        fees_paid=0.0,
+        updated_at=1700000000000,
+    )
+    repository.positions[("ma_cross", "BTC-USDT-SWAP")] = PositionRecord(
+        strategy="ma_cross",
+        symbol="BTC-USDT-SWAP",
+        side="long",
+        amount=1.0,
+        entry_price=50000.0,
+        leverage=1,
+        timestamp=1700000000000,
+    )
+    router = OrderRouter(backtest=None, live=handler, mode="live")
+    manager = UnifiedOrderManager(
+        router=router,
+        repository=repository,
+        timestamp_ms=lambda: 1700000000000,
+        initial_equity=100000.0,
+        risk_manager=RiskManager(max_position_pct=0.8, max_daily_loss_pct=0.05),
+        price_provider=lambda symbol: 50000.0,
+        live_safeguards=True,
+        live_market_type="swap",
+        live_state_refresher=live_state_refresher,
+    )
+
+    order = await manager.submit(
+        symbol="BTC-USDT-SWAP",
+        side=OrderSide.SELL,
+        order_type=OrderType.MARKET,
+        amount=0.25,
+        strategy_name="ma_cross",
+    )
+
+    assert order.status == OrderStatus.FILLED
+    assert refresh_calls == [
+        ("ma_cross", "BTC-USDT-SWAP"),
+        ("ma_cross", "BTC-USDT-SWAP"),
+    ]
+    assert repository.trades == []
+
+
+@pytest.mark.asyncio
+async def test_live_order_manager_rejects_when_daily_loss_circuit_breaker_tripped():
+    class ShouldNotSubmitHandler(OrderHandler):
+        async def submit(self, order: Order) -> Order:
+            raise AssertionError("daily-loss-blocked order should not reach router")
+
+        async def cancel(self, order_id: str, symbol: str | None = None) -> bool:
+            return True
+
+    repository = FakeRepository()
+    repository.accounts["ma_cross"] = AccountRecord(
+        strategy="ma_cross",
+        initial_equity=100000.0,
+        cash_balance=94000.0,
+        equity=94000.0,
+        realized_pnl=-6000.0,
+        unrealized_pnl=0.0,
+        daily_pnl=-6000.0,
+        fees_paid=0.0,
+        updated_at=1700000000000,
+    )
+    repository.positions[("ma_cross", "BTC-USDT-SWAP")] = PositionRecord(
+        strategy="ma_cross",
+        symbol="BTC-USDT-SWAP",
+        side="long",
+        amount=1.0,
+        entry_price=50000.0,
+        leverage=1,
+        timestamp=1700000000000,
+    )
+    router = OrderRouter(backtest=None, live=ShouldNotSubmitHandler(), mode="live")
+    manager = UnifiedOrderManager(
+        router=router,
+        repository=repository,
+        timestamp_ms=lambda: 1700000000000,
+        initial_equity=100000.0,
+        risk_manager=RiskManager(max_position_pct=0.8, max_daily_loss_pct=0.05),
+        price_provider=lambda symbol: 50000.0,
+        live_safeguards=True,
+        live_market_type="swap",
+    )
+
+    order = await manager.submit(
+        symbol="BTC-USDT-SWAP",
+        side=OrderSide.SELL,
+        order_type=OrderType.MARKET,
+        amount=0.1,
+        strategy_name="ma_cross",
+    )
+
+    assert order.status == OrderStatus.REJECTED
+    assert repository.orders[0].status == "rejected"
+
+
+@pytest.mark.asyncio
+async def test_live_order_manager_marks_derivative_reducer_reduce_only():
+    handler = MockHandler()
+    repository = FakeRepository()
+    repository.accounts["ma_cross"] = AccountRecord(
+        strategy="ma_cross",
+        initial_equity=100000.0,
+        cash_balance=100000.0,
+        equity=100000.0,
+        realized_pnl=0.0,
+        unrealized_pnl=0.0,
+        daily_pnl=0.0,
+        fees_paid=0.0,
+        updated_at=1700000000000,
+    )
+    repository.positions[("ma_cross", "BTC-USDT-SWAP")] = PositionRecord(
+        strategy="ma_cross",
+        symbol="BTC-USDT-SWAP",
+        side="long",
+        amount=1.0,
+        entry_price=50000.0,
+        leverage=1,
+        timestamp=1700000000000,
+    )
+    router = OrderRouter(backtest=None, live=handler, mode="live")
+    manager = UnifiedOrderManager(
+        router=router,
+        repository=repository,
+        timestamp_ms=lambda: 1700000000000,
+        initial_equity=100000.0,
+        risk_manager=RiskManager(max_position_pct=0.8, max_daily_loss_pct=0.05),
+        price_provider=lambda symbol: 50000.0,
+        live_safeguards=True,
+        live_market_type="swap",
+    )
+
+    order = await manager.submit(
+        symbol="BTC-USDT-SWAP",
+        side=OrderSide.SELL,
+        order_type=OrderType.MARKET,
+        amount=0.25,
+        strategy_name="ma_cross",
+    )
+
+    assert order.status == OrderStatus.FILLED
+    assert handler.submitted[0].reduce_only is True
+    assert handler.submitted[0].params == {"reduceOnly": True}
+
+
+@pytest.mark.asyncio
+async def test_live_order_manager_rejects_exposure_increasing_order_before_router():
+    class ShouldNotSubmitHandler(OrderHandler):
+        async def submit(self, order: Order) -> Order:
+            raise AssertionError("live exposure-increasing order should not reach router")
+
+        async def cancel(self, order_id: str, symbol: str | None = None) -> bool:
+            return True
+
+    repository = FakeRepository()
+    repository.accounts["ma_cross"] = AccountRecord(
+        strategy="ma_cross",
+        initial_equity=100000.0,
+        cash_balance=100000.0,
+        equity=100000.0,
+        realized_pnl=0.0,
+        unrealized_pnl=0.0,
+        daily_pnl=0.0,
+        fees_paid=0.0,
+        updated_at=1700000000000,
+    )
+    repository.positions[("ma_cross", "BTC-USDT-SWAP")] = PositionRecord(
+        strategy="ma_cross",
+        symbol="BTC-USDT-SWAP",
+        side="long",
+        amount=1.0,
+        entry_price=50000.0,
+        leverage=1,
+        timestamp=1700000000000,
+    )
+    router = OrderRouter(backtest=None, live=ShouldNotSubmitHandler(), mode="live")
+    manager = UnifiedOrderManager(
+        router=router,
+        repository=repository,
+        timestamp_ms=lambda: 1700000000000,
+        initial_equity=100000.0,
+        risk_manager=RiskManager(max_position_pct=0.8, max_daily_loss_pct=0.05),
+        price_provider=lambda symbol: 50000.0,
+        live_safeguards=True,
+        live_market_type="swap",
+    )
+
+    order = await manager.submit(
+        symbol="BTC-USDT-SWAP",
+        side=OrderSide.BUY,
+        order_type=OrderType.MARKET,
+        amount=0.1,
+        strategy_name="ma_cross",
+    )
+
+    assert order.status == OrderStatus.REJECTED
+    assert repository.orders[0].status == "rejected"
+
+
+@pytest.mark.asyncio
+async def test_live_order_manager_rejects_opening_order_by_default():
+    class ShouldNotSubmitHandler(OrderHandler):
+        async def submit(self, order: Order) -> Order:
+            raise AssertionError("disabled live opening order should not reach router")
+
+        async def cancel(self, order_id: str, symbol: str | None = None) -> bool:
+            return True
+
+    repository = FakeRepository()
+    repository.accounts["ma_cross"] = AccountRecord(
+        strategy="ma_cross",
+        initial_equity=100000.0,
+        cash_balance=100000.0,
+        equity=100000.0,
+        realized_pnl=0.0,
+        unrealized_pnl=0.0,
+        daily_pnl=0.0,
+        fees_paid=0.0,
+        updated_at=1700000000000,
+    )
+    risk_events = []
+
+    async def on_risk_event(payload):
+        risk_events.append(payload)
+
+    router = OrderRouter(backtest=None, live=ShouldNotSubmitHandler(), mode="live")
+    manager = UnifiedOrderManager(
+        router=router,
+        repository=repository,
+        timestamp_ms=lambda: 1700000000000,
+        initial_equity=100000.0,
+        risk_manager=RiskManager(max_position_pct=0.8, max_daily_loss_pct=0.05),
+        price_provider=lambda symbol: 50000.0,
+        live_safeguards=True,
+        live_market_type="swap",
+        on_risk_event=on_risk_event,
+    )
+
+    order = await manager.submit(
+        symbol="BTC-USDT-SWAP",
+        side=OrderSide.BUY,
+        order_type=OrderType.MARKET,
+        amount=0.1,
+        strategy_name="ma_cross",
+    )
+
+    assert order.status == OrderStatus.REJECTED
+    assert repository.orders[0].status == "rejected"
+    assert risk_events[0]["reason"] == "Live opening orders are disabled"
+    assert risk_events[0]["reason_code"] == "live_opening_disabled"
+    assert risk_events[0]["order_value"] == pytest.approx(5000.0)
+
+
+@pytest.mark.asyncio
+async def test_live_order_manager_allows_opening_order_when_enabled_and_within_limits():
+    handler = MockHandler()
+    repository = FakeRepository()
+    repository.accounts["ma_cross"] = AccountRecord(
+        strategy="ma_cross",
+        initial_equity=100000.0,
+        cash_balance=100000.0,
+        equity=100000.0,
+        realized_pnl=0.0,
+        unrealized_pnl=0.0,
+        daily_pnl=0.0,
+        fees_paid=0.0,
+        updated_at=1700000000000,
+    )
+    router = OrderRouter(backtest=None, live=handler, mode="live")
+    manager = UnifiedOrderManager(
+        router=router,
+        repository=repository,
+        timestamp_ms=lambda: 1700000000000,
+        initial_equity=100000.0,
+        risk_manager=RiskManager(max_position_pct=0.8, max_daily_loss_pct=0.05),
+        price_provider=lambda symbol: 50000.0,
+        live_safeguards=True,
+        live_market_type="swap",
+        allow_live_open_orders=True,
+        live_max_order_notional=10000.0,
+    )
+
+    order = await manager.submit(
+        symbol="BTC-USDT-SWAP",
+        side=OrderSide.BUY,
+        order_type=OrderType.MARKET,
+        amount=0.1,
+        strategy_name="ma_cross",
+    )
+
+    assert order.status == OrderStatus.FILLED
+    assert len(handler.submitted) == 1
+    assert handler.submitted[0].reduce_only is False
+    assert handler.submitted[0].params == {}
+
+
+@pytest.mark.asyncio
+async def test_live_order_manager_rejects_opening_order_over_notional_cap():
+    class ShouldNotSubmitHandler(OrderHandler):
+        async def submit(self, order: Order) -> Order:
+            raise AssertionError("over-cap live opening order should not reach router")
+
+        async def cancel(self, order_id: str, symbol: str | None = None) -> bool:
+            return True
+
+    repository = FakeRepository()
+    repository.accounts["ma_cross"] = AccountRecord(
+        strategy="ma_cross",
+        initial_equity=100000.0,
+        cash_balance=100000.0,
+        equity=100000.0,
+        realized_pnl=0.0,
+        unrealized_pnl=0.0,
+        daily_pnl=0.0,
+        fees_paid=0.0,
+        updated_at=1700000000000,
+    )
+    risk_events = []
+
+    async def on_risk_event(payload):
+        risk_events.append(payload)
+
+    router = OrderRouter(backtest=None, live=ShouldNotSubmitHandler(), mode="live")
+    manager = UnifiedOrderManager(
+        router=router,
+        repository=repository,
+        timestamp_ms=lambda: 1700000000000,
+        initial_equity=100000.0,
+        risk_manager=RiskManager(max_position_pct=0.8, max_daily_loss_pct=0.05),
+        price_provider=lambda symbol: 50000.0,
+        live_safeguards=True,
+        live_market_type="swap",
+        allow_live_open_orders=True,
+        live_max_order_notional=10000.0,
+        on_risk_event=on_risk_event,
+    )
+
+    order = await manager.submit(
+        symbol="BTC-USDT-SWAP",
+        side=OrderSide.BUY,
+        order_type=OrderType.MARKET,
+        amount=0.3,
+        strategy_name="ma_cross",
+    )
+
+    assert order.status == OrderStatus.REJECTED
+    assert repository.orders[0].status == "rejected"
+    assert risk_events[0]["reason"] == "Live order exceeds configured notional cap"
+    assert risk_events[0]["reason_code"] == "live_order_notional_exceeded"
+    assert risk_events[0]["order_value"] == pytest.approx(15000.0)

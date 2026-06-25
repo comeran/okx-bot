@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 
 
@@ -43,11 +43,14 @@ class Order:
     type: OrderType
     amount: float
     price: float | None = None
+    trigger_price: float | None = None
     stop_loss: float | None = None
     take_profit: float | None = None
     status: OrderStatus = OrderStatus.PENDING
     fill_price: float | None = None
     fill_time: int | None = None
+    reduce_only: bool = False
+    params: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass
@@ -58,3 +61,27 @@ class Position:
     entry_price: float
     unrealized_pnl: float
     leverage: int = 1
+
+
+@dataclass(frozen=True)
+class AccountSnapshot:
+    currency: str
+    equity: float
+    cash_balance: float
+    available_balance: float
+    unrealized_pnl: float = 0.0
+    realized_pnl: float = 0.0
+    updated_at: int = 0
+
+
+@dataclass(frozen=True)
+class PositionSnapshot:
+    symbol: str
+    side: PositionSide
+    amount: float
+    entry_price: float
+    mark_price: float | None = None
+    unrealized_pnl: float = 0.0
+    realized_pnl: float = 0.0
+    leverage: int = 1
+    updated_at: int = 0

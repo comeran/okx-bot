@@ -29,54 +29,86 @@ class BotEngine:
         self._active_strategies: dict[str, bool] = {}
         self._market_data_task: asyncio.Task | None = None
         self._has_market_data_subscription = False
+        self._market_data_subscriptions: dict[str, tuple[str, str, Any]] = {}
         self._processing_bar_callbacks = 0
+        self._lifecycle_lock = asyncio.Lock()
 
     async def start(self) -> None:
-        for strategy in self.strategies:
-            self._active_strategies[strategy.name] = True
-            on_init = getattr(strategy, "on_init", None)
-            if on_init is not None:
-                await on_init()
-            self._subscribe_strategy(strategy)
-        self.running = True
-        if self._has_market_data_subscription:
-            self._start_market_data()
-        if self._has_market_data_subscription:
-            await asyncio.sleep(0)
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(self._drain_bar_callbacks(), timeout=1)
+        async with self._lifecycle_lock:
+            if self.running:
+                return
+            for strategy in self.strategies:
+                self._active_strategies[strategy.name] = True
+                on_init = getattr(strategy, "on_init", None)
+                if on_init is not None:
+                    await on_init()
+                self._subscribe_strategy(strategy)
+            self.running = True
+            if self._has_market_data_subscription:
+                self._start_market_data()
+            if self._has_market_data_subscription:
+                await asyncio.sleep(0)
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(self._drain_bar_callbacks(), timeout=1)
 
     async def stop(self) -> None:
-        for strategy in self.strategies:
-            await self._shutdown_strategy(strategy)
-        if self.market_data_service is not None and self.stop_market_data_on_stop:
-            await self.market_data_service.stop()
-            if self._market_data_task is not None and not self._market_data_task.done():
-                self._market_data_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await self._market_data_task
-        self.running = False
+        async with self._lifecycle_lock:
+            for strategy in self.strategies:
+                await self._shutdown_strategy(strategy)
+            if self.market_data_service is not None and self.stop_market_data_on_stop:
+                await self.market_data_service.stop()
+                if self._market_data_task is not None and not self._market_data_task.done():
+                    self._market_data_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await self._market_data_task
+            self.running = False
 
     def _subscribe_strategy(self, strategy: Any) -> None:
         if self.market_data_service is None:
+            return
+        if strategy.name in self._market_data_subscriptions:
             return
         symbol = getattr(strategy, "symbol", None)
         timeframe = getattr(strategy, "timeframe", None)
         if symbol is None or timeframe is None:
             return
+        callback = self._bar_callback(strategy)
         self.market_data_service.subscribe(
             symbol,
             timeframe,
-            self._bar_callback(strategy),
+            callback,
         )
+        self._market_data_subscriptions[strategy.name] = (symbol, timeframe, callback)
         self._has_market_data_subscription = True
+
+    def _unsubscribe_strategy(self, strategy: Any) -> None:
+        if self.market_data_service is None:
+            return
+        subscription = self._market_data_subscriptions.pop(strategy.name, None)
+        if subscription is None:
+            return
+        symbol, timeframe, callback = subscription
+        unsubscribe = getattr(self.market_data_service, "unsubscribe", None)
+        if unsubscribe is not None:
+            unsubscribe(symbol, timeframe, callback)
+        self._has_market_data_subscription = bool(self._market_data_subscriptions)
 
     def _start_market_data(self) -> None:
         if self.market_data_service is None:
             return
+        existing_task = getattr(
+            self.market_data_service,
+            "_bot_engine_market_data_task",
+            None,
+        )
+        if existing_task is not None and not existing_task.done():
+            self._market_data_task = existing_task
+            return
         if getattr(self.market_data_service, "_running", False):
             return
+        self.market_data_service._running = True
         self._market_data_task = asyncio.create_task(self.market_data_service.start())
+        self.market_data_service._bot_engine_market_data_task = self._market_data_task
 
     def _bar_callback(self, strategy: Any):
         async def handle_bar(bar: Bar) -> None:
@@ -87,6 +119,8 @@ class BotEngine:
                 try:
                     if self.before_strategy_bar is not None:
                         await self.before_strategy_bar(strategy, bar)
+                    if not self._active_strategies.get(strategy.name, False):
+                        return
                     await strategy.on_bar(bar)
                 except Exception as exc:
                     await self._handle_strategy_error(strategy, exc)
@@ -105,9 +139,11 @@ class BotEngine:
             await self.on_strategy_error(strategy.name, error)
 
     async def _shutdown_strategy(self, strategy: Any) -> None:
-        if not self._active_strategies.get(strategy.name, False):
-            return
+        was_active = self._active_strategies.get(strategy.name, False)
         self._active_strategies[strategy.name] = False
+        self._unsubscribe_strategy(strategy)
+        if not was_active:
+            return
         on_shutdown = getattr(strategy, "on_shutdown", None)
         if on_shutdown is not None:
             await on_shutdown()

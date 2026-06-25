@@ -7,6 +7,7 @@ from sqlmodel import Session, SQLModel, create_engine, select
 from src.data.models import (
     AccountRecord,
     BacktestResultRecord,
+    BacktestTradeRecord,
     CashLedgerRecord,
     KlineCache,
     OrderRecord,
@@ -22,8 +23,8 @@ class Repository:
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
             engine = create_engine(f"sqlite:///{db_path}", echo=False)
             self._enable_wal(engine)
-            SQLModel.metadata.create_all(engine)
-            self._migrate_sqlite_schema(engine)
+        SQLModel.metadata.create_all(engine)
+        self._migrate_sqlite_schema(engine)
         self.engine = engine
 
     def upsert_account(self, account: AccountRecord) -> AccountRecord:
@@ -254,11 +255,50 @@ class Repository:
             session.refresh(result)
             return result
 
+    def save_backtest_result_with_trades(
+        self,
+        result: BacktestResultRecord,
+        trades: list[BacktestTradeRecord],
+    ) -> BacktestResultRecord:
+        with Session(self.engine) as session:
+            session.add(result)
+            for trade in trades:
+                session.add(trade)
+            session.commit()
+            session.refresh(result)
+            return result
+
+    def get_backtest_result(self, result_id: str) -> BacktestResultRecord | None:
+        with Session(self.engine) as session:
+            return session.exec(
+                select(BacktestResultRecord).where(BacktestResultRecord.id == result_id)
+            ).first()
+
     def get_backtest_results(self, limit: int = 50) -> list[BacktestResultRecord]:
         statement = (
             select(BacktestResultRecord)
             .order_by(BacktestResultRecord.created_at.desc())
             .limit(limit)
+        )
+        with Session(self.engine) as session:
+            return list(session.exec(statement).all())
+
+    def save_backtest_trades(
+        self, trades: list[BacktestTradeRecord]
+    ) -> list[BacktestTradeRecord]:
+        with Session(self.engine) as session:
+            for trade in trades:
+                session.add(trade)
+            session.commit()
+            for trade in trades:
+                session.refresh(trade)
+            return trades
+
+    def get_backtest_trades(self, result_id: str) -> list[BacktestTradeRecord]:
+        statement = (
+            select(BacktestTradeRecord)
+            .where(BacktestTradeRecord.result_id == result_id)
+            .order_by(BacktestTradeRecord.timestamp, BacktestTradeRecord.id)
         )
         with Session(self.engine) as session:
             return list(session.exec(statement).all())
@@ -284,8 +324,12 @@ class Repository:
                 return
             migrations = {
                 "mark_price": "ALTER TABLE positionrecord ADD COLUMN mark_price FLOAT",
-                "realized_pnl": "ALTER TABLE positionrecord ADD COLUMN realized_pnl FLOAT DEFAULT 0.0",
-                "unrealized_pnl": "ALTER TABLE positionrecord ADD COLUMN unrealized_pnl FLOAT DEFAULT 0.0",
+                "realized_pnl": (
+                    "ALTER TABLE positionrecord ADD COLUMN realized_pnl FLOAT DEFAULT 0.0"
+                ),
+                "unrealized_pnl": (
+                    "ALTER TABLE positionrecord ADD COLUMN unrealized_pnl FLOAT DEFAULT 0.0"
+                ),
             }
             for column, statement in migrations.items():
                 if column not in columns:

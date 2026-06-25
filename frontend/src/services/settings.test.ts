@@ -20,6 +20,8 @@ describe('settings service', () => {
           secret_set: false,
           passphrase: '',
           passphrase_set: false,
+          market_type: 'spot',
+          demo: true,
         },
         backtest: {
           initial_capital: 100000,
@@ -31,6 +33,8 @@ describe('settings service', () => {
           max_daily_loss_pct: 0.05,
           max_drawdown_pct: 0.15,
           max_total_position_pct: 0.8,
+          allow_live_open_orders: false,
+          live_max_order_notional: 0,
         },
         notify: {
           telegram_bot_token: '',
@@ -58,6 +62,8 @@ describe('settings service', () => {
         api_key: 'okx-api-key',
         secret: 'okx-secret-value',
         passphrase: 'okx-passphrase',
+        market_type: 'swap',
+        demo: true,
       },
       backtest: {
         initial_capital: 250000,
@@ -69,6 +75,8 @@ describe('settings service', () => {
         max_daily_loss_pct: 0.03,
         max_drawdown_pct: 0.12,
         max_total_position_pct: 0.65,
+        allow_live_open_orders: false,
+        live_max_order_notional: 0,
       },
       notify: {
         telegram_bot_token: 'telegram-token',

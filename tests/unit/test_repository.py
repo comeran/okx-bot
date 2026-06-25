@@ -4,6 +4,7 @@ from sqlmodel import SQLModel, create_engine
 from src.data.models import (
     AccountRecord,
     BacktestResultRecord,
+    BacktestTradeRecord,
     CashLedgerRecord,
     KlineCache,
     OrderRecord,
@@ -202,6 +203,143 @@ def test_list_backtest_results_honors_limit(repo: Repository):
         )
 
     assert [result.id for result in repo.get_backtest_results(limit=2)] == ["bt-2", "bt-1"]
+
+
+def test_get_backtest_result_returns_matching_result(repo: Repository):
+    repo.save_backtest_result(
+        BacktestResultRecord(
+            id="bt-detail",
+            strategy="ma_cross",
+            symbol="BTC-USDT",
+            timeframe="1h",
+            start_time=1700000000000,
+            end_time=1700003600000,
+            initial_capital=100000.0,
+            total_return=0.01,
+            sharpe_ratio=1.0,
+            max_drawdown=0.02,
+            win_rate=0.5,
+            total_trades=1,
+            created_at=1700003600000,
+        )
+    )
+
+    result = repo.get_backtest_result("bt-detail")
+
+    assert result is not None
+    assert result.id == "bt-detail"
+    assert result.symbol == "BTC-USDT"
+    assert repo.get_backtest_result("missing") is None
+
+
+def test_save_backtest_result_with_trades_persists_result_and_trades(repo: Repository):
+    result = BacktestResultRecord(
+        id="bt-combined",
+        strategy="ma_cross",
+        symbol="BTC-USDT",
+        timeframe="1h",
+        start_time=1700000000000,
+        end_time=1700007200000,
+        initial_capital=100000.0,
+        total_return=0.015,
+        sharpe_ratio=1.3,
+        max_drawdown=0.02,
+        win_rate=0.5,
+        total_trades=2,
+        created_at=1700007200000,
+    )
+    trades = [
+        BacktestTradeRecord(
+            result_id="bt-combined",
+            symbol="BTC-USDT",
+            side="buy",
+            timestamp=1700003600000,
+            price=100.0,
+            amount=0.1,
+            fee=0.01,
+            pnl=-10.01,
+        ),
+        BacktestTradeRecord(
+            result_id="bt-combined",
+            symbol="BTC-USDT",
+            side="sell",
+            timestamp=1700007200000,
+            price=110.0,
+            amount=0.1,
+            fee=0.011,
+            pnl=10.989,
+        ),
+    ]
+
+    repo.save_backtest_result_with_trades(result, trades)
+
+    persisted_result = repo.get_backtest_result("bt-combined")
+    persisted_trades = repo.get_backtest_trades("bt-combined")
+    assert persisted_result is not None
+    assert persisted_result.id == "bt-combined"
+    assert persisted_result.total_trades == 2
+    assert [trade.side for trade in persisted_trades] == ["buy", "sell"]
+    assert [trade.timestamp for trade in persisted_trades] == [1700003600000, 1700007200000]
+    assert persisted_trades[1].price == 110.0
+    assert persisted_trades[1].amount == 0.1
+    assert persisted_trades[1].fee == 0.011
+    assert persisted_trades[1].pnl == 10.989
+
+
+def test_save_and_get_backtest_trades_filters_and_orders_by_timestamp_then_id(repo: Repository):
+    saved = repo.save_backtest_trades(
+        [
+            BacktestTradeRecord(
+                result_id="bt-target",
+                symbol="BTC-USDT",
+                side="sell",
+                timestamp=1700003600000,
+                price=101.0,
+                amount=0.3,
+                fee=0.03,
+                pnl=1.5,
+            ),
+            BacktestTradeRecord(
+                result_id="bt-other",
+                symbol="ETH-USDT",
+                side="buy",
+                timestamp=1700000000000,
+                price=2000.0,
+                amount=1.0,
+                fee=2.0,
+                pnl=-2002.0,
+            ),
+            BacktestTradeRecord(
+                result_id="bt-target",
+                symbol="BTC-USDT",
+                side="buy",
+                timestamp=1700000000000,
+                price=100.0,
+                amount=0.1,
+                fee=0.01,
+                pnl=-10.01,
+            ),
+            BacktestTradeRecord(
+                result_id="bt-target",
+                symbol="BTC-USDT",
+                side="buy",
+                timestamp=1700000000000,
+                price=100.5,
+                amount=0.2,
+                fee=0.02,
+                pnl=-20.12,
+            ),
+        ]
+    )
+
+    trades = repo.get_backtest_trades("bt-target")
+
+    assert all(trade.id is not None for trade in saved)
+    assert [(trade.timestamp, trade.id) for trade in trades] == sorted(
+        (trade.timestamp, trade.id) for trade in trades
+    )
+    assert [trade.result_id for trade in trades] == ["bt-target", "bt-target", "bt-target"]
+    assert [trade.price for trade in trades] == [100.0, 100.5, 101.0]
 
 
 def test_get_trades_filters(repo: Repository):

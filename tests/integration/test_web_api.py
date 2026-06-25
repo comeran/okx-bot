@@ -8,8 +8,17 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from httpx import ASGITransport, AsyncClient
 
+from src.core.config import AppConfig, ExchangeConfig, RiskConfig
 from src.core.types import Bar, Order, OrderSide, OrderStatus, OrderType
-from src.data.models import AccountRecord, KlineCache, PositionRecord, StrategyConfigRecord
+from src.data.models import (
+    AccountRecord,
+    BacktestResultRecord,
+    BacktestTradeRecord,
+    KlineCache,
+    PositionRecord,
+    StrategyConfigRecord,
+)
+from src.exchange.live_sync import LiveStateSyncResult
 from src.strategy.base import BaseStrategy
 from src.strategy.registry import StrategyRegistry
 from src.web import app as web_app
@@ -159,11 +168,561 @@ def test_create_order_manager_uses_falsy_repository_instance(monkeypatch):
     assert manager.repository is repository
 
 
-def test_create_risk_manager_without_settings_uses_max_position_only(monkeypatch):
-    def missing_settings(path):
-        raise FileNotFoundError
+def test_create_order_manager_maps_paper_runtime_to_demo_router(monkeypatch):
+    monkeypatch.setattr(
+        strategy_api,
+        "load_runtime_settings",
+        lambda: AppConfig(mode="paper"),
+    )
 
-    monkeypatch.setattr(strategy_api, "load_config", missing_settings)
+    manager = strategy_api.create_order_manager()
+
+    assert manager.router.mode == "demo"
+    assert manager.router.demo is not None
+    assert manager.router.backtest is None
+
+
+def test_create_order_manager_maps_demo_runtime_to_safe_demo_router(monkeypatch):
+    monkeypatch.setattr(
+        strategy_api,
+        "load_runtime_settings",
+        lambda: AppConfig(mode="demo"),
+    )
+
+    manager = strategy_api.create_order_manager()
+
+    assert manager.router.mode == "demo"
+    assert isinstance(manager.router.demo, strategy_api.LocalPaperOrderHandler)
+    assert manager.router.live is None
+    assert manager.router.backtest is None
+
+
+def test_create_order_manager_maps_explicit_paper_to_demo_router(monkeypatch):
+    monkeypatch.setattr(
+        strategy_api,
+        "load_runtime_settings",
+        lambda: AppConfig(mode="live"),
+    )
+
+    manager = strategy_api.create_order_manager(order_router_mode="paper")
+
+    assert manager.router.mode == "demo"
+    assert manager.router.demo is not None
+    assert manager.router.live is None
+    assert manager.router.backtest is None
+
+
+def test_create_order_manager_rejects_live_missing_credentials_before_dependencies(
+    monkeypatch,
+):
+    constructed: list[str] = []
+
+    class SentinelRepository:
+        def __init__(self):
+            constructed.append("repository")
+
+    class SentinelHandler:
+        def __init__(self, *args, **kwargs):
+            constructed.append("handler")
+
+    monkeypatch.setattr(
+        strategy_api,
+        "load_runtime_settings",
+        lambda: AppConfig(
+            mode="live",
+            exchange=ExchangeConfig(api_key="key", secret="", passphrase="pass"),
+        ),
+    )
+    monkeypatch.setattr(strategy_api, "Repository", SentinelRepository)
+    monkeypatch.setattr(strategy_api, "LocalPaperOrderHandler", SentinelHandler)
+
+    with pytest.raises(
+        ValueError,
+        match="Live trading requires OKX api_key, secret, and passphrase",
+    ):
+        strategy_api.create_order_manager(order_router_mode="live")
+
+    assert constructed == []
+
+
+@pytest.mark.parametrize(
+    ("market_type", "adapter_name", "default_type"),
+    [
+        ("spot", "OKXSpotAdapter", "spot"),
+        ("swap", "OKXSwapAdapter", "swap"),
+        ("future", "OKXFuturesAdapter", "future"),
+        ("futures", "OKXFuturesAdapter", "future"),
+        ("option", "OKXOptionsAdapter", "option"),
+        ("options", "OKXOptionsAdapter", "option"),
+    ],
+)
+def test_create_order_manager_live_selects_okx_adapter(
+    monkeypatch,
+    market_type,
+    adapter_name,
+    default_type,
+):
+    constructed: list[tuple[str, str, str, str, bool]] = []
+
+    class SentinelAdapter(strategy_api.LocalPaperOrderHandler):
+        def __init__(self, api_key, secret, passphrase, demo=True):
+            constructed.append((adapter_name, api_key, secret, passphrase, demo))
+
+    monkeypatch.setattr(
+        strategy_api,
+        "load_runtime_settings",
+        lambda: AppConfig(
+            mode="live",
+            exchange=ExchangeConfig(
+                api_key="key",
+                secret="secret",
+                passphrase="pass",
+                market_type=market_type,
+                demo=True,
+            ),
+            risk=RiskConfig(
+                allow_live_open_orders=True,
+                live_max_order_notional=1234.0,
+            ),
+        ),
+    )
+    monkeypatch.setattr(strategy_api, adapter_name, SentinelAdapter)
+
+    manager = strategy_api.create_order_manager(order_router_mode="live")
+
+    assert manager.router.mode == "live"
+    assert manager.router.live is not None
+    assert manager.router.demo is None
+    assert manager.router.backtest is None
+    assert manager.allow_live_open_orders is True
+    assert manager.live_max_order_notional == 1234.0
+    assert constructed == [(adapter_name, "key", "secret", "pass", True)]
+
+
+@pytest.mark.parametrize(
+    ("mode", "detail"),
+    [
+        ("shadow", "Unsupported strategy runtime mode: shadow"),
+    ],
+)
+def test_create_order_manager_rejects_explicit_unsafe_mode_before_dependencies(
+    monkeypatch,
+    mode,
+    detail,
+):
+    constructed: list[str] = []
+
+    class SentinelRepository:
+        def __init__(self):
+            constructed.append("repository")
+
+    class SentinelHandler:
+        def __init__(self, *args, **kwargs):
+            constructed.append("handler")
+
+    def sentinel_backtest_config():
+        constructed.append("backtest_config")
+        return strategy_api.BacktestConfig()
+
+    def sentinel_risk_manager():
+        constructed.append("risk_manager")
+        raise AssertionError("Risk manager should not be constructed")
+
+    monkeypatch.setattr(strategy_api, "Repository", SentinelRepository)
+    monkeypatch.setattr(strategy_api, "LocalPaperOrderHandler", SentinelHandler)
+    monkeypatch.setattr(strategy_api, "paper_backtest_config", sentinel_backtest_config)
+    monkeypatch.setattr(strategy_api, "create_risk_manager", sentinel_risk_manager)
+
+    with pytest.raises(ValueError, match=detail):
+        strategy_api.create_order_manager(order_router_mode=mode)
+
+    assert constructed == []
+
+
+@pytest.mark.parametrize(
+    ("mode", "detail"),
+    [
+        (None, "Unsupported strategy runtime mode: None"),
+        (42, "Unsupported strategy runtime mode: 42"),
+        (["paper"], "Unsupported strategy runtime mode: ['paper']"),
+    ],
+)
+def test_create_order_manager_rejects_explicit_malformed_mode_before_dependencies(
+    monkeypatch,
+    mode,
+    detail,
+):
+    constructed: list[str] = []
+
+    class SentinelRepository:
+        def __init__(self):
+            constructed.append("repository")
+
+    class SentinelHandler:
+        def __init__(self, *args, **kwargs):
+            constructed.append("handler")
+
+    def sentinel_backtest_config():
+        constructed.append("backtest_config")
+        return strategy_api.BacktestConfig()
+
+    def sentinel_risk_manager():
+        constructed.append("risk_manager")
+        raise AssertionError("Risk manager should not be constructed")
+
+    monkeypatch.setattr(strategy_api, "Repository", SentinelRepository)
+    monkeypatch.setattr(strategy_api, "LocalPaperOrderHandler", SentinelHandler)
+    monkeypatch.setattr(strategy_api, "paper_backtest_config", sentinel_backtest_config)
+    monkeypatch.setattr(strategy_api, "create_risk_manager", sentinel_risk_manager)
+
+    with pytest.raises(ValueError) as exc_info:
+        strategy_api.create_order_manager(order_router_mode=mode)
+
+    assert str(exc_info.value) == detail
+    assert constructed == []
+
+
+@pytest.mark.asyncio
+async def test_refresh_live_state_endpoint_requires_live_mode(monkeypatch, app):
+    monkeypatch.setattr(
+        "src.web.api.trading.load_runtime_settings",
+        lambda: AppConfig(mode="paper"),
+    )
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post("/api/trading/live-state/refresh", params={"strategy": "ma_cross"})
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "Live state refresh requires live mode"
+
+
+@pytest.mark.asyncio
+async def test_refresh_live_state_endpoint_persists_and_returns_state(monkeypatch, app):
+    account = AccountRecord(
+        strategy="ma_cross",
+        initial_equity=1000.0,
+        cash_balance=950.0,
+        equity=1000.0,
+        realized_pnl=0.0,
+        unrealized_pnl=50.0,
+        daily_pnl=0.0,
+        fees_paid=0.0,
+        updated_at=1700000000000,
+    )
+    position = PositionRecord(
+        strategy="ma_cross",
+        symbol="BTC-USDT-SWAP",
+        side="long",
+        amount=1.0,
+        entry_price=50000.0,
+        leverage=1,
+        timestamp=1700000000000,
+        mark_price=51000.0,
+        unrealized_pnl=1000.0,
+    )
+    calls = []
+
+    async def fake_refresh(exchange, repository, strategy, symbols, timestamp_ms):
+        calls.append((exchange.market_type, strategy, symbols))
+        return LiveStateSyncResult(account=account, positions=[position])
+
+    monkeypatch.setattr(
+        "src.web.api.trading.load_runtime_settings",
+        lambda: AppConfig(
+            mode="live",
+            exchange=ExchangeConfig(
+                api_key="key",
+                secret="secret",
+                passphrase="pass",
+                market_type="swap",
+                demo=True,
+            ),
+        ),
+    )
+    monkeypatch.setattr("src.web.api.trading.refresh_okx_live_state", fake_refresh)
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/api/trading/live-state/refresh",
+            params={"strategy": "ma_cross", "symbol": "BTC-USDT-SWAP"},
+        )
+
+    assert resp.status_code == 200
+    assert calls == [("swap", "ma_cross", ["BTC-USDT-SWAP"])]
+    payload = resp.json()
+    assert payload["account"]["equity"] == 1000.0
+    assert payload["positions"][0]["symbol"] == "BTC-USDT-SWAP"
+
+
+@pytest.mark.asyncio
+async def test_start_strategy_refreshes_live_state_before_order_manager(monkeypatch):
+    class FakeRepository:
+        def get_strategy_configs(self):
+            return []
+
+        def get_strategy_config(self, name):
+            return None
+
+    class LiveStrategy(BaseStrategy):
+        name = "live_test"
+        symbol = "BTC-USDT-SWAP"
+
+        async def on_bar(self, bar):
+            pass
+
+    class FakeBotEngine:
+        def __init__(self, *args, **kwargs):
+            events.append("engine_init")
+
+        async def start(self):
+            events.append("engine_start")
+
+        async def stop(self):
+            pass
+
+    account = AccountRecord(
+        strategy="live_test",
+        initial_equity=1000.0,
+        cash_balance=950.0,
+        equity=1000.0,
+        realized_pnl=0.0,
+        unrealized_pnl=50.0,
+        daily_pnl=0.0,
+        fees_paid=0.0,
+        updated_at=1700000000000,
+    )
+    events = []
+    refresh_calls = []
+    order_manager_repositories = []
+
+    async def fake_refresh(exchange, repository, strategy, symbols, timestamp_ms):
+        events.append("refresh")
+        refresh_calls.append((exchange.market_type, repository, strategy, symbols, timestamp_ms()))
+        return LiveStateSyncResult(account=account, positions=[])
+
+    def fake_create_order_manager(**kwargs):
+        events.append("order_manager")
+        order_manager_repositories.append(kwargs["repository"])
+        return object()
+
+    registry = StrategyRegistry()
+    registry.register("live_test", LiveStrategy)
+    runtime = strategy_api.StrategyRuntimeState(registry=registry)
+    monkeypatch.setattr(strategy_api, "Repository", FakeRepository, raising=False)
+    monkeypatch.setattr(strategy_api, "current_timestamp_ms", lambda: 1700000000000)
+    monkeypatch.setattr(strategy_api, "refresh_okx_live_state", fake_refresh)
+    monkeypatch.setattr(strategy_api, "create_order_manager", fake_create_order_manager)
+    monkeypatch.setattr(strategy_api, "create_market_data_service", lambda: object())
+    monkeypatch.setattr(strategy_api, "BotEngine", FakeBotEngine)
+    monkeypatch.setattr(
+        strategy_api,
+        "load_runtime_settings",
+        lambda: AppConfig(
+            mode="live",
+            exchange=ExchangeConfig(
+                api_key="key",
+                secret="secret",
+                passphrase="pass",
+                market_type="swap",
+                demo=True,
+            ),
+        ),
+    )
+    app = FastAPI()
+    app.include_router(strategy_api.create_router(runtime=runtime), prefix="/api/strategies")
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post("/api/strategies/live_test/start")
+
+    assert resp.status_code == 200
+    assert events == ["refresh", "order_manager", "engine_init", "engine_start"]
+    assert refresh_calls == [
+        (
+            "swap",
+            order_manager_repositories[0],
+            "live_test",
+            ["BTC-USDT-SWAP"],
+            1700000000000,
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_start_strategy_rejects_live_missing_credentials_before_creating_runtime_services(
+    monkeypatch,
+):
+    created_market_data_services = 0
+    created_bot_engines = 0
+
+    def create_market_data_service():
+        nonlocal created_market_data_services
+        created_market_data_services += 1
+        raise AssertionError("MarketDataService should not be created for live mode")
+
+    class SentinelBotEngine:
+        def __init__(self, *args, **kwargs):
+            nonlocal created_bot_engines
+            created_bot_engines += 1
+            raise AssertionError("BotEngine should not be created for live mode")
+
+    monkeypatch.setattr(
+        strategy_api,
+        "load_runtime_settings",
+        lambda: AppConfig(mode="live"),
+    )
+    monkeypatch.setattr(
+        strategy_api,
+        "create_market_data_service",
+        create_market_data_service,
+    )
+    monkeypatch.setattr(strategy_api, "BotEngine", SentinelBotEngine)
+
+    transport = ASGITransport(app=create_app())
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post("/api/strategies/ma_cross/start")
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "Live trading requires OKX api_key, secret, and passphrase"
+    assert created_market_data_services == 0
+    assert created_bot_engines == 0
+
+
+@pytest.mark.asyncio
+async def test_start_strategy_rejects_unknown_runtime_mode(monkeypatch):
+    monkeypatch.setattr(
+        strategy_api,
+        "load_runtime_settings",
+        lambda: AppConfig(mode="shadow"),
+    )
+
+    transport = ASGITransport(app=create_app())
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post("/api/strategies/ma_cross/start")
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "Unsupported strategy runtime mode: shadow"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode", "detail"),
+    [
+        ("shadow", "Unsupported strategy runtime mode: shadow"),
+        (["paper"], "Unsupported strategy runtime mode: ['paper']"),
+    ],
+)
+async def test_start_strategy_rejects_unsafe_runtime_mode_before_strategy_lookup(
+    monkeypatch,
+    mode,
+    detail,
+):
+    class SentinelRepository:
+        def get_strategy_config(self, name):
+            raise AssertionError("Strategy lookup should not run for unsafe runtime modes")
+
+    class RuntimeSettings:
+        pass
+
+    settings = RuntimeSettings()
+    settings.mode = mode
+    runtime = strategy_api.StrategyRuntimeState()
+    monkeypatch.setattr(strategy_api, "Repository", lambda: SentinelRepository())
+    monkeypatch.setattr(strategy_api, "load_runtime_settings", lambda: settings)
+    app = FastAPI()
+    app.include_router(strategy_api.create_router(runtime=runtime), prefix="/api/strategies")
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post("/api/strategies/unknown_strategy/start")
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == detail
+
+
+@pytest.mark.asyncio
+async def test_start_strategy_rejects_malformed_runtime_mode_before_creating_runtime_services(
+    monkeypatch,
+):
+    created_market_data_services = 0
+    created_bot_engines = 0
+
+    class MalformedRuntimeSettings:
+        mode = ["paper"]
+
+    def create_market_data_service():
+        nonlocal created_market_data_services
+        created_market_data_services += 1
+        raise AssertionError("MarketDataService should not be created for malformed mode")
+
+    class SentinelBotEngine:
+        def __init__(self, *args, **kwargs):
+            nonlocal created_bot_engines
+            created_bot_engines += 1
+            raise AssertionError("BotEngine should not be created for malformed mode")
+
+    monkeypatch.setattr(
+        strategy_api,
+        "load_runtime_settings",
+        lambda: MalformedRuntimeSettings(),
+    )
+    monkeypatch.setattr(
+        strategy_api,
+        "create_market_data_service",
+        create_market_data_service,
+    )
+    monkeypatch.setattr(strategy_api, "BotEngine", SentinelBotEngine)
+
+    transport = ASGITransport(app=create_app())
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post("/api/strategies/ma_cross/start")
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "Unsupported strategy runtime mode: ['paper']"
+    assert created_market_data_services == 0
+    assert created_bot_engines == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode", "detail"),
+    [
+        ("shadow", "Unsupported strategy runtime mode: shadow"),
+    ],
+)
+async def test_start_strategy_rejects_unsafe_mode_when_engine_already_running(
+    monkeypatch,
+    mode,
+    detail,
+):
+    runtime = strategy_api.StrategyRuntimeState()
+    runtime.engines["ma_cross"] = object()
+    runtime.strategy_status["ma_cross"] = "running"
+    app = FastAPI()
+    app.include_router(strategy_api.create_router(runtime=runtime), prefix="/api/strategies")
+    monkeypatch.setattr(
+        strategy_api,
+        "load_runtime_settings",
+        lambda: AppConfig(mode=mode),
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post("/api/strategies/ma_cross/start")
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == detail
+    assert runtime.strategy_status["ma_cross"] == "running"
+
+
+def test_create_risk_manager_without_settings_uses_max_position_only(monkeypatch):
+    monkeypatch.setattr(
+        strategy_api,
+        "load_runtime_settings",
+        lambda: AppConfig(),
+    )
 
     manager = strategy_api.create_risk_manager()
 
@@ -999,6 +1558,14 @@ async def test_persisted_strategy_loop_broadcasts_error_and_stops_strategy(monke
             self.subscription = (symbol, timeframe)
             self.callbacks.append(callback)
 
+        def unsubscribe(self, symbol, timeframe, callback):
+            if self.subscription == (symbol, timeframe):
+                self.callbacks = [
+                    existing for existing in self.callbacks if existing is not callback
+                ]
+                if not self.callbacks:
+                    self.subscription = None
+
         async def start(self):
             self._running = True
 
@@ -1069,7 +1636,8 @@ async def test_persisted_strategy_loop_broadcasts_error_and_stops_strategy(monke
         strategies_resp = await client.get("/api/strategies")
 
     assert start_resp.status_code == 200
-    assert market_data.subscription == ("BTC-USDT", "1m")
+    assert market_data.subscription is None
+    assert market_data.callbacks == []
     assert {"name": "broken_btc", "status": "stopped"} in strategies_resp.json()
     assert messages[-2:] == [
         {
@@ -1105,6 +1673,242 @@ async def test_start_and_stop_strategy(app):
 
 
 @pytest.mark.asyncio
+async def test_start_strategy_clears_stale_error_before_successful_restart(monkeypatch):
+    class FakeRepository:
+        def get_strategy_configs(self):
+            return []
+
+        def get_strategy_config(self, name):
+            return None
+
+    class PassiveStrategy(BaseStrategy):
+        name = "passive"
+
+        async def on_bar(self, bar):
+            pass
+
+    class FakeBotEngine:
+        async def start(self):
+            pass
+
+        async def stop(self):
+            pass
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+    registry = StrategyRegistry()
+    registry.register("passive", PassiveStrategy)
+    runtime = strategy_api.StrategyRuntimeState(registry=registry)
+    runtime.strategy_errors["passive"] = "old startup failure"
+    monkeypatch.setattr(strategy_api, "Repository", FakeRepository, raising=False)
+    monkeypatch.setattr(strategy_api, "create_strategy_registry", lambda: registry)
+    monkeypatch.setattr(strategy_api, "create_market_data_service", lambda: object())
+    monkeypatch.setattr(strategy_api, "create_order_manager", lambda **kwargs: object())
+    monkeypatch.setattr(strategy_api, "BotEngine", FakeBotEngine)
+    app = FastAPI()
+    app.include_router(strategy_api.create_router(runtime=runtime), prefix="/api/strategies")
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post("/api/strategies/passive/start")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "started", "strategy": "passive"}
+    assert runtime.strategy_errors == {}
+    assert list(runtime.engines) == ["passive"]
+    assert runtime.strategy_status["passive"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_start_strategy_requests_create_one_engine(monkeypatch):
+    class FakeRepository:
+        def get_strategy_configs(self):
+            return []
+
+        def get_strategy_config(self, name):
+            return None
+
+    class PassiveStrategy(BaseStrategy):
+        name = "passive"
+
+        async def on_bar(self, bar):
+            pass
+
+    created_engines = []
+    start_calls = 0
+
+    class FakeBotEngine:
+        def __init__(self, *args, **kwargs):
+            created_engines.append(self)
+
+        async def start(self):
+            nonlocal start_calls
+            start_calls += 1
+            if start_calls == 1:
+                await asyncio.sleep(0.05)
+
+        async def stop(self):
+            pass
+
+    registry = StrategyRegistry()
+    registry.register("passive", PassiveStrategy)
+    runtime = strategy_api.StrategyRuntimeState(registry=registry)
+    monkeypatch.setattr(strategy_api, "Repository", FakeRepository, raising=False)
+    monkeypatch.setattr(strategy_api, "create_strategy_registry", lambda: registry)
+    monkeypatch.setattr(strategy_api, "create_market_data_service", lambda: object())
+    monkeypatch.setattr(strategy_api, "create_order_manager", lambda **kwargs: object())
+    monkeypatch.setattr(strategy_api, "BotEngine", FakeBotEngine)
+    app = FastAPI()
+    app.include_router(strategy_api.create_router(runtime=runtime), prefix="/api/strategies")
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        responses = await asyncio.gather(
+            client.post("/api/strategies/passive/start"),
+            client.post("/api/strategies/passive/start"),
+        )
+
+    assert [response.status_code for response in responses] == [200, 200]
+    assert len(created_engines) == 1
+    assert start_calls == 1
+    assert runtime.engines == {"passive": created_engines[0]}
+    assert runtime.strategy_status["passive"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_stale_engine_error_does_not_stop_restarted_strategy(monkeypatch):
+    class FakeRepository:
+        def get_strategy_configs(self):
+            return []
+
+        def get_strategy_config(self, name):
+            return None
+
+    class PassiveStrategy(BaseStrategy):
+        name = "passive"
+
+        async def on_bar(self, bar):
+            pass
+
+    created_engines = []
+
+    class FakeBotEngine:
+        def __init__(self, *args, **kwargs):
+            self.on_strategy_error = kwargs["on_strategy_error"]
+            created_engines.append(self)
+
+        async def start(self):
+            pass
+
+        async def stop(self):
+            pass
+
+    registry = StrategyRegistry()
+    registry.register("passive", PassiveStrategy)
+    runtime = strategy_api.StrategyRuntimeState(registry=registry)
+    monkeypatch.setattr(strategy_api, "Repository", FakeRepository, raising=False)
+    monkeypatch.setattr(strategy_api, "create_strategy_registry", lambda: registry)
+    monkeypatch.setattr(strategy_api, "create_market_data_service", lambda: object())
+    monkeypatch.setattr(strategy_api, "create_order_manager", lambda **kwargs: object())
+    monkeypatch.setattr(strategy_api, "BotEngine", FakeBotEngine)
+    app = FastAPI()
+    app.include_router(strategy_api.create_router(runtime=runtime), prefix="/api/strategies")
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        first_start = await client.post("/api/strategies/passive/start")
+        first_stop = await client.post("/api/strategies/passive/stop")
+        second_start = await client.post("/api/strategies/passive/start")
+        await created_engines[0].on_strategy_error("passive", RuntimeError("old boom"))
+        strategies_resp = await client.get("/api/strategies")
+
+    assert first_start.status_code == 200
+    assert first_stop.status_code == 200
+    assert second_start.status_code == 200
+    assert runtime.engines == {"passive": created_engines[1]}
+    assert runtime.strategy_errors == {}
+    assert {"name": "passive", "status": "running"} in strategies_resp.json()
+
+
+@pytest.mark.asyncio
+async def test_stopping_strategy_does_not_release_market_data_while_another_start_is_in_flight(
+    monkeypatch,
+):
+    class FakeRepository:
+        def get_strategy_configs(self):
+            return []
+
+        def get_strategy_config(self, name):
+            return None
+
+    class FirstStrategy(BaseStrategy):
+        name = "first"
+
+        async def on_bar(self, bar):
+            pass
+
+    class SecondStrategy(BaseStrategy):
+        name = "second"
+
+        async def on_bar(self, bar):
+            pass
+
+    class FakeMarketDataService:
+        def __init__(self):
+            self.stop_count = 0
+
+        async def stop(self):
+            self.stop_count += 1
+
+    start_entered = asyncio.Event()
+    allow_start_to_finish = asyncio.Event()
+    market_data = FakeMarketDataService()
+
+    class FakeBotEngine:
+        def __init__(self, strategies, *args, **kwargs):
+            self.name = strategies[0].name
+
+        async def start(self):
+            if self.name == "second":
+                start_entered.set()
+                await allow_start_to_finish.wait()
+
+        async def stop(self):
+            pass
+
+    registry = StrategyRegistry()
+    registry.register("first", FirstStrategy)
+    registry.register("second", SecondStrategy)
+    runtime = strategy_api.StrategyRuntimeState(registry=registry)
+    monkeypatch.setattr(strategy_api, "Repository", FakeRepository, raising=False)
+    monkeypatch.setattr(strategy_api, "create_strategy_registry", lambda: registry)
+    monkeypatch.setattr(strategy_api, "create_market_data_service", lambda: market_data)
+    monkeypatch.setattr(strategy_api, "create_order_manager", lambda **kwargs: object())
+    monkeypatch.setattr(strategy_api, "BotEngine", FakeBotEngine)
+    app = FastAPI()
+    app.include_router(strategy_api.create_router(runtime=runtime), prefix="/api/strategies")
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        first_start = await client.post("/api/strategies/first/start")
+        second_start_task = asyncio.create_task(client.post("/api/strategies/second/start"))
+        await start_entered.wait()
+        first_stop = await client.post("/api/strategies/first/stop")
+        stop_count_while_second_starting = market_data.stop_count
+        allow_start_to_finish.set()
+        second_start = await second_start_task
+        second_stop = await client.post("/api/strategies/second/stop")
+
+    assert first_start.status_code == 200
+    assert first_stop.status_code == 200
+    assert second_start.status_code == 200
+    assert second_stop.status_code == 200
+    assert stop_count_while_second_starting == 0
+    assert market_data.stop_count == 1
+
+
+@pytest.mark.asyncio
 async def test_strategy_status_is_isolated_per_app_instance():
     first_app = create_app()
     second_app = create_app()
@@ -1119,6 +1923,159 @@ async def test_strategy_status_is_isolated_per_app_instance():
         resp = await second_client.get("/api/strategies")
 
     assert {"name": "ma_cross", "status": "stopped"} in resp.json()
+
+
+@pytest.mark.asyncio
+async def test_start_strategy_creates_market_data_service_after_router_creation(monkeypatch):
+    class FakeRepository:
+        def get_strategy_configs(self):
+            return []
+
+        def get_strategy_config(self, name):
+            return None
+
+        def get_orders(self):
+            return []
+
+        def get_account(self, strategy=None):
+            return None
+
+        def get_open_positions(self, strategy=None):
+            return []
+
+    class PassiveStrategy(BaseStrategy):
+        name = "passive"
+
+        def __init__(self):
+            super().__init__()
+            self.symbol = "BTC-USDT"
+            self.timeframe = "1m"
+
+        async def on_bar(self, bar):
+            pass
+
+    class FakeMarketDataService:
+        def __init__(self, api_key):
+            self.api_key = api_key
+            self._running = False
+
+        def subscribe(self, symbol, timeframe, callback):
+            pass
+
+        async def start(self):
+            self._running = True
+            started_api_keys.append(self.api_key)
+
+        async def stop(self):
+            self._running = False
+
+    current_api_key = {"value": ""}
+    created_api_keys = []
+    started_api_keys = []
+
+    def fake_create_market_data_service():
+        created_api_keys.append(current_api_key["value"])
+        return FakeMarketDataService(current_api_key["value"])
+
+    registry = StrategyRegistry()
+    registry.register("passive", PassiveStrategy)
+    monkeypatch.setattr(strategy_api, "create_strategy_registry", lambda: registry)
+    monkeypatch.setattr(strategy_api, "Repository", FakeRepository, raising=False)
+    monkeypatch.setattr(
+        strategy_api,
+        "create_market_data_service",
+        fake_create_market_data_service,
+        raising=False,
+    )
+
+    app = create_app()
+    current_api_key["value"] = "saved-key"
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post("/api/strategies/passive/start")
+
+    assert resp.status_code == 200
+    assert created_api_keys == ["saved-key"]
+    assert started_api_keys == ["saved-key"]
+
+
+@pytest.mark.asyncio
+async def test_start_strategy_refreshes_market_data_service_after_all_strategies_stop(monkeypatch):
+    class FakeRepository:
+        def get_strategy_configs(self):
+            return []
+
+        def get_strategy_config(self, name):
+            return None
+
+        def get_orders(self):
+            return []
+
+        def get_account(self, strategy=None):
+            return None
+
+        def get_open_positions(self, strategy=None):
+            return []
+
+    class PassiveStrategy(BaseStrategy):
+        name = "passive"
+
+        def __init__(self):
+            super().__init__()
+            self.symbol = "BTC-USDT"
+            self.timeframe = "1m"
+
+        async def on_bar(self, bar):
+            pass
+
+    class FakeMarketDataService:
+        def __init__(self, api_key):
+            self.api_key = api_key
+
+        def subscribe(self, symbol, timeframe, callback):
+            pass
+
+        async def start(self):
+            started_api_keys.append(self.api_key)
+
+        async def stop(self):
+            stopped_api_keys.append(self.api_key)
+
+    current_api_key = {"value": "first-key"}
+    created_api_keys = []
+    started_api_keys = []
+    stopped_api_keys = []
+
+    def fake_create_market_data_service():
+        created_api_keys.append(current_api_key["value"])
+        return FakeMarketDataService(current_api_key["value"])
+
+    registry = StrategyRegistry()
+    registry.register("passive", PassiveStrategy)
+    monkeypatch.setattr(strategy_api, "create_strategy_registry", lambda: registry)
+    monkeypatch.setattr(strategy_api, "Repository", FakeRepository, raising=False)
+    monkeypatch.setattr(
+        strategy_api,
+        "create_market_data_service",
+        fake_create_market_data_service,
+        raising=False,
+    )
+
+    app = create_app()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        first_start = await client.post("/api/strategies/passive/start")
+        first_stop = await client.post("/api/strategies/passive/stop")
+        current_api_key["value"] = "second-key"
+        second_start = await client.post("/api/strategies/passive/start")
+
+    assert first_start.status_code == 200
+    assert first_stop.status_code == 200
+    assert second_start.status_code == 200
+    assert created_api_keys == ["first-key", "second-key"]
+    assert started_api_keys == ["first-key", "second-key"]
+    assert stopped_api_keys == ["first-key"]
 
 
 @pytest.mark.asyncio
@@ -1365,6 +2322,7 @@ async def test_start_unknown_strategy_returns_404(app):
 async def test_run_backtest_uses_cached_bars_and_persists_summary(monkeypatch):
     class FakeRepository:
         results = []
+        trades = []
         klines = [
             KlineCache(
                 symbol="BTC-USDT",
@@ -1397,8 +2355,9 @@ async def test_run_backtest_uses_cached_bars_and_persists_summary(monkeypatch):
                 and start <= kline.timestamp <= end
             ]
 
-        def save_backtest_result(self, result):
+        def save_backtest_result_with_trades(self, result, trades):
             self.results.append(result)
+            self.trades.extend(trades)
             return result
 
         def get_backtest_results(self, limit=50):
@@ -1418,6 +2377,7 @@ async def test_run_backtest_uses_cached_bars_and_persists_summary(monkeypatch):
             return await self.buy("BTC-USDT", 1.0)
 
     FakeRepository.results = []
+    FakeRepository.trades = []
     registry = StrategyRegistry()
     registry.register("buy_once", BuyOnceStrategy)
     monkeypatch.setattr(backtest_api, "Repository", FakeRepository, raising=False)
@@ -1451,12 +2411,23 @@ async def test_run_backtest_uses_cached_bars_and_persists_summary(monkeypatch):
     assert saved.initial_capital == 100000
     assert saved.total_trades == 1
     assert saved.created_at == 1700007200000
+    assert len(FakeRepository.trades) == 1
+    trade = FakeRepository.trades[0]
+    assert trade.result_id == saved.id
+    assert trade.symbol == "BTC-USDT"
+    assert trade.side == "buy"
+    assert trade.amount == 1.0
+    assert trade.price == 100.1
+    assert trade.fee == 0.05005
+    assert trade.pnl == -100.15005
+    assert trade.timestamp == 1700002800000
 
 
 @pytest.mark.asyncio
 async def test_run_backtest_fetches_missing_historical_bars_before_running(monkeypatch):
     class FakeRepository:
         results = []
+        trades = []
         klines = []
 
         def get_klines(self, symbol, timeframe, start, end):
@@ -1472,8 +2443,9 @@ async def test_run_backtest_fetches_missing_historical_bars_before_running(monke
             self.klines.append(kline)
             return kline
 
-        def save_backtest_result(self, result):
+        def save_backtest_result_with_trades(self, result, trades):
             self.results.append(result)
+            self.trades.extend(trades)
             return result
 
     class BuyOnceStrategy(BaseStrategy):
@@ -1506,6 +2478,7 @@ async def test_run_backtest_fetches_missing_historical_bars_before_running(monke
             self.closed = True
 
     FakeRepository.results = []
+    FakeRepository.trades = []
     FakeRepository.klines = []
     FakeAdapter.calls = []
     FakeAdapter.closed = False
@@ -1538,7 +2511,18 @@ async def test_run_backtest_fetches_missing_historical_bars_before_running(monke
         {"symbol": "BTC-USDT", "timeframe": "1h", "limit": 2, "since": 1700002800000}
     ]
     assert [kline.timestamp for kline in FakeRepository.klines] == [1700002800000, 1700006400000]
-    assert FakeRepository.results[0].strategy == "fetch_buy_once"
+    saved = FakeRepository.results[0]
+    assert saved.strategy == "fetch_buy_once"
+    assert len(FakeRepository.trades) == 1
+    trade = FakeRepository.trades[0]
+    assert trade.result_id == saved.id
+    assert trade.symbol == "BTC-USDT"
+    assert trade.side == "buy"
+    assert trade.amount == 1.0
+    assert trade.price == 100.1
+    assert trade.fee == 0.05005
+    assert trade.pnl == -100.15005
+    assert trade.timestamp == 1700002800000
 
 
 @pytest.mark.asyncio
@@ -1625,12 +2609,14 @@ async def test_run_backtest_rejects_unsupported_historical_timeframe(monkeypatch
 async def test_run_backtest_rejects_insufficient_cached_bars(monkeypatch):
     class FakeRepository:
         results = []
+        trades = []
 
         def get_klines(self, symbol, timeframe, start, end):
             return []
 
-        def save_backtest_result(self, result):
+        def save_backtest_result_with_trades(self, result, trades):
             self.results.append(result)
+            self.trades.extend(trades)
             return result
 
     class EmptyStrategy(BaseStrategy):
@@ -1646,6 +2632,8 @@ async def test_run_backtest_rejects_insufficient_cached_bars(monkeypatch):
         async def close(self):
             pass
 
+    FakeRepository.results = []
+    FakeRepository.trades = []
     registry = StrategyRegistry()
     registry.register("empty", EmptyStrategy)
     monkeypatch.setattr(backtest_api, "Repository", FakeRepository, raising=False)
@@ -1671,12 +2659,14 @@ async def test_run_backtest_rejects_insufficient_cached_bars(monkeypatch):
     assert resp.status_code == 422
     assert resp.json()["detail"] == "insufficient historical data for requested backtest range"
     assert FakeRepository.results == []
+    assert FakeRepository.trades == []
 
 
 @pytest.mark.asyncio
 async def test_run_backtest_rejects_partial_historical_fetch_without_persisting(monkeypatch):
     class FakeRepository:
         results = []
+        trades = []
         klines = []
 
         def get_klines(self, symbol, timeframe, start, end):
@@ -1692,8 +2682,9 @@ async def test_run_backtest_rejects_partial_historical_fetch_without_persisting(
             self.klines.append(kline)
             return kline
 
-        def save_backtest_result(self, result):
+        def save_backtest_result_with_trades(self, result, trades):
             self.results.append(result)
+            self.trades.extend(trades)
             return result
 
     class EmptyStrategy(BaseStrategy):
@@ -1719,6 +2710,7 @@ async def test_run_backtest_rejects_partial_historical_fetch_without_persisting(
             pass
 
     FakeRepository.results = []
+    FakeRepository.trades = []
     FakeRepository.klines = []
     registry = StrategyRegistry()
     registry.register("partial_fetch", EmptyStrategy)
@@ -1746,6 +2738,7 @@ async def test_run_backtest_rejects_partial_historical_fetch_without_persisting(
     assert resp.json()["detail"] == "insufficient historical data for requested backtest range"
     assert FakeRepository.klines == []
     assert FakeRepository.results == []
+    assert FakeRepository.trades == []
 
 
 @pytest.mark.asyncio
@@ -1803,6 +2796,152 @@ async def test_get_backtest_results_returns_persisted_summaries(monkeypatch):
     assert [result["id"] for result in data] == ["bt-new", "bt-old"]
     assert data[0]["symbol"] == "ETH-USDT"
     assert data[0]["total_trades"] == 2
+
+
+@pytest.mark.asyncio
+async def test_get_backtest_result_detail_returns_result_klines_and_markers(monkeypatch):
+    async def fail_ensure_historical_bars(*args, **kwargs):
+        raise AssertionError("detail endpoint must not fetch historical bars")
+
+    class FailAdapter:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("detail endpoint must not create OKX adapters")
+
+    class FakeRepository:
+        def get_backtest_result(self, result_id):
+            assert result_id == "bt-detail"
+            return BacktestResultRecord(
+                id="bt-detail",
+                strategy="ma_cross",
+                symbol="BTC-USDT",
+                timeframe="1h",
+                start_time=1700000000000,
+                end_time=1700003600000,
+                initial_capital=100000.0,
+                total_return=0.01,
+                sharpe_ratio=1.2,
+                max_drawdown=0.03,
+                win_rate=0.5,
+                total_trades=2,
+                created_at=1700007200000,
+            )
+
+        def get_klines(self, symbol, timeframe, start, end):
+            assert (symbol, timeframe, start, end) == (
+                "BTC-USDT",
+                "1h",
+                1700000000000,
+                1700003600000,
+            )
+            return [
+                KlineCache(
+                    symbol="BTC-USDT",
+                    timeframe="1h",
+                    timestamp=1700000000000,
+                    open=100.0,
+                    high=101.0,
+                    low=99.0,
+                    close=100.5,
+                    volume=10.0,
+                )
+            ]
+
+        def get_backtest_trades(self, result_id):
+            assert result_id == "bt-detail"
+            return [
+                BacktestTradeRecord(
+                    result_id="bt-detail",
+                    symbol="BTC-USDT",
+                    side="buy",
+                    timestamp=1700000000000,
+                    price=100.0,
+                    amount=0.1,
+                    fee=0.01,
+                    pnl=-10.01,
+                )
+            ]
+
+    monkeypatch.setattr(backtest_api, "Repository", FakeRepository, raising=False)
+    monkeypatch.setattr(
+        backtest_api,
+        "ensure_historical_bars",
+        fail_ensure_historical_bars,
+        raising=False,
+    )
+    monkeypatch.setattr(backtest_api, "OKXSpotAdapter", FailAdapter, raising=False)
+
+    transport = ASGITransport(app=create_app())
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/backtest/results/bt-detail")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert set(data) == {"result", "klines", "markers"}
+    assert data["result"]["id"] == "bt-detail"
+    assert data["result"]["symbol"] == "BTC-USDT"
+    assert data["klines"] == [
+        {
+            "id": None,
+            "symbol": "BTC-USDT",
+            "timeframe": "1h",
+            "timestamp": 1700000000000,
+            "open": 100.0,
+            "high": 101.0,
+            "low": 99.0,
+            "close": 100.5,
+            "volume": 10.0,
+        }
+    ]
+    assert data["markers"] == [
+        {
+            "id": None,
+            "result_id": "bt-detail",
+            "symbol": "BTC-USDT",
+            "side": "buy",
+            "timestamp": 1700000000000,
+            "price": 100.0,
+            "amount": 0.1,
+            "fee": 0.01,
+            "pnl": -10.01,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_get_backtest_result_detail_returns_404_for_missing_result(monkeypatch):
+    async def fail_ensure_historical_bars(*args, **kwargs):
+        raise AssertionError("detail endpoint must not fetch historical bars")
+
+    class FailAdapter:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("detail endpoint must not create OKX adapters")
+
+    class FakeRepository:
+        def get_backtest_result(self, result_id):
+            assert result_id == "missing"
+            return None
+
+        def get_klines(self, *args, **kwargs):
+            raise AssertionError("missing detail must not read klines")
+
+        def get_backtest_trades(self, *args, **kwargs):
+            raise AssertionError("missing detail must not read markers")
+
+    monkeypatch.setattr(backtest_api, "Repository", FakeRepository, raising=False)
+    monkeypatch.setattr(
+        backtest_api,
+        "ensure_historical_bars",
+        fail_ensure_historical_bars,
+        raising=False,
+    )
+    monkeypatch.setattr(backtest_api, "OKXSpotAdapter", FailAdapter, raising=False)
+
+    transport = ASGITransport(app=create_app())
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/backtest/results/missing")
+
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "Backtest result not found"
 
 
 def test_websocket_accepts_connection_and_sends_snapshot(monkeypatch):
@@ -1942,6 +3081,8 @@ async def test_get_and_update_settings(app):
                     "max_daily_loss_pct": 0.03,
                     "max_drawdown_pct": 0.12,
                     "max_total_position_pct": 0.65,
+                    "allow_live_open_orders": True,
+                    "live_max_order_notional": 2500.0,
                 },
                 "notify": {
                     "telegram_bot_token": "telegram-token",
@@ -1963,9 +3104,13 @@ async def test_get_and_update_settings(app):
         "secret_set": True,
         "passphrase": "ok**********se",
         "passphrase_set": True,
+        "market_type": "spot",
+        "demo": True,
     }
     assert saved["backtest"]["initial_capital"] == 250000
     assert saved["risk"]["max_daily_loss_pct"] == 0.03
+    assert saved["risk"]["allow_live_open_orders"] is True
+    assert saved["risk"]["live_max_order_notional"] == 2500.0
     assert saved["notify"] == {
         "telegram_bot_token": "te**********en",
         "telegram_bot_token_set": True,
@@ -2010,6 +3155,8 @@ async def test_settings_defaults_load_project_config_environment(monkeypatch):
         "secret_set": True,
         "passphrase": "en**********se",
         "passphrase_set": True,
+        "market_type": "spot",
+        "demo": True,
     }
     assert settings["notify"] == {
         "telegram_bot_token": "en**************en",
@@ -2043,6 +3190,8 @@ async def test_settings_round_trip_keeps_existing_secrets(tmp_path, monkeypatch)
                     "max_daily_loss_pct": 0.03,
                     "max_drawdown_pct": 0.12,
                     "max_total_position_pct": 0.65,
+                    "allow_live_open_orders": True,
+                    "live_max_order_notional": 2500.0,
                 },
                 "notify": {
                     "telegram_bot_token": "real-telegram-token",
@@ -2060,6 +3209,8 @@ async def test_settings_round_trip_keeps_existing_secrets(tmp_path, monkeypatch)
         "api_key": "real-api-key",
         "secret": "real-secret-value",
         "passphrase": "real-passphrase",
+        "market_type": "spot",
+        "demo": True,
     }
     assert persisted["notify"] == {
         "telegram_bot_token": "real-telegram-token",
@@ -2094,6 +3245,8 @@ async def test_settings_persist_across_app_instances(tmp_path, monkeypatch):
                     "max_daily_loss_pct": 0.02,
                     "max_drawdown_pct": 0.1,
                     "max_total_position_pct": 0.5,
+                    "allow_live_open_orders": True,
+                    "live_max_order_notional": 2500.0,
                 },
                 "notify": {
                     "telegram_bot_token": "persisted-token",
@@ -2121,9 +3274,13 @@ async def test_settings_persist_across_app_instances(tmp_path, monkeypatch):
         "secret_set": True,
         "passphrase": "pe****************se",
         "passphrase_set": True,
+        "market_type": "spot",
+        "demo": True,
     }
     assert saved["backtest"]["initial_capital"] == 300000
     assert saved["risk"]["max_total_position_pct"] == 0.5
+    assert saved["risk"]["allow_live_open_orders"] is True
+    assert saved["risk"]["live_max_order_notional"] == 2500.0
     assert saved["notify"] == {
         "telegram_bot_token": "pe***********en",
         "telegram_bot_token_set": True,
@@ -2475,6 +3632,212 @@ async def test_market_klines_returns_rows_from_real_public_adapter(monkeypatch, 
         ("fetch_ohlcv", "ETH-USDT", "1m", 2),
         ("close",),
     ]
+
+
+@pytest.mark.asyncio
+async def test_market_klines_uses_requested_swap_adapter(monkeypatch, app):
+    constructed = []
+
+    class SentinelSwapAdapter:
+        def __init__(self, api_key, secret, passphrase, demo=True):
+            constructed.append((api_key, secret, passphrase, demo))
+
+        async def fetch_ohlcv(self, symbol, timeframe, limit=100, since=None):
+            return [Bar(timestamp=1700000000000, open=1, high=2, low=0.5, close=1.5, volume=10)]
+
+        async def fetch_tickers(self, symbols):
+            return []
+
+        async def submit(self, order):
+            return order
+
+        async def cancel(self, order_id, symbol=None):
+            return True
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(market_api, "OKXSwapAdapter", SentinelSwapAdapter)
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get(
+            "/api/market/klines",
+            params={"market_type": "swap", "symbol": "BTC-USDT-SWAP", "timeframe": "1h"},
+        )
+
+    assert resp.status_code == 200
+    assert constructed == [("", "", "", True)]
+    assert resp.json()[0]["symbol"] == "BTC-USDT-SWAP"
+
+
+@pytest.mark.asyncio
+async def test_market_tickers_accepts_symbols_for_options(monkeypatch, app):
+    calls = []
+
+    class SentinelOptionsAdapter:
+        def __init__(self, api_key, secret, passphrase, demo=True):
+            pass
+
+        async def fetch_ohlcv(self, symbol, timeframe, limit=100, since=None):
+            return []
+
+        async def fetch_tickers(self, symbols):
+            calls.append(symbols)
+            return [{"symbol": symbols[0], "last": 1.0, "bidPx": 0.9, "askPx": 1.1, "vol24h": 2.0}]
+
+        async def submit(self, order):
+            return order
+
+        async def cancel(self, order_id, symbol=None):
+            return True
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(market_api, "OKXOptionsAdapter", SentinelOptionsAdapter)
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get(
+            "/api/market/tickers",
+            params=[("market_type", "option"), ("symbols", "BTC-USDT-260626-100000-C")],
+        )
+
+    assert resp.status_code == 200
+    assert calls == [["BTC-USDT-260626-100000-C"]]
+    assert resp.json()[0]["symbol"] == "BTC-USDT-260626-100000-C"
+
+
+@pytest.mark.asyncio
+async def test_market_tickers_returns_empty_for_options_without_symbols(monkeypatch, app):
+    class UnexpectedOptionsAdapter:
+        def __init__(self, api_key, secret, passphrase, demo=True):
+            raise AssertionError("empty option defaults must not create an adapter")
+
+    monkeypatch.setattr(market_api, "OKXOptionsAdapter", UnexpectedOptionsAdapter)
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/market/tickers", params={"market_type": "option"})
+
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+@pytest.mark.asyncio
+async def test_market_klines_rejects_empty_symbol(app):
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get(
+            "/api/market/klines",
+            params={"market_type": "swap", "symbol": "", "timeframe": "1h"},
+        )
+
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == "symbol must not be empty"
+
+
+@pytest.mark.asyncio
+async def test_market_klines_with_time_range_returns_cached_rows(monkeypatch, app):
+    events = []
+
+    class FakeRepository:
+        def __init__(self) -> None:
+            events.append(("repo_init",))
+
+        def get_klines(self, symbol: str, timeframe: str, start: int, end: int):
+            events.append(("get_klines", symbol, timeframe, start, end))
+            return [
+                KlineCache(
+                    symbol="ETH-USDT",
+                    timeframe="1h",
+                    timestamp=1700000000000,
+                    open=1.1,
+                    high=1.3,
+                    low=1.0,
+                    close=1.2,
+                    volume=10.5,
+                ),
+                KlineCache(
+                    symbol="ETH-USDT",
+                    timeframe="1h",
+                    timestamp=1700003600000,
+                    open=1.2,
+                    high=1.4,
+                    low=1.1,
+                    close=1.3,
+                    volume=11.5,
+                ),
+            ]
+
+    class UnexpectedOKXSpotAdapter:
+        def __init__(self, api_key: str, secret: str, passphrase: str) -> None:
+            raise AssertionError("explicit kline ranges must use cache")
+
+    monkeypatch.setattr(market_api, "Repository", FakeRepository, raising=False)
+    monkeypatch.setattr(market_api, "OKXSpotAdapter", UnexpectedOKXSpotAdapter, raising=False)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get(
+            "/api/market/klines"
+            "?symbol=ETH-USDT&timeframe=1h&start_time=1700000000000&end_time=1700003600000"
+        )
+
+    assert resp.status_code == 200
+    assert resp.json() == [
+        {
+            "symbol": "ETH-USDT",
+            "timeframe": "1h",
+            "timestamp": 1700000000000,
+            "open": 1.1,
+            "high": 1.3,
+            "low": 1.0,
+            "close": 1.2,
+            "volume": 10.5,
+        },
+        {
+            "symbol": "ETH-USDT",
+            "timeframe": "1h",
+            "timestamp": 1700003600000,
+            "open": 1.2,
+            "high": 1.4,
+            "low": 1.1,
+            "close": 1.3,
+            "volume": 11.5,
+        },
+    ]
+    assert events == [
+        ("repo_init",),
+        ("get_klines", "ETH-USDT", "1h", 1700000000000, 1700003600000),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_market_klines_rejects_incomplete_time_range(app):
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get(
+            "/api/market/klines?symbol=ETH-USDT&timeframe=1h&start_time=1700000000000"
+        )
+
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == "start_time and end_time must be provided together"
+
+
+@pytest.mark.asyncio
+async def test_market_klines_rejects_invalid_time_range(app):
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get(
+            "/api/market/klines"
+            "?symbol=ETH-USDT&timeframe=1h&start_time=1700003600000&end_time=1700000000000"
+        )
+
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == "end_time must be after start_time"
 
 
 @pytest.mark.asyncio

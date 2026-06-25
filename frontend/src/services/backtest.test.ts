@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import axios from 'axios';
 
-import { fetchBacktestResults, runBacktest } from './backtest';
+import { fetchBacktestResultDetail, fetchBacktestResults, runBacktest } from './backtest';
 import type { BacktestRequest } from '@/types/backtest';
 
 vi.mock('axios');
@@ -57,5 +57,52 @@ describe('backtest service', () => {
 
     expect(mockedAxios.get).toHaveBeenCalledWith('/api/backtest/results');
     expect(result).toEqual(results);
+  });
+
+  it('loads a backtest result detail from the backtest API', async () => {
+    const detail = {
+      result: {
+        id: 'bt-detail',
+        strategy: 'ma_cross',
+        symbol: 'BTC-USDT',
+        timeframe: '1h',
+        start_time: 1700000000000,
+        end_time: 1700003600000,
+        initial_capital: 100000,
+        total_return: 0.01,
+        sharpe_ratio: 1.2,
+        max_drawdown: 0.03,
+        win_rate: 0.5,
+        total_trades: 1,
+        created_at: 1700007200000,
+      },
+      klines: [
+        {
+          timestamp: 1700000000000,
+          open: 100,
+          high: 101,
+          low: 99,
+          close: 100.5,
+          volume: 10,
+        },
+      ],
+      markers: [
+        {
+          symbol: 'BTC-USDT',
+          side: 'buy',
+          timestamp: 1700000000000,
+          price: 100,
+          amount: 0.1,
+          fee: 0.01,
+          pnl: -10.01,
+        },
+      ],
+    };
+    mockedAxios.get.mockResolvedValueOnce({ data: detail });
+
+    const result = await fetchBacktestResultDetail('bt-detail');
+
+    expect(mockedAxios.get).toHaveBeenCalledWith('/api/backtest/results/bt-detail');
+    expect(result).toEqual(detail);
   });
 });

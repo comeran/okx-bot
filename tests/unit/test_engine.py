@@ -15,6 +15,14 @@ class FakeMarketDataService:
     def subscribe(self, symbol, timeframe, callback):
         self.subscriptions.setdefault((symbol, timeframe), []).append(callback)
 
+    def unsubscribe(self, symbol, timeframe, callback):
+        callbacks = self.subscriptions.get((symbol, timeframe), [])
+        self.subscriptions[(symbol, timeframe)] = [
+            existing for existing in callbacks if existing is not callback
+        ]
+        if not self.subscriptions[(symbol, timeframe)]:
+            self.subscriptions.pop((symbol, timeframe))
+
     async def start(self):
         self.start_count += 1
         self._running = True
@@ -72,6 +80,40 @@ async def test_engine_subscribes_strategies_by_symbol_timeframe_and_fans_out_bar
     assert len(market_data.subscriptions[("BTC-USDT", "1m")]) == 2
     assert len(first.bars) == 1
     assert len(second.bars) == 1
+
+
+async def test_engine_start_is_idempotent_for_market_data_subscription():
+    market_data = FakeMarketDataService()
+    strategy = RecordingStrategy("ma_cross")
+    engine = BotEngine([strategy], market_data_service=market_data)
+
+    await engine.start()
+    await engine.start()
+
+    assert len(market_data.subscriptions[("BTC-USDT", "1m")]) == 1
+
+
+async def test_engine_stop_unsubscribes_strategy_callback():
+    market_data = FakeMarketDataService()
+    strategy = RecordingStrategy("ma_cross")
+    engine = BotEngine([strategy], market_data_service=market_data)
+
+    await engine.start()
+    await engine.stop()
+
+    assert ("BTC-USDT", "1m") not in market_data.subscriptions
+
+
+async def test_engine_error_unsubscribes_strategy_callback():
+    market_data = FakeMarketDataService()
+    strategy = FailingStrategy("ma_cross")
+    engine = BotEngine([strategy], market_data_service=market_data)
+
+    await engine.start()
+    callback = market_data.subscriptions[("BTC-USDT", "1m")][0]
+    await callback(make_bar())
+
+    assert ("BTC-USDT", "1m") not in market_data.subscriptions
 
 
 async def test_stopping_one_engine_keeps_shared_market_data_task_running():
@@ -216,9 +258,132 @@ async def test_engine_before_strategy_bar_failure_uses_strategy_error_path():
     )
 
     await engine.start()
-    await market_data.subscriptions[("BTC-USDT", "1m")][0](make_bar())
-    await market_data.subscriptions[("BTC-USDT", "1m")][0](make_bar())
+    callback = market_data.subscriptions[("BTC-USDT", "1m")][0]
+    await callback(make_bar())
+    await callback(make_bar())
 
     assert errors == [("ma_cross", "mark failed")]
     assert strategy.bars == []
     assert strategy.shutdown_count == 1
+
+
+async def test_inflight_callback_skips_on_bar_after_stop_during_before_hook():
+    market_data = FakeMarketDataService()
+    strategy = RecordingStrategy("ma_cross")
+    before_entered = asyncio.Event()
+    allow_before_to_finish = asyncio.Event()
+
+    async def before_strategy_bar(strategy, bar):
+        before_entered.set()
+        await allow_before_to_finish.wait()
+
+    engine = BotEngine(
+        [strategy],
+        market_data_service=market_data,
+        before_strategy_bar=before_strategy_bar,
+    )
+
+    await engine.start()
+    callback = market_data.subscriptions[("BTC-USDT", "1m")][0]
+    callback_task = asyncio.create_task(callback(make_bar()))
+    await before_entered.wait()
+
+    await engine.stop()
+    allow_before_to_finish.set()
+    await callback_task
+
+    assert strategy.bars == []
+    assert strategy.shutdown_count == 1
+
+
+async def test_stop_during_slow_start_does_not_leave_running_subscription():
+    class SlowInitStrategy(RecordingStrategy):
+        def __init__(self, name):
+            super().__init__(name)
+            self.init_started = asyncio.Event()
+            self.finish_init = asyncio.Event()
+
+        async def on_init(self):
+            self.init_started.set()
+            await self.finish_init.wait()
+
+    market_data = FakeMarketDataService()
+    strategy = SlowInitStrategy("ma_cross")
+    engine = BotEngine([strategy], market_data_service=market_data)
+
+    start_task = asyncio.create_task(engine.start())
+    await strategy.init_started.wait()
+    stop_task = asyncio.create_task(engine.stop())
+    await asyncio.sleep(0)
+
+    strategy.finish_init.set()
+    await asyncio.gather(start_task, stop_task)
+
+    assert engine.running is False
+    assert ("BTC-USDT", "1m") not in market_data.subscriptions
+    assert market_data.start_count == 1
+    assert market_data.stop_count == 1
+
+
+async def test_concurrent_engine_starts_create_one_market_data_runtime():
+    class SlowMarketDataService(FakeMarketDataService):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = asyncio.Event()
+
+        async def start(self):
+            self.start_count += 1
+            await self.started.wait()
+            self._running = True
+
+    class SlowInitStrategy(RecordingStrategy):
+        async def on_init(self):
+            await asyncio.sleep(0)
+
+    market_data = SlowMarketDataService()
+    strategy = SlowInitStrategy("ma_cross")
+    engine = BotEngine([strategy], market_data_service=market_data)
+
+    await asyncio.gather(engine.start(), engine.start())
+    market_data.started.set()
+    if engine._market_data_task is not None:
+        await engine._market_data_task
+
+    assert market_data.start_count == 1
+    assert len(market_data.subscriptions[("BTC-USDT", "1m")]) == 1
+
+
+async def test_concurrent_shared_market_data_starts_create_one_runtime():
+    class SlowMarketDataService(FakeMarketDataService):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = asyncio.Event()
+
+        async def start(self):
+            self.start_count += 1
+            await self.started.wait()
+            self._running = True
+
+    market_data = SlowMarketDataService()
+    first_engine = BotEngine(
+        [RecordingStrategy("first")],
+        market_data_service=market_data,
+        stop_market_data_on_stop=False,
+    )
+    second_engine = BotEngine(
+        [RecordingStrategy("second")],
+        market_data_service=market_data,
+        stop_market_data_on_stop=False,
+    )
+
+    await asyncio.gather(first_engine.start(), second_engine.start())
+    market_data.started.set()
+    runtime_tasks = {
+        task
+        for task in (first_engine._market_data_task, second_engine._market_data_task)
+        if task is not None
+    }
+    await asyncio.gather(*runtime_tasks)
+
+    assert market_data.start_count == 1
+    assert len(runtime_tasks) == 1

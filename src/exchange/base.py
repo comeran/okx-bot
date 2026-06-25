@@ -1,10 +1,19 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from decimal import Decimal, InvalidOperation
 
 import ccxt.async_support as ccxt
 
-from src.core.types import Bar, Order, OrderStatus
+from src.core.types import (
+    AccountSnapshot,
+    Bar,
+    Order,
+    OrderStatus,
+    OrderType,
+    PositionSide,
+    PositionSnapshot,
+)
 from src.order.router import OrderHandler
 
 
@@ -24,6 +33,16 @@ class ExchangeAdapter(OrderHandler, ABC):
         pass
 
     @abstractmethod
+    async def fetch_account_snapshot(self) -> AccountSnapshot:
+        pass
+
+    @abstractmethod
+    async def fetch_position_snapshots(
+        self, symbols: list[str] | None = None
+    ) -> list[PositionSnapshot]:
+        pass
+
+    @abstractmethod
     async def close(self) -> None:
         pass
 
@@ -38,7 +57,14 @@ class OKXBaseAdapter(ExchangeAdapter):
         "1d": ("1Dutc", 86_400_000),
     }
 
-    def __init__(self, api_key: str, secret: str, passphrase: str, default_type: str) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        secret: str,
+        passphrase: str,
+        default_type: str,
+        demo: bool = True,
+    ) -> None:
         config = {"options": {"defaultType": default_type}}
         if api_key:
             config["apiKey"] = api_key
@@ -48,6 +74,8 @@ class OKXBaseAdapter(ExchangeAdapter):
             config["password"] = passphrase
         self._default_type = default_type
         self._exchange = ccxt.okx(config)
+        if demo and hasattr(self._exchange, "set_sandbox_mode"):
+            self._exchange.set_sandbox_mode(True)
 
     def _to_ccxt_symbol(self, symbol: str) -> str:
         if self._default_type != "spot":
@@ -56,6 +84,131 @@ class OKXBaseAdapter(ExchangeAdapter):
         if len(base_quote) != 2:
             return symbol
         return "/".join(base_quote)
+
+    def _safe_float(self, value: object, default: float = 0.0) -> float:
+        if value is None or value == "":
+            return default
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _safe_int(self, value: object, default: int = 0) -> int:
+        if value is None or value == "":
+            return default
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return default
+
+    def _balance_value(self, balance: dict[str, object], currency: str, field_name: str) -> object:
+        row = balance.get(currency)
+        if isinstance(row, dict) and row.get(field_name) is not None:
+            return row.get(field_name)
+        field = balance.get(field_name)
+        if isinstance(field, dict):
+            return field.get(currency)
+        return None
+
+    def _balance_currency(self, balance: dict[str, object]) -> str:
+        total = balance.get("total")
+        if isinstance(total, dict) and total:
+            return str(next(iter(total)))
+        free = balance.get("free")
+        if isinstance(free, dict) and free:
+            return str(next(iter(free)))
+        return next(
+            (key for key, value in balance.items() if isinstance(value, dict) and key != "info"), ""
+        )
+
+    async def fetch_account_snapshot(self) -> AccountSnapshot:
+        balance = await self._exchange.fetch_balance()
+        data = (balance.get("info") or {}).get("data") or []
+        details = []
+        for account in data:
+            details.extend(account.get("details") or [])
+
+        row = next((detail for detail in details if detail.get("ccy") == "USDT"), None)
+        if row is None and details:
+            row = details[0]
+        if row is not None:
+            currency = str(row.get("ccy") or self._balance_currency(balance))
+            fallback_total = self._safe_float(self._balance_value(balance, currency, "total"))
+            fallback_free = self._safe_float(self._balance_value(balance, currency, "free"))
+            return AccountSnapshot(
+                currency=currency,
+                equity=self._safe_float(row.get("eq"), fallback_total),
+                cash_balance=self._safe_float(row.get("cashBal"), fallback_total),
+                available_balance=self._safe_float(row.get("availBal"), fallback_free),
+                unrealized_pnl=self._safe_float(row.get("upl")),
+                realized_pnl=self._safe_float(row.get("realizedPnl")),
+                updated_at=self._safe_int(row.get("uTime")),
+            )
+
+        account_row = data[0] if data else {}
+        currency = self._balance_currency(balance) or "USDT"
+        fallback_total = self._safe_float(self._balance_value(balance, currency, "total"))
+        fallback_free = self._safe_float(self._balance_value(balance, currency, "free"))
+        return AccountSnapshot(
+            currency=currency,
+            equity=self._safe_float(account_row.get("totalEq"), fallback_total),
+            cash_balance=fallback_free,
+            available_balance=self._safe_float(account_row.get("availEq"), fallback_free),
+            unrealized_pnl=self._safe_float(account_row.get("upl")),
+            realized_pnl=self._safe_float(account_row.get("realizedPnl")),
+            updated_at=self._safe_int(account_row.get("uTime")),
+        )
+
+    async def fetch_position_snapshots(
+        self, symbols: list[str] | None = None
+    ) -> list[PositionSnapshot]:
+        rows = await self._exchange.fetch_positions(symbols)
+        return [self._parse_position_snapshot(row) for row in rows]
+
+    def _parse_position_snapshot(self, row: dict[str, object]) -> PositionSnapshot:
+        info = row.get("info") if isinstance(row.get("info"), dict) else {}
+        amount = self._safe_float(
+            row.get("contracts"),
+            self._safe_float(
+                row.get("contractSize"),
+                self._safe_float(row.get("amount"), self._safe_float(info.get("pos"))),
+            ),
+        )
+        mark_price = (
+            row.get("markPrice") if row.get("markPrice") is not None else info.get("markPx")
+        )
+        return PositionSnapshot(
+            symbol=str(info.get("instId") or row.get("symbol") or ""),
+            side=self._position_side(row, info, amount),
+            amount=abs(amount),
+            entry_price=self._safe_float(
+                row.get("entryPrice"), self._safe_float(info.get("avgPx"))
+            ),
+            mark_price=None
+            if mark_price is None or mark_price == ""
+            else self._safe_float(mark_price),
+            unrealized_pnl=self._safe_float(
+                row.get("unrealizedPnl"), self._safe_float(info.get("upl"))
+            ),
+            realized_pnl=self._safe_float(
+                row.get("realizedPnl"), self._safe_float(info.get("realizedPnl"))
+            ),
+            leverage=self._safe_int(row.get("leverage"), self._safe_int(info.get("lever"), 1)),
+            updated_at=self._safe_int(row.get("timestamp"), self._safe_int(info.get("uTime"))),
+        )
+
+    def _position_side(
+        self, row: dict[str, object], info: dict[str, object], amount: float
+    ) -> PositionSide:
+        for value in (row.get("side"), info.get("posSide")):
+            side = str(value or "").lower()
+            if side in {"long", "buy"}:
+                return PositionSide.LONG
+            if side in {"short", "sell"}:
+                return PositionSide.SHORT
+        if amount < 0:
+            return PositionSide.SHORT
+        return PositionSide.LONG
 
     async def fetch_ohlcv(
         self,
@@ -127,17 +280,15 @@ class OKXBaseAdapter(ExchangeAdapter):
         return tickers
 
     async def submit(self, order: Order) -> Order:
-        if order.type.value == "stop":
-            raise ValueError("Stop orders require OKX trigger parameters")
-        if order.stop_loss is not None or order.take_profit is not None:
-            raise ValueError("OKX stop_loss and take_profit are not supported")
+        order_type, params = self._okx_order_type_and_params(order)
+        await self._validate_order_against_market(order)
         response = await self._exchange.create_order(
             order.symbol,
-            order.type.value,
+            order_type,
             order.side.value,
             order.amount,
             order.price,
-            {},
+            params,
         )
         order.id = str(response.get("id", order.id))
         order.status = self._map_status(response.get("status"))
@@ -149,6 +300,73 @@ class OKXBaseAdapter(ExchangeAdapter):
             if timestamp is not None:
                 order.fill_time = int(timestamp)
         return order
+
+    def _okx_order_type_and_params(self, order: Order) -> tuple[str, dict[str, object]]:
+        params = dict(order.params)
+        if self._default_type != "spot":
+            params.setdefault("tdMode", "cross")
+        order_type = order.type.value
+        if order.type == OrderType.STOP or order.type.value == "stop":
+            if order.trigger_price is None:
+                raise ValueError("Stop orders require trigger_price")
+            order_type = "market" if order.price is None else "limit"
+            params["triggerPrice"] = order.trigger_price
+        if order.stop_loss is not None:
+            params["stopLoss"] = {"triggerPrice": order.stop_loss}
+        if order.take_profit is not None:
+            params["takeProfit"] = {"triggerPrice": order.take_profit}
+        return order_type, params
+
+    async def _validate_order_against_market(self, order: Order) -> None:
+        markets = getattr(self._exchange, "markets", None)
+        if not markets and hasattr(self._exchange, "load_markets"):
+            markets = await self._exchange.load_markets()
+        markets = markets or {}
+        market = markets.get(order.symbol) or markets.get(self._to_ccxt_symbol(order.symbol))
+        if not market:
+            market_lookup = getattr(self._exchange, "market", None)
+            if callable(market_lookup):
+                try:
+                    candidate = market_lookup(order.symbol)
+                except Exception:
+                    candidate = None
+                if isinstance(candidate, dict):
+                    market = candidate
+        if not market:
+            raise ValueError(f"Exchange market metadata unavailable for {order.symbol}")
+
+        limits = market.get("limits") or {}
+        amount_min = (limits.get("amount") or {}).get("min")
+        if amount_min is not None and order.amount < float(amount_min):
+            raise ValueError("amount below exchange minimum")
+
+        if order.price is not None:
+            price_min = (limits.get("price") or {}).get("min")
+            if price_min is not None and order.price < float(price_min):
+                raise ValueError("price below exchange minimum")
+            cost_min = (limits.get("cost") or {}).get("min")
+            if cost_min is not None and order.amount * order.price < float(cost_min):
+                raise ValueError("cost below exchange minimum")
+
+        precision = market.get("precision") or {}
+        self._validate_decimal_precision(order.amount, precision.get("amount"), "amount")
+        if order.price is not None:
+            self._validate_decimal_precision(order.price, precision.get("price"), "price")
+
+    def _validate_decimal_precision(
+        self,
+        value: float,
+        precision: object,
+        field_name: str,
+    ) -> None:
+        if precision is None or not isinstance(precision, int):
+            return
+        try:
+            decimal_value = Decimal(str(value))
+        except InvalidOperation as exc:
+            raise ValueError(f"invalid {field_name}") from exc
+        if decimal_value.as_tuple().exponent < -precision:
+            raise ValueError(f"{field_name} precision exceeds exchange precision")
 
     async def cancel(self, order_id: str, symbol: str | None = None) -> bool:
         if symbol is None:
