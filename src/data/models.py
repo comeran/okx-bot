@@ -106,3 +106,15 @@ class BacktestResultRecord(SQLModel, table=True):
     win_rate: float
     total_trades: int
     created_at: int = Field(index=True)
+
+
+class BacktestTradeRecord(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    result_id: str = Field(index=True)
+    symbol: str = Field(index=True)
+    side: str = Field(index=True)
+    timestamp: int = Field(index=True)
+    price: float
+    amount: float
+    fee: float
+    pnl: float

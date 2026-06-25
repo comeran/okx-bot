@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -7,11 +8,18 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from src.core.config import BacktestConfig, load_config
+from src.core.config import BacktestConfig
 from src.core.engine import BotEngine
+from src.core.runtime_settings import load_runtime_settings
 from src.core.types import Order, OrderStatus, OrderType
 from src.data.models import StrategyConfigRecord
 from src.data.repository import Repository
+from src.exchange.factory import create_okx_adapter
+from src.exchange.live_sync import refresh_okx_live_state
+from src.exchange.okx_futures import OKXFuturesAdapter
+from src.exchange.okx_options import OKXOptionsAdapter
+from src.exchange.okx_spot import OKXSpotAdapter
+from src.exchange.okx_swap import OKXSwapAdapter
 from src.market.service import MarketDataService
 from src.order.manager import UnifiedOrderManager
 from src.order.mark_to_market import PaperMarkToMarketService
@@ -25,6 +33,7 @@ PriceProvider = Callable[[str], float | None]
 RuntimeBroadcaster = Callable[[dict[str, object]], Awaitable[None]]
 OrderUpdateCallback = Callable[[str], Awaitable[None]]
 RiskEventCallback = Callable[[dict[str, object]], Awaitable[None]]
+_UNSET_ORDER_ROUTER_MODE = object()
 
 
 class StrategyConfigRequest(BaseModel):
@@ -71,29 +80,53 @@ class LocalPaperOrderHandler(OrderHandler):
 
 
 def paper_backtest_config() -> BacktestConfig:
-    try:
-        return load_config("config/settings.yaml").backtest
-    except FileNotFoundError:
-        return BacktestConfig()
+    return load_runtime_settings().backtest
 
 
 def create_market_data_service() -> MarketDataService:
-    try:
-        exchange = load_config("config/settings.yaml").exchange
-    except FileNotFoundError:
-        return MarketDataService("", "", "")
+    exchange = load_runtime_settings().exchange
     return MarketDataService(exchange.api_key, exchange.secret, exchange.passphrase)
 
 
-def create_risk_manager() -> RiskManager:
-    try:
-        risk = load_config("config/settings.yaml").risk
-    except FileNotFoundError:
-        return RiskManager(enforce_daily_loss=False, enforce_drawdown=False)
+def create_risk_manager(live: bool = False) -> RiskManager:
+    risk = load_runtime_settings().risk
     return RiskManager(
         max_position_pct=risk.max_total_position_pct,
-        enforce_daily_loss=False,
+        max_daily_loss_pct=risk.max_daily_loss_pct,
+        max_drawdown_pct=risk.max_drawdown_pct,
+        enforce_daily_loss=live,
         enforce_drawdown=False,
+    )
+
+
+def resolve_order_router_mode(mode: object) -> str:
+    if not isinstance(mode, str):
+        raise ValueError(f"Unsupported strategy runtime mode: {mode}")
+    normalized_mode = mode.strip().lower()
+    if normalized_mode == "backtest":
+        return "backtest"
+    if normalized_mode in {"paper", "demo"}:
+        return "demo"
+    if normalized_mode == "live":
+        return "live"
+    raise ValueError(f"Unsupported strategy runtime mode: {mode}")
+
+
+def current_order_router_mode() -> str:
+    return resolve_order_router_mode(load_runtime_settings().mode)
+
+
+def create_live_order_handler(settings: object) -> OrderHandler:
+    return create_okx_adapter(
+        settings.exchange,
+        adapter_classes={
+            "spot": OKXSpotAdapter,
+            "swap": OKXSwapAdapter,
+            "future": OKXFuturesAdapter,
+            "futures": OKXFuturesAdapter,
+            "option": OKXOptionsAdapter,
+            "options": OKXOptionsAdapter,
+        },
     )
 
 
@@ -102,20 +135,58 @@ def create_order_manager(
     repository: Repository | None = None,
     on_order_update: OrderUpdateCallback | None = None,
     on_risk_event: RiskEventCallback | None = None,
+    order_router_mode: object = _UNSET_ORDER_ROUTER_MODE,
 ) -> UnifiedOrderManager:
-    handler = LocalPaperOrderHandler(latest_price=latest_price)
-    router = OrderRouter(backtest=handler, mode="backtest")
+    settings = load_runtime_settings()
+    resolved_mode = (
+        resolve_order_router_mode(settings.mode)
+        if order_router_mode is _UNSET_ORDER_ROUTER_MODE
+        else resolve_order_router_mode(order_router_mode)
+    )
+    if resolved_mode == "live":
+        live_handler = create_live_order_handler(settings)
+        handler = None
+    else:
+        live_handler = None
+        handler = LocalPaperOrderHandler(latest_price=latest_price)
+    order_repository = repository if repository is not None else Repository()
+    router = OrderRouter(
+        backtest=handler if resolved_mode == "backtest" else None,
+        demo=handler if resolved_mode == "demo" else None,
+        live=live_handler,
+        mode=resolved_mode,
+    )
     backtest_config = paper_backtest_config()
+    risk_config = settings.risk
+
+    async def live_state_refresher(strategy_name: str, symbol: str) -> None:
+        await refresh_okx_live_state(
+            settings.exchange,
+            order_repository,
+            strategy_name,
+            [symbol],
+            current_timestamp_ms,
+        )
+
     return UnifiedOrderManager(
         router=router,
-        repository=repository if repository is not None else Repository(),
+        repository=order_repository,
         timestamp_ms=current_timestamp_ms,
         initial_equity=backtest_config.initial_capital,
         fee_rate=backtest_config.fee_rate,
         on_order_update=on_order_update,
         on_risk_event=on_risk_event,
-        risk_manager=create_risk_manager(),
+        risk_manager=create_risk_manager(live=resolved_mode == "live"),
         price_provider=latest_price,
+        live_safeguards=resolved_mode == "live",
+        live_market_type=settings.exchange.market_type if resolved_mode == "live" else "",
+        live_state_refresher=live_state_refresher if resolved_mode == "live" else None,
+        allow_live_open_orders=(
+            risk_config.allow_live_open_orders if resolved_mode == "live" else False
+        ),
+        live_max_order_notional=(
+            risk_config.live_max_order_notional if resolved_mode == "live" else 0.0
+        ),
     )
 
 
@@ -135,6 +206,16 @@ class StrategyRuntimeState:
         self.strategy_status = {name: "stopped" for name in self.registry.list_strategies()}
         self.strategy_errors: dict[str, str] = {}
         self.engines: dict[str, BotEngine] = {}
+        self.starting_engines: dict[str, BotEngine] = {}
+        self.lifecycle_locks: dict[str, asyncio.Lock] = {}
+        self.market_data_lifecycle_lock = asyncio.Lock()
+
+    def lifecycle_lock(self, name: str) -> asyncio.Lock:
+        lock = self.lifecycle_locks.get(name)
+        if lock is None:
+            lock = asyncio.Lock()
+            self.lifecycle_locks[name] = lock
+        return lock
 
     def list_strategies(self) -> list[dict[str, str]]:
         return [
@@ -153,7 +234,23 @@ def create_router(
     router = APIRouter()
     runtime = runtime or StrategyRuntimeState()
     config_repository = Repository()
-    market_data_service = create_market_data_service()
+    market_data_service: MarketDataService | None = None
+
+    def get_market_data_service() -> MarketDataService:
+        nonlocal market_data_service
+        if market_data_service is None:
+            market_data_service = create_market_data_service()
+        return market_data_service
+
+    async def release_market_data_service_if_idle() -> None:
+        nonlocal market_data_service
+        async with runtime.market_data_lifecycle_lock:
+            if runtime.engines or runtime.starting_engines or market_data_service is None:
+                return
+            stop = getattr(market_data_service, "stop", None)
+            if stop is not None:
+                await stop()
+            market_data_service = None
 
     def get_persisted_strategy_config(name: str) -> StrategyConfigRecord | None:
         get_strategy_config = getattr(config_repository, "get_strategy_config", None)
@@ -189,7 +286,7 @@ def create_router(
         def latest_price(symbol: str) -> float | None:
             if timeframe is None:
                 return None
-            bars = market_data_service.get_recent_bars(symbol, timeframe, count=1)
+            bars = get_market_data_service().get_recent_bars(symbol, timeframe, count=1)
             if not bars:
                 return None
             return bars[-1].close
@@ -208,10 +305,23 @@ def create_router(
             }
         )
 
-    async def handle_strategy_error(name: str, error: Exception) -> None:
+    async def handle_strategy_error(
+        name: str,
+        error: Exception,
+        engine: BotEngine | None = None,
+    ) -> None:
+        if engine is not None and (
+            runtime.engines.get(name) is not engine
+            and runtime.starting_engines.get(name) is not engine
+        ):
+            return
         runtime.strategy_status[name] = "stopped"
         runtime.strategy_errors[name] = str(error)
-        runtime.engines.pop(name, None)
+        if engine is None or runtime.engines.get(name) is engine:
+            runtime.engines.pop(name, None)
+        if engine is None or runtime.starting_engines.get(name) is engine:
+            runtime.starting_engines.pop(name, None)
+        await release_market_data_service_if_idle()
         await broadcast_status(name)
         if broadcast is not None:
             await broadcast(
@@ -346,60 +456,95 @@ def create_router(
 
     @router.post("/{name}/start")
     async def start_strategy(name: str) -> dict[str, str]:
+        try:
+            order_router_mode = current_order_router_mode()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
         if not strategy_exists(name):
             raise HTTPException(status_code=404, detail="Strategy not found")
-        if name not in runtime.engines:
-            try:
-                repository = Repository()
-                mark_to_market = create_mark_to_market_service(repository)
-                strategy = create_strategy(name)
-                set_order_manager = getattr(strategy, "set_order_manager", None)
-                if set_order_manager is not None:
-                    set_order_manager(
-                        create_order_manager(
-                            latest_price=latest_price_for_strategy(strategy),
-                            repository=repository,
-                            on_order_update=lambda strategy_name: broadcast_trading_updates(
-                                repository,
-                                strategy_name,
-                            ),
-                            on_risk_event=broadcast_risk_event,
+        async with runtime.lifecycle_lock(name):
+            if name not in runtime.engines:
+                try:
+                    runtime.strategy_errors.pop(name, None)
+                    repository = Repository()
+                    mark_to_market = create_mark_to_market_service(repository)
+                    strategy = create_strategy(name)
+                    if order_router_mode == "live":
+                        await refresh_okx_live_state(
+                            load_runtime_settings().exchange,
+                            repository,
+                            strategy.name,
+                            [strategy.symbol],
+                            current_timestamp_ms,
                         )
-                    )
-                engine = BotEngine(
-                    strategies=[strategy],
-                    market_data_service=market_data_service,
-                    on_strategy_error=handle_strategy_error,
-                    before_strategy_bar=lambda strategy, bar: mark_to_market_before_bar(
-                        mark_to_market,
-                        strategy,
-                        bar,
-                    ),
-                    stop_market_data_on_stop=False,
-                )
-                await engine.start()
-                if name in runtime.strategy_errors:
-                    raise HTTPException(status_code=400, detail=runtime.strategy_errors[name])
-                runtime.engines[name] = engine
-            except HTTPException:
-                raise
-            except Exception as exc:
-                await handle_strategy_error(name, exc)
-                raise HTTPException(status_code=400, detail=str(exc)) from None
-        runtime.strategy_status[name] = "running"
-        runtime.strategy_errors.pop(name, None)
-        await broadcast_status(name)
+                    set_order_manager = getattr(strategy, "set_order_manager", None)
+                    if set_order_manager is not None:
+                        set_order_manager(
+                            create_order_manager(
+                                latest_price=latest_price_for_strategy(strategy),
+                                repository=repository,
+                                on_order_update=lambda strategy_name: broadcast_trading_updates(
+                                    repository,
+                                    strategy_name,
+                                ),
+                                on_risk_event=broadcast_risk_event,
+                                order_router_mode=order_router_mode,
+                            )
+                        )
+                    engine: BotEngine | None = None
+
+                    async def handle_current_engine_error(
+                        error_name: str,
+                        error: Exception,
+                    ) -> None:
+                        await handle_strategy_error(error_name, error, engine)
+
+                    async with runtime.market_data_lifecycle_lock:
+                        engine = BotEngine(
+                            strategies=[strategy],
+                            market_data_service=get_market_data_service(),
+                            on_strategy_error=handle_current_engine_error,
+                            before_strategy_bar=lambda strategy, bar: mark_to_market_before_bar(
+                                mark_to_market,
+                                strategy,
+                                bar,
+                            ),
+                            stop_market_data_on_stop=False,
+                        )
+                        runtime.starting_engines[name] = engine
+                    await engine.start()
+                    async with runtime.market_data_lifecycle_lock:
+                        if name in runtime.strategy_errors:
+                            if runtime.starting_engines.get(name) is engine:
+                                runtime.starting_engines.pop(name, None)
+                            raise HTTPException(
+                                status_code=400,
+                                detail=runtime.strategy_errors[name],
+                            )
+                        if runtime.starting_engines.get(name) is engine:
+                            runtime.starting_engines.pop(name, None)
+                        runtime.engines[name] = engine
+                except HTTPException:
+                    raise
+                except Exception as exc:
+                    await handle_strategy_error(name, exc)
+                    raise HTTPException(status_code=400, detail=str(exc)) from None
+            runtime.strategy_status[name] = "running"
+            runtime.strategy_errors.pop(name, None)
+            await broadcast_status(name)
         return {"status": "started", "strategy": name}
 
     @router.post("/{name}/stop")
     async def stop_strategy(name: str) -> dict[str, str]:
         if not strategy_exists(name):
             raise HTTPException(status_code=404, detail="Strategy not found")
-        engine = runtime.engines.pop(name, None)
-        if engine is not None:
-            await engine.stop()
-        runtime.strategy_status[name] = "stopped"
-        await broadcast_status(name)
+        async with runtime.lifecycle_lock(name):
+            engine = runtime.engines.pop(name, None)
+            if engine is not None:
+                await engine.stop()
+                await release_market_data_service_if_idle()
+            runtime.strategy_status[name] = "stopped"
+            await broadcast_status(name)
         return {"status": "stopped", "strategy": name}
 
     return router

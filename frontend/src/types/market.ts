@@ -42,4 +42,7 @@ export interface KlineQuery {
   symbol: string;
   timeframe: string;
   limit: number;
+  start_time?: number;
+  end_time?: number;
+  market_type?: string;
 }

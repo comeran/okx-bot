@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import time
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
+from src.core.runtime_settings import load_runtime_settings
 from src.data.repository import Repository
+from src.exchange.live_sync import refresh_okx_live_state
 
 router = APIRouter()
 
@@ -17,6 +20,10 @@ PAPER_ACCOUNT_KEYS = (
     "fees_paid",
 )
 ZERO_PAPER_ACCOUNT = {key: 0.0 for key in PAPER_ACCOUNT_KEYS}
+
+
+def current_timestamp_ms() -> int:
+    return int(time.time() * 1000)
 
 
 def record_value(record: object, key: str, default: float = 0.0) -> float:
@@ -63,6 +70,25 @@ def serialize_account(account: object | None) -> dict[str, float]:
     return {
         key: float(values.get(key, 0.0)) if isinstance(values.get(key, 0.0), int | float) else 0.0
         for key in PAPER_ACCOUNT_KEYS
+    }
+
+
+@router.post("/live-state/refresh")
+async def refresh_live_state(strategy: str, symbol: str | None = None) -> dict[str, Any]:
+    settings = load_runtime_settings()
+    if settings.mode.strip().lower() != "live":
+        raise HTTPException(status_code=400, detail="Live state refresh requires live mode")
+    repository = Repository()
+    result = await refresh_okx_live_state(
+        settings.exchange,
+        repository,
+        strategy,
+        [symbol] if symbol else None,
+        current_timestamp_ms,
+    )
+    return {
+        "account": serialize_account(result.account),
+        "positions": serialize_records(result.positions),
     }
 
 

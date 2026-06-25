@@ -18,6 +18,8 @@ const form = reactive<AppSettingsUpdate>({
     api_key: '',
     secret: '',
     passphrase: '',
+    market_type: 'spot',
+    demo: true,
   },
   backtest: {
     initial_capital: 100000,
@@ -29,6 +31,8 @@ const form = reactive<AppSettingsUpdate>({
     max_daily_loss_pct: 0.05,
     max_drawdown_pct: 0.15,
     max_total_position_pct: 0.8,
+    allow_live_open_orders: false,
+    live_max_order_notional: 0,
   },
   notify: {
     telegram_bot_token: '',
@@ -46,6 +50,8 @@ function applySettings(settings: AppSettingsView): void {
   form.exchange.api_key = '';
   form.exchange.secret = '';
   form.exchange.passphrase = '';
+  form.exchange.market_type = settings.exchange.market_type;
+  form.exchange.demo = settings.exchange.demo;
   form.backtest = { ...settings.backtest };
   form.risk = { ...settings.risk };
   form.notify.telegram_bot_token = '';
@@ -112,6 +118,23 @@ onMounted(() => {
 
       <el-card shadow="never" class="settings-card">
         <template #header>{{ t('settings.okxExchange') }}</template>
+        <el-row :gutter="16">
+          <el-col :xs="24" :md="8">
+            <el-form-item :label="t('settings.marketType')">
+              <el-select v-model="form.exchange.market_type">
+                <el-option :label="t('settings.marketTypes.spot')" value="spot" />
+                <el-option :label="t('settings.marketTypes.swap')" value="swap" />
+                <el-option :label="t('settings.marketTypes.future')" value="future" />
+                <el-option :label="t('settings.marketTypes.option')" value="option" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :xs="24" :md="8">
+            <el-form-item :label="t('settings.okxDemo')">
+              <el-switch v-model="form.exchange.demo" />
+            </el-form-item>
+          </el-col>
+        </el-row>
         <el-row :gutter="16">
           <el-col :xs="24" :md="8">
             <el-form-item :label="t('settings.apiKey')">
@@ -182,6 +205,16 @@ onMounted(() => {
           <el-col :xs="24" :md="8">
             <el-form-item :label="t('settings.maxTotalPositionPct')">
               <el-input-number v-model="form.risk.max_total_position_pct" :min="0" :max="1" :step="0.01" :precision="4" class="full-width" />
+            </el-form-item>
+          </el-col>
+          <el-col :xs="24" :md="8">
+            <el-form-item :label="t('settings.allowLiveOpenOrders')">
+              <el-switch v-model="form.risk.allow_live_open_orders" />
+            </el-form-item>
+          </el-col>
+          <el-col :xs="24" :md="8">
+            <el-form-item :label="t('settings.liveMaxOrderNotional')">
+              <el-input-number v-model="form.risk.live_max_order_notional" :min="0" :step="100" class="full-width" />
             </el-form-item>
           </el-col>
         </el-row>

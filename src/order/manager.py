@@ -9,6 +9,7 @@ from src.order.accounting import PaperAccountingService
 from src.order.router import OrderRouter
 
 RiskEventCallback = Callable[[dict[str, object]], Awaitable[None]]
+LiveStateRefresher = Callable[[str, str], Awaitable[None]]
 
 
 @dataclass(frozen=True)
@@ -25,6 +26,14 @@ def risk_reason_code(reason: str) -> str:
         "Daily loss exceeds maximum allowed loss": "daily_loss_exceeded",
         "Drawdown exceeds maximum allowed drawdown": "drawdown_exceeded",
         "Order requires a stop loss": "stop_loss_required",
+        "Live safeguards require a configured risk manager": "live_safeguard_unavailable",
+        "Live safeguards require account state": "live_safeguard_unavailable",
+        "Live safeguards require current position state": "live_safeguard_unavailable",
+        "Live safeguards require a current price": "live_safeguard_unavailable",
+        "Live orders must reduce existing exposure": "live_reduce_only_required",
+        "Live opening orders are disabled": "live_opening_disabled",
+        "Live order exceeds configured notional cap": "live_order_notional_exceeded",
+        "Live spot sell requires existing position": "live_spot_position_required",
     }.get(reason, "risk_rejected")
 
 
@@ -47,6 +56,11 @@ class UnifiedOrderManager:
         on_risk_event: RiskEventCallback | None = None,
         risk_manager: Any | None = None,
         price_provider: Callable[[str], float | None] | None = None,
+        live_safeguards: bool = False,
+        live_market_type: str = "",
+        live_state_refresher: LiveStateRefresher | None = None,
+        allow_live_open_orders: bool = False,
+        live_max_order_notional: float = 0.0,
     ) -> None:
         self.router = router
         self.repository = repository
@@ -57,6 +71,11 @@ class UnifiedOrderManager:
         self.on_risk_event = on_risk_event
         self.risk_manager = risk_manager
         self.price_provider = price_provider
+        self.live_safeguards = live_safeguards
+        self.live_market_type = live_market_type.strip().lower()
+        self.live_state_refresher = live_state_refresher
+        self.allow_live_open_orders = allow_live_open_orders
+        self.live_max_order_notional = live_max_order_notional
         self._balances: dict[str, float] = {}
         self._order_seq = 0
 
@@ -67,6 +86,7 @@ class UnifiedOrderManager:
         order_type: OrderType,
         amount: float,
         price: float | None = None,
+        trigger_price: float | None = None,
         stop_loss: float | None = None,
         take_profit: float | None = None,
         strategy_name: str = "",
@@ -79,9 +99,12 @@ class UnifiedOrderManager:
             type=order_type,
             amount=amount,
             price=price,
+            trigger_price=trigger_price,
             stop_loss=stop_loss,
             take_profit=take_profit,
         )
+        if self.live_safeguards and self.live_state_refresher is not None:
+            await self.live_state_refresher(strategy_name, symbol)
         risk_result = self._check_risk_gate(order, strategy_name)
         if not risk_result.passed:
             order.status = OrderStatus.REJECTED
@@ -99,6 +122,12 @@ class UnifiedOrderManager:
 
         submitted_order = await self.router.submit(order)
         self._persist_order(submitted_order, strategy_name)
+        if (
+            self.live_safeguards
+            and self.live_state_refresher is not None
+            and submitted_order.status == OrderStatus.FILLED
+        ):
+            await self.live_state_refresher(strategy_name, symbol)
         if self.on_order_update is not None:
             await self.on_order_update(strategy_name)
         return submitted_order
@@ -123,6 +152,11 @@ class UnifiedOrderManager:
 
     def _check_risk_gate(self, order: Order, strategy_name: str) -> RiskGateResult:
         if self.risk_manager is None:
+            if self.live_safeguards:
+                return RiskGateResult(
+                    passed=False,
+                    reason="Live safeguards require a configured risk manager",
+                )
             return RiskGateResult(passed=True)
 
         account = None
@@ -136,6 +170,11 @@ class UnifiedOrderManager:
         order_price = order.price
         if order_price is None and self.price_provider is not None:
             order_price = self.price_provider(order.symbol)
+
+        if self.live_safeguards:
+            live_result = self._check_live_order_safety(order, account, position, order_price)
+            if not live_result.passed:
+                return live_result
 
         current_amount = 0.0
         if position is not None:
@@ -177,6 +216,64 @@ class UnifiedOrderManager:
             order_value=resulting_position_value,
             effective_price=order_price,
         )
+
+    def _check_live_order_safety(
+        self,
+        order: Order,
+        account: Any,
+        position: Any,
+        order_price: float | None,
+    ) -> RiskGateResult:
+        if account is None:
+            return RiskGateResult(False, "Live safeguards require account state")
+        if order_price is None or order_price <= 0:
+            return RiskGateResult(False, "Live safeguards require a current price")
+
+        current_amount = 0.0
+        has_position = False
+        if position is not None:
+            position_amount = abs(float(getattr(position, "amount", 0.0) or 0.0))
+            if position_amount > 0:
+                has_position = True
+                current_amount = position_amount
+                if getattr(position, "side", "long") == "short":
+                    current_amount = -current_amount
+
+        order_amount = order.amount if order.side == OrderSide.BUY else -order.amount
+        resulting_amount = current_amount + order_amount
+        is_reducing = has_position and abs(resulting_amount) < abs(current_amount)
+        if is_reducing:
+            if self.live_market_type != "spot":
+                order.reduce_only = True
+                order.params = {**order.params, "reduceOnly": True}
+            return RiskGateResult(True, effective_price=order_price)
+
+        if not self.allow_live_open_orders:
+            return RiskGateResult(
+                False,
+                "Live opening orders are disabled",
+                order_value=abs(resulting_amount) * order_price,
+                effective_price=order_price,
+            )
+
+        if self.live_market_type == "spot" and order.side == OrderSide.SELL and not has_position:
+            return RiskGateResult(
+                False,
+                "Live spot sell requires existing position",
+                order_value=order.amount * order_price,
+                effective_price=order_price,
+            )
+
+        order_value = order.amount * order_price
+        if self.live_max_order_notional > 0 and order_value > self.live_max_order_notional:
+            return RiskGateResult(
+                False,
+                "Live order exceeds configured notional cap",
+                order_value=order_value,
+                effective_price=order_price,
+            )
+
+        return RiskGateResult(True, order_value=order_value, effective_price=order_price)
 
     def _other_position_notional(self, strategy_name: str, symbol: str) -> float:
         if self.repository is None or not hasattr(self.repository, "get_open_positions"):
@@ -236,7 +333,7 @@ class UnifiedOrderManager:
             )
         )
 
-        if order.status == OrderStatus.FILLED:
+        if order.status == OrderStatus.FILLED and getattr(self.router, "mode", None) != "live":
             PaperAccountingService(
                 repository=self.repository,
                 initial_equity=self.initial_equity,

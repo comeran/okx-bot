@@ -71,6 +71,10 @@ class BacktestEngine:
                     equity += pnl
                     trades.append(
                         {
+                            "symbol": order.symbol,
+                            "side": order.side.value,
+                            "amount": order.amount,
+                            "price": match.fill_price,
                             "pnl": pnl,
                             "fee": match.fee,
                             "timestamp": bar.timestamp,

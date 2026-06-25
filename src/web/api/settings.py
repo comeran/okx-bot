@@ -1,23 +1,25 @@
 from __future__ import annotations
 
-import os
-from pathlib import Path
-
-import yaml
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from src.core.config import AppConfig, load_config
-
-SETTINGS_PATH_ENV = "OKX_BOT_SETTINGS_PATH"
-DEFAULT_SETTINGS_PATH = Path("data/settings.local.yaml")
-DEFAULT_CONFIG_PATH = Path("config/settings.yaml")
+from src.core.config import (
+    AppConfig,
+    BacktestConfig,
+    ExchangeConfig,
+    NotifyConfig,
+    RiskConfig,
+    WebConfig,
+)
+from src.core.runtime_settings import load_runtime_settings, save_runtime_settings
 
 
 class ExchangeSettingsUpdate(BaseModel):
     api_key: str = ""
     secret: str = ""
     passphrase: str = ""
+    market_type: str = "spot"
+    demo: bool = True
 
 
 class BacktestSettings(BaseModel):
@@ -31,6 +33,8 @@ class RiskSettings(BaseModel):
     max_daily_loss_pct: float = 0.05
     max_drawdown_pct: float = 0.15
     max_total_position_pct: float = 0.8
+    allow_live_open_orders: bool = False
+    live_max_order_notional: float = 0.0
 
 
 class NotifySettingsUpdate(BaseModel):
@@ -54,10 +58,6 @@ class SettingsUpdate(BaseModel):
 
 class SecretSetting(BaseModel):
     value: str = ""
-
-
-def _settings_path() -> Path:
-    return Path(os.environ.get(SETTINGS_PATH_ENV, DEFAULT_SETTINGS_PATH))
 
 
 def _mask_secret(value: str) -> str:
@@ -86,6 +86,8 @@ def _serialize_settings(settings: SettingsUpdate) -> dict[str, object]:
             "secret_set": bool(settings.exchange.secret),
             "passphrase": _mask_secret(settings.exchange.passphrase),
             "passphrase_set": bool(settings.exchange.passphrase),
+            "market_type": settings.exchange.market_type,
+            "demo": settings.exchange.demo,
         },
         "backtest": settings.backtest.model_dump(),
         "risk": settings.risk.model_dump(),
@@ -98,14 +100,15 @@ def _serialize_settings(settings: SettingsUpdate) -> dict[str, object]:
     }
 
 
-def _default_settings() -> SettingsUpdate:
-    config = load_config(str(DEFAULT_CONFIG_PATH)) if DEFAULT_CONFIG_PATH.exists() else AppConfig()
+def _settings_from_config(config: AppConfig) -> SettingsUpdate:
     return SettingsUpdate(
         mode=config.mode,
         exchange=ExchangeSettingsUpdate(
             api_key=config.exchange.api_key,
             secret=config.exchange.secret,
             passphrase=config.exchange.passphrase,
+            market_type=config.exchange.market_type,
+            demo=config.exchange.demo,
         ),
         backtest=BacktestSettings(
             initial_capital=config.backtest.initial_capital,
@@ -117,6 +120,8 @@ def _default_settings() -> SettingsUpdate:
             max_daily_loss_pct=config.risk.max_daily_loss_pct,
             max_drawdown_pct=config.risk.max_drawdown_pct,
             max_total_position_pct=config.risk.max_total_position_pct,
+            allow_live_open_orders=config.risk.allow_live_open_orders,
+            live_max_order_notional=config.risk.live_max_order_notional,
         ),
         notify=NotifySettingsUpdate(
             telegram_bot_token=config.notify.telegram_bot_token,
@@ -126,22 +131,43 @@ def _default_settings() -> SettingsUpdate:
     )
 
 
-def _load_settings() -> SettingsUpdate:
-    settings_path = _settings_path()
-    if not settings_path.exists():
-        return _default_settings()
+def _config_from_settings(settings: SettingsUpdate) -> AppConfig:
+    return AppConfig(
+        mode=settings.mode,
+        exchange=ExchangeConfig(
+            api_key=settings.exchange.api_key,
+            secret=settings.exchange.secret,
+            passphrase=settings.exchange.passphrase,
+            market_type=settings.exchange.market_type,
+            demo=settings.exchange.demo,
+        ),
+        backtest=BacktestConfig(
+            initial_capital=settings.backtest.initial_capital,
+            fee_rate=settings.backtest.fee_rate,
+            slippage=settings.backtest.slippage,
+            data_cache_dir=settings.backtest.data_cache_dir,
+        ),
+        risk=RiskConfig(
+            max_daily_loss_pct=settings.risk.max_daily_loss_pct,
+            max_drawdown_pct=settings.risk.max_drawdown_pct,
+            max_total_position_pct=settings.risk.max_total_position_pct,
+            allow_live_open_orders=settings.risk.allow_live_open_orders,
+            live_max_order_notional=settings.risk.live_max_order_notional,
+        ),
+        notify=NotifyConfig(
+            telegram_bot_token=settings.notify.telegram_bot_token,
+            telegram_chat_id=settings.notify.telegram_chat_id,
+        ),
+        web=WebConfig(host=settings.web.host, port=settings.web.port),
+    )
 
-    raw_settings = yaml.safe_load(settings_path.read_text(encoding="utf-8")) or {}
-    return SettingsUpdate.model_validate(raw_settings)
+
+def _load_settings() -> SettingsUpdate:
+    return _settings_from_config(load_runtime_settings())
 
 
 def _save_settings(settings: SettingsUpdate) -> None:
-    settings_path = _settings_path()
-    settings_path.parent.mkdir(parents=True, exist_ok=True)
-    settings_path.write_text(
-        yaml.safe_dump(settings.model_dump(), sort_keys=False),
-        encoding="utf-8",
-    )
+    save_runtime_settings(_config_from_settings(settings))
 
 
 def create_router() -> APIRouter:
@@ -167,6 +193,8 @@ def create_router() -> APIRouter:
             settings.exchange.passphrase,
             update.exchange.passphrase,
         )
+        settings.exchange.market_type = update.exchange.market_type
+        settings.exchange.demo = update.exchange.demo
         settings.backtest = update.backtest
         settings.risk = update.risk
         settings.notify.telegram_bot_token = _merge_secret(

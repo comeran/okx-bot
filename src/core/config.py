@@ -10,6 +10,8 @@ class ExchangeConfig:
     api_key: str = ""
     secret: str = ""
     passphrase: str = ""
+    market_type: str = "spot"
+    demo: bool = True
 
 
 @dataclass
@@ -25,6 +27,8 @@ class RiskConfig:
     max_daily_loss_pct: float = 0.05
     max_drawdown_pct: float = 0.15
     max_total_position_pct: float = 0.8
+    allow_live_open_orders: bool = False
+    live_max_order_notional: float = 0.0
 
 
 @dataclass

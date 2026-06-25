@@ -1,3 +1,5 @@
+import type { Kline } from '@/types/market';
+
 export interface BacktestRequest {
   strategy: string;
   symbol: string;
@@ -18,4 +20,20 @@ export interface BacktestMetrics {
 export interface BacktestResult extends BacktestRequest, BacktestMetrics {
   id: string;
   created_at: number;
+}
+
+export interface BacktestMarker {
+  symbol: string;
+  side: 'buy' | 'sell';
+  timestamp: number;
+  price: number;
+  amount: number;
+  fee: number;
+  pnl: number;
+}
+
+export interface BacktestResultDetail {
+  result: BacktestResult;
+  klines: Kline[];
+  markers: BacktestMarker[];
 }

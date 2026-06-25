@@ -14,8 +14,9 @@ from src.backtest.historical_data import (
     ensure_historical_bars,
 )
 from src.backtest.matcher import OrderMatcher
-from src.core.config import BacktestConfig, load_config
-from src.data.models import BacktestResultRecord
+from src.core.config import BacktestConfig
+from src.core.runtime_settings import load_runtime_settings
+from src.data.models import BacktestResultRecord, BacktestTradeRecord
 from src.data.repository import Repository
 from src.exchange.okx_spot import OKXSpotAdapter
 from src.web.api.strategies import create_strategy_registry
@@ -104,19 +105,32 @@ async def run_backtest(req: BacktestRequest) -> dict[str, float | int]:
         "total_trades": report.total_trades,
     }
     created_at = current_timestamp_ms()
-    repository.save_backtest_result(
-        BacktestResultRecord(
-            id=f"bt_{created_at}_{uuid4().hex[:8]}",
-            strategy=req.strategy,
-            symbol=req.symbol,
-            timeframe=req.timeframe,
-            start_time=req.start_time,
-            end_time=req.end_time,
-            initial_capital=req.initial_capital,
-            created_at=created_at,
-            **metrics,
-        )
+    result_id = f"bt_{created_at}_{uuid4().hex[:8]}"
+    result = BacktestResultRecord(
+        id=result_id,
+        strategy=req.strategy,
+        symbol=req.symbol,
+        timeframe=req.timeframe,
+        start_time=req.start_time,
+        end_time=req.end_time,
+        initial_capital=req.initial_capital,
+        created_at=created_at,
+        **metrics,
     )
+    backtest_trades = [
+        BacktestTradeRecord(
+            result_id=result_id,
+            symbol=trade["symbol"],
+            side=trade["side"],
+            timestamp=trade["timestamp"],
+            price=trade["price"],
+            amount=trade["amount"],
+            fee=trade["fee"],
+            pnl=trade["pnl"],
+        )
+        for trade in report.trades
+    ]
+    repository.save_backtest_result_with_trades(result, backtest_trades)
     return metrics
 
 
@@ -125,12 +139,30 @@ async def list_results() -> list[dict[str, float | int | str]]:
     return [result.model_dump() for result in Repository().get_backtest_results()]
 
 
+@router.get("/results/{result_id}")
+async def get_result_detail(result_id: str) -> dict[str, list[dict] | dict]:
+    repository = Repository()
+    result = repository.get_backtest_result(result_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Backtest result not found")
+
+    klines = repository.get_klines(
+        symbol=result.symbol,
+        timeframe=result.timeframe,
+        start=result.start_time,
+        end=result.end_time,
+    )
+    markers = repository.get_backtest_trades(result_id)
+    return {
+        "result": result.model_dump(),
+        "klines": [kline.model_dump() for kline in klines],
+        "markers": [marker.model_dump() for marker in markers],
+    }
+
+
 def current_timestamp_ms() -> int:
     return int(time.time() * 1000)
 
 
 def load_backtest_config() -> BacktestConfig:
-    try:
-        return load_config("config/settings.yaml").backtest
-    except FileNotFoundError:
-        return BacktestConfig()
+    return load_runtime_settings().backtest
