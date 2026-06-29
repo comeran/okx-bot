@@ -1,0 +1,144 @@
+docs/superpowers/plans/2026-06-26-live-ops-safety.md
+  s_ac84eed0b220bb::t_566b498c39ea45 92-94,97
+  s_ac84eed0b220bb::t_99456c6f8fcfb5 1-19,45-47,49,51,54-58,65-91,95-96,98-101,116-118,125-136,138-149,334-1312,1315-1587,1590-1917,1919,1922,1924-2058,2060,2063,2065-2233
+  s_ac84eed0b220bb::t_f8491ccef8f72e 1313-1314
+  s_ac84eed0b220bb::t_829b9616f09e97 119-124
+  s_ac84eed0b220bb::t_165969fab63958 150-333
+  s_ac84eed0b220bb::t_dcb8e659ce392e 59-64
+  s_ac84eed0b220bb::t_92733a0bdd6971 20-44
+  s_ac84eed0b220bb::t_8b56ec1a2dfb7f 50
+  s_ac84eed0b220bb::t_42c6110b66a369 1588-1589
+  s_ac84eed0b220bb::t_a3e2678b7355d0 1918,1920-1921,1923
+  s_ac84eed0b220bb::t_cda93df37ec78b 102-106,108,110-115
+  s_ac84eed0b220bb::t_1d43b6e8bf9095 107,109
+  s_ac84eed0b220bb::t_3dc790c3fd5e7a 48
+  s_ac84eed0b220bb::t_910d127dcc5e42 137
+  s_ac84eed0b220bb::t_13c1ac5bb62645 52-53
+  s_ac84eed0b220bb::t_aadb6f60459456 2059,2061-2062,2064
+tests/unit/test_config.py
+  s_ac84eed0b220bb::t_7663b3cd211968 6-40
+  s_ac84eed0b220bb::t_58345074a2fc85 3
+  s_ac84eed0b220bb::t_f2c36f8c714467 4-5
+tests/unit/test_order_manager_kill_switch.py
+  s_ac84eed0b220bb::t_c65e1445912c35 76
+  s_ac84eed0b220bb::t_6f177683e7c7fa 55
+  s_ac84eed0b220bb::t_2830c37874406a 1-54,56-75,77-81
+src/web/app.py
+  s_ac84eed0b220bb::t_1823d717c71934 7
+  s_ac84eed0b220bb::t_3c44f801722042 78
+src/core/types.py
+  s_ac84eed0b220bb::t_7536a884a81c0a 61-85
+  s_ac84eed0b220bb::t_ed92619f93369a 86-113
+tests/integration/test_web_api.py
+  s_ac84eed0b220bb::t_a1b16a6852ee1f 2326-2327
+  s_ac84eed0b220bb::t_d4f37d7f0751a6 2263-2264
+  s_ac84eed0b220bb::t_ea3216622e117d 1434,1440-1441
+  s_ac84eed0b220bb::t_e7d866d5f3caee 798-799
+  s_ac84eed0b220bb::t_627a1f90981fdd 765-770
+  s_ac84eed0b220bb::t_80a3dd6c60e0a0 1423-1424
+  s_ac84eed0b220bb::t_91e0868480bb9a 707
+  s_ac84eed0b220bb::t_67de14cd5219a5 721-724
+  s_ac84eed0b220bb::t_fc2fc74cd45cb0 4
+  s_ac84eed0b220bb::t_f7414900681d74 19
+  s_ac84eed0b220bb::t_adf2cf37bd2a21 2211-2212
+  s_ac84eed0b220bb::t_64775d270af2c4 2162-2163
+  s_ac84eed0b220bb::t_588c5c51262ba7 738,741-749
+  s_ac84eed0b220bb::t_6763998aec1245 85-182
+  s_ac84eed0b220bb::t_215999762954c5 35-84,183-200
+  s_ac84eed0b220bb::t_6c562142bbd409 750
+src/data/repository.py
+  s_ac84eed0b220bb::t_157e35726c7292 31-71
+  s_ac84eed0b220bb::t_bcd7897a4cb5ea 387-401,403-412
+  s_ac84eed0b220bb::t_3b7da7f1ed8262 11,15
+  s_ac84eed0b220bb::t_950344224e0c95 225-261
+  s_ac84eed0b220bb::t_f05a3cded312b1 146-173
+src/exchange/okx_swap.py
+  s_ac84eed0b220bb::t_475d2137fd50f7 5-6
+src/exchange/okx_spot.py
+  s_ac84eed0b220bb::t_9ef5f757a58d4b 5-6
+tests/unit/test_repository.py
+  s_ac84eed0b220bb::t_1030e811b2c80d 369-476
+src/exchange/okx_options.py
+  s_ac84eed0b220bb::t_5ae9b2b53b999e 5-6
+src/core/config.py
+  s_ac84eed0b220bb::t_dda8bd4f3acb03 13-14
+  s_ac84eed0b220bb::t_c386146306512f 30-31
+tests/unit/test_private_sync.py
+  s_ac84eed0b220bb::t_7a7d652cd83825 1-230
+src/exchange/base.py
+  s_ac84eed0b220bb::t_b89f15d7b37a3f 4,8-17,42-49,58-61,100-140,173-214,217,219
+tests/integration/test_exchange_adapter.py
+  s_ac84eed0b220bb::t_d283274c71bf4a 1
+  s_ac84eed0b220bb::t_25370889539d8b 5-12
+  s_ac84eed0b220bb::t_6e6a7a82250dfa 295-414
+  s_ac84eed0b220bb::t_3a91c5c82b0109 30-31,42-51
+src/notify/telegram.py
+  s_ac84eed0b220bb::t_26b43a5205ce48 4-5
+  s_ac84eed0b220bb::t_e5932d804b035f 49-82
+src/order/manager.py
+  s_ac84eed0b220bb::t_575eea8ab12d2c 12-13
+  s_ac84eed0b220bb::t_4cce8547716a8a 30
+  s_ac84eed0b220bb::t_a23545d53dc16f 1
+  s_ac84eed0b220bb::t_21c62de8690842 64
+  s_ac84eed0b220bb::t_a47dbbf0f6616c 90-97,100,105
+  s_ac84eed0b220bb::t_256bf69d5ab969 192-217
+tests/unit/test_order_router.py
+  s_ac84eed0b220bb::t_c177e852e30104 191
+  s_ac84eed0b220bb::t_8cb6980ac02a1a 180-181
+  s_ac84eed0b220bb::t_e83a00be78962a 197-198
+src/web/api/strategies.py
+  s_ac84eed0b220bb::t_24412e9804a79e 182
+  s_ac84eed0b220bb::t_2b38f5fce610a6 27-28,34-38
+  s_ac84eed0b220bb::t_9452a19748bb8f 128
+  s_ac84eed0b220bb::t_b82e3248edc9fe 3,6
+  s_ac84eed0b220bb::t_9843e5214d45bf 19,24
+  s_ac84eed0b220bb::t_0859b77a91d4bf 111-119,121-122
+  s_ac84eed0b220bb::t_803b1af78a4e1f 301-303
+  s_ac84eed0b220bb::t_5dadf86be33a45 394-395
+  s_ac84eed0b220bb::t_b6a43d2b9a20d0 143
+  s_ac84eed0b220bb::t_605a44070a002b 33
+  s_ac84eed0b220bb::t_2f211ec1e4edec 287-291,294-299
+  s_ac84eed0b220bb::t_b475de5c022023 408-410
+  s_ac84eed0b220bb::t_a672bd14a0fa0c 412
+  s_ac84eed0b220bb::t_e0c185189b16a5 120
+  s_ac84eed0b220bb::t_ab477c5bb2c980 300
+  s_ac84eed0b220bb::t_fc5022a0f13b03 411
+src/exchange/okx_futures.py
+  s_ac84eed0b220bb::t_d1bec2c3fe6821 5-6
+src/data/models.py
+  s_ac84eed0b220bb::t_27494a3ac3b216 34-35,48-49,59-76
+src/ops/private_sync.py
+  s_ac84eed0b220bb::t_5246a6394aed81 1-331
+tests/unit/test_types.py
+  s_ac84eed0b220bb::t_9b3054ca291013 14-46
+  s_ac84eed0b220bb::t_23a2a30c74d980 1-11
+  s_ac84eed0b220bb::t_de679d04c26f61 12-13
+src/web/api/ops.py
+  s_ac84eed0b220bb::t_360196c8d5d87a 3,5,7-8,11-17,19,21-23,27,29-31,33,46-80,95-128
+  s_ac84eed0b220bb::t_ee00b1a0eb85ac 1-2,4,6,9-10,18,20,24-26,28,32,34-45,81-94,129-130
+tests/unit/test_telegram.py
+  s_ac84eed0b220bb::t_80bdec5052701b 3
+  s_ac84eed0b220bb::t_38cae63b3b2a03 48-96
+src/web/api/settings.py
+  s_ac84eed0b220bb::t_200539178adcf5 176-177
+  s_ac84eed0b220bb::t_e62beb8149cb8c 91-92
+  s_ac84eed0b220bb::t_c608fd862789e9 21-22
+  s_ac84eed0b220bb::t_0f8adc3979f5b3 113-114
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "f23add3a2b302728f69723f4fc51a3a0ceaad105",
+  "prompts": {},
+  "logical_commit_id": "f23add3a2b302728f69723f4fc51a3a0ceaad105",
+  "sessions": {
+    "s_ac84eed0b220bb": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6d88ca3c-c0c0-4957-880e-1b7187133895",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Zane <zane@bigo.sg>"
+    }
+  }
+}
