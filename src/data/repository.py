@@ -8,9 +8,11 @@ from src.data.models import (
     AccountRecord,
     BacktestResultRecord,
     CashLedgerRecord,
+    KillSwitchRecord,
     KlineCache,
     OrderRecord,
     PositionRecord,
+    RiskEventRecord,
     StrategyConfigRecord,
     TradeRecord,
 )
@@ -25,6 +27,47 @@ class Repository:
             SQLModel.metadata.create_all(engine)
             self._migrate_sqlite_schema(engine)
         self.engine = engine
+
+    def get_kill_switch(self) -> KillSwitchRecord:
+        with Session(self.engine) as session:
+            state = session.exec(select(KillSwitchRecord)).first()
+            if state is None:
+                return KillSwitchRecord(engaged=False, reason="", updated_at=0)
+            return state
+
+    def set_kill_switch(self, engaged: bool, reason: str, updated_at: int) -> KillSwitchRecord:
+        with Session(self.engine) as session:
+            state = session.exec(select(KillSwitchRecord)).first()
+            if state is None:
+                state = KillSwitchRecord(engaged=engaged, reason=reason, updated_at=updated_at)
+            else:
+                state.engaged = engaged
+                state.reason = reason
+                state.updated_at = updated_at
+            session.add(state)
+            session.commit()
+            session.refresh(state)
+            return state
+
+    def save_risk_event(self, event: dict[str, object]) -> RiskEventRecord:
+        record = RiskEventRecord(
+            event_type=str(event.get("type", "risk_event")),
+            strategy=str(event.get("strategy", "")),
+            reason_code=str(event.get("reason_code", "")),
+            reason=str(event.get("reason", "")),
+            payload=dict(event),
+            timestamp=int(event.get("timestamp", 0)),
+        )
+        with Session(self.engine) as session:
+            session.add(record)
+            session.commit()
+            session.refresh(record)
+            return record
+
+    def get_risk_events(self) -> list[RiskEventRecord]:
+        statement = select(RiskEventRecord).order_by(RiskEventRecord.timestamp)
+        with Session(self.engine) as session:
+            return list(session.exec(statement).all())
 
     def upsert_account(self, account: AccountRecord) -> AccountRecord:
         with Session(self.engine) as session:
@@ -100,6 +143,34 @@ class Repository:
             session.refresh(trade)
             return trade
 
+    def upsert_trade(self, trade: TradeRecord) -> TradeRecord:
+        with Session(self.engine) as session:
+            existing = None
+            if trade.exchange_trade_id:
+                existing = session.exec(
+                    select(TradeRecord).where(
+                        TradeRecord.exchange_trade_id == trade.exchange_trade_id
+                    )
+                ).first()
+            if existing is None:
+                session.add(trade)
+                session.commit()
+                session.refresh(trade)
+                return trade
+
+            existing.order_id = trade.order_id
+            existing.strategy = trade.strategy
+            existing.symbol = trade.symbol
+            existing.side = trade.side
+            existing.amount = trade.amount
+            existing.price = trade.price
+            existing.fee = trade.fee
+            existing.timestamp = trade.timestamp
+            session.add(existing)
+            session.commit()
+            session.refresh(existing)
+            return existing
+
     def get_trades(self, strategy: str | None = None) -> list[TradeRecord]:
         statement = select(TradeRecord)
         if strategy is not None:
@@ -150,6 +221,43 @@ class Repository:
             session.commit()
             session.refresh(order)
             return order
+
+    def upsert_order(self, order: OrderRecord) -> OrderRecord:
+        with Session(self.engine) as session:
+            existing = None
+            if order.exchange_order_id:
+                existing = session.exec(
+                    select(OrderRecord).where(
+                        OrderRecord.exchange_order_id == order.exchange_order_id
+                    )
+                ).first()
+            if existing is None:
+                existing = session.exec(
+                    select(OrderRecord).where(OrderRecord.order_id == order.order_id)
+                ).first()
+            if existing is None:
+                session.add(order)
+                session.commit()
+                session.refresh(order)
+                return order
+
+            existing.order_id = order.order_id
+            existing.exchange_order_id = order.exchange_order_id
+            existing.client_order_id = order.client_order_id
+            existing.strategy = order.strategy
+            existing.symbol = order.symbol
+            existing.side = order.side
+            existing.type = order.type
+            existing.amount = order.amount
+            existing.price = order.price
+            existing.status = order.status
+            existing.fill_price = order.fill_price
+            existing.timestamp = order.timestamp
+            existing.updated_at = order.updated_at
+            session.add(existing)
+            session.commit()
+            session.refresh(existing)
+            return existing
 
     def get_orders(self, order_id: str | None = None) -> list[OrderRecord]:
         statement = select(OrderRecord)
@@ -276,17 +384,29 @@ class Repository:
         if engine.dialect.name != "sqlite":
             return
         with engine.begin() as connection:
-            columns = {
-                row[1]
-                for row in connection.execute(text("PRAGMA table_info(positionrecord)"))
+            table_migrations = {
+                "positionrecord": {
+                    "mark_price": "ALTER TABLE positionrecord ADD COLUMN mark_price FLOAT",
+                    "realized_pnl": "ALTER TABLE positionrecord ADD COLUMN realized_pnl FLOAT DEFAULT 0.0",
+                    "unrealized_pnl": "ALTER TABLE positionrecord ADD COLUMN unrealized_pnl FLOAT DEFAULT 0.0",
+                },
+                "traderecord": {
+                    "exchange_trade_id": "ALTER TABLE traderecord ADD COLUMN exchange_trade_id VARCHAR DEFAULT ''",
+                    "order_id": "ALTER TABLE traderecord ADD COLUMN order_id VARCHAR DEFAULT ''",
+                },
+                "orderrecord": {
+                    "exchange_order_id": "ALTER TABLE orderrecord ADD COLUMN exchange_order_id VARCHAR DEFAULT ''",
+                    "client_order_id": "ALTER TABLE orderrecord ADD COLUMN client_order_id VARCHAR DEFAULT ''",
+                    "updated_at": "ALTER TABLE orderrecord ADD COLUMN updated_at INTEGER DEFAULT 0",
+                },
             }
-            if not columns:
-                return
-            migrations = {
-                "mark_price": "ALTER TABLE positionrecord ADD COLUMN mark_price FLOAT",
-                "realized_pnl": "ALTER TABLE positionrecord ADD COLUMN realized_pnl FLOAT DEFAULT 0.0",
-                "unrealized_pnl": "ALTER TABLE positionrecord ADD COLUMN unrealized_pnl FLOAT DEFAULT 0.0",
-            }
-            for column, statement in migrations.items():
-                if column not in columns:
-                    connection.execute(text(statement))
+            for table, migrations in table_migrations.items():
+                columns = {
+                    row[1]
+                    for row in connection.execute(text(f"PRAGMA table_info({table})"))
+                }
+                if not columns:
+                    continue
+                for column, statement in migrations.items():
+                    if column not in columns:
+                        connection.execute(text(statement))

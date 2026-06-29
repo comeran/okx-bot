@@ -31,6 +31,8 @@ class CashLedgerRecord(SQLModel, table=True):
 
 class TradeRecord(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
+    exchange_trade_id: str = Field(default="", index=True)
+    order_id: str = Field(default="", index=True)
     strategy: str
     symbol: str
     side: str
@@ -43,6 +45,8 @@ class TradeRecord(SQLModel, table=True):
 class OrderRecord(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     order_id: str = Field(index=True)
+    exchange_order_id: str = Field(default="", index=True)
+    client_order_id: str = Field(default="", index=True)
     strategy: str
     symbol: str
     side: str
@@ -52,6 +56,24 @@ class OrderRecord(SQLModel, table=True):
     status: str
     fill_price: float
     timestamp: int
+    updated_at: int = 0
+
+
+class KillSwitchRecord(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    engaged: bool = False
+    reason: str = ""
+    updated_at: int = 0
+
+
+class RiskEventRecord(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    event_type: str = Field(index=True)
+    strategy: str = Field(default="", index=True)
+    reason_code: str = Field(default="", index=True)
+    reason: str = ""
+    payload: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    timestamp: int = Field(index=True)
 
 
 class PositionRecord(SQLModel, table=True):

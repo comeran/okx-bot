@@ -58,3 +58,56 @@ class Position:
     entry_price: float
     unrealized_pnl: float
     leverage: int = 1
+
+
+@dataclass
+class AccountSnapshot:
+    initial_equity: float
+    cash_balance: float
+    equity: float
+    realized_pnl: float
+    unrealized_pnl: float
+    daily_pnl: float
+    fees_paid: float
+    timestamp: int
+
+
+@dataclass
+class PositionSnapshot:
+    symbol: str
+    side: PositionSide
+    amount: float
+    entry_price: float
+    mark_price: float
+    realized_pnl: float
+    unrealized_pnl: float
+    leverage: int
+    timestamp: int
+
+
+@dataclass
+class ExchangeOrderSnapshot:
+    exchange_order_id: str
+    client_order_id: str
+    symbol: str
+    side: OrderSide
+    type: OrderType
+    amount: float
+    price: float
+    status: OrderStatus
+    fill_price: float
+    timestamp: int
+    updated_at: int
+
+
+@dataclass
+class ExchangeTradeSnapshot:
+    exchange_trade_id: str
+    exchange_order_id: str
+    client_order_id: str
+    symbol: str
+    side: OrderSide
+    amount: float
+    price: float
+    fee: float
+    timestamp: int

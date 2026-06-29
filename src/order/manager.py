@@ -1,3 +1,4 @@
+import inspect
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -8,7 +9,8 @@ from src.data.models import OrderRecord
 from src.order.accounting import PaperAccountingService
 from src.order.router import OrderRouter
 
-RiskEventCallback = Callable[[dict[str, object]], Awaitable[None]]
+OrderUpdateCallback = Callable[[str], Awaitable[None] | None]
+RiskEventCallback = Callable[[dict[str, object]], Awaitable[None] | None]
 
 
 @dataclass(frozen=True)
@@ -25,6 +27,7 @@ def risk_reason_code(reason: str) -> str:
         "Daily loss exceeds maximum allowed loss": "daily_loss_exceeded",
         "Drawdown exceeds maximum allowed drawdown": "drawdown_exceeded",
         "Order requires a stop loss": "stop_loss_required",
+        "Kill switch engaged": "kill_switch_engaged",
     }.get(reason, "risk_rejected")
 
 
@@ -43,10 +46,11 @@ class UnifiedOrderManager:
         timestamp_ms: Callable[[], int] | None = None,
         initial_equity: float = 100000.0,
         fee_rate: float = 0.0,
-        on_order_update: Callable[[str], Awaitable[None]] | None = None,
+        on_order_update: OrderUpdateCallback | None = None,
         on_risk_event: RiskEventCallback | None = None,
         risk_manager: Any | None = None,
         price_provider: Callable[[str], float | None] | None = None,
+        kill_switch_checker: Callable[[], bool] | None = None,
     ) -> None:
         self.router = router
         self.repository = repository
@@ -57,6 +61,7 @@ class UnifiedOrderManager:
         self.on_risk_event = on_risk_event
         self.risk_manager = risk_manager
         self.price_provider = price_provider
+        self.kill_switch_checker = kill_switch_checker
         self._balances: dict[str, float] = {}
         self._order_seq = 0
 
@@ -82,25 +87,22 @@ class UnifiedOrderManager:
             stop_loss=stop_loss,
             take_profit=take_profit,
         )
+        if self.kill_switch_checker is not None and self.kill_switch_checker():
+            risk_result = RiskGateResult(
+                passed=False,
+                reason="Kill switch engaged",
+                effective_price=price,
+            )
+            return await self._reject_order(order, strategy_name, risk_result)
+
         risk_result = self._check_risk_gate(order, strategy_name)
         if not risk_result.passed:
-            order.status = OrderStatus.REJECTED
-            timestamp = self.timestamp_ms()
-            self._persist_order(order, strategy_name, timestamp=timestamp)
-            try:
-                if self.on_risk_event is not None:
-                    await self.on_risk_event(
-                        self._risk_event_payload(order, strategy_name, risk_result, timestamp)
-                    )
-            finally:
-                if self.on_order_update is not None:
-                    await self.on_order_update(strategy_name)
-            return order
+            return await self._reject_order(order, strategy_name, risk_result)
 
         submitted_order = await self.router.submit(order)
         self._persist_order(submitted_order, strategy_name)
         if self.on_order_update is not None:
-            await self.on_order_update(strategy_name)
+            await self._run_callback(self.on_order_update, strategy_name)
         return submitted_order
 
     async def cancel(self, order_id: str, symbol: str | None = None) -> bool:
@@ -186,6 +188,32 @@ class UnifiedOrderManager:
             for position in self.repository.get_open_positions(strategy_name)
             if getattr(position, "symbol", None) != symbol
         )
+
+    async def _reject_order(
+        self,
+        order: Order,
+        strategy_name: str,
+        risk_result: RiskGateResult,
+    ) -> Order:
+        order.status = OrderStatus.REJECTED
+        timestamp = self.timestamp_ms()
+        self._persist_order(order, strategy_name, timestamp=timestamp)
+        try:
+            if self.on_risk_event is not None:
+                await self._run_callback(
+                    self.on_risk_event,
+                    self._risk_event_payload(order, strategy_name, risk_result, timestamp),
+                )
+        finally:
+            if self.on_order_update is not None:
+                await self._run_callback(self.on_order_update, strategy_name)
+        return order
+
+    @staticmethod
+    async def _run_callback(callback: Callable[..., Awaitable[None] | None], *args: object) -> None:
+        result = callback(*args)
+        if inspect.isawaitable(result):
+            await result
 
     def _risk_event_payload(
         self,

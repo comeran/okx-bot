@@ -1,4 +1,49 @@
-from src.core.types import Bar, Order, OrderSide, OrderStatus, OrderType, Position, PositionSide
+from src.core.types import (
+    AccountSnapshot,
+    Bar,
+    Order,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    Position,
+    PositionSide,
+    PositionSnapshot,
+)
+
+
+def test_account_snapshot_creation():
+    snapshot = AccountSnapshot(
+        initial_equity=1000.0,
+        cash_balance=900.0,
+        equity=1010.0,
+        realized_pnl=10.0,
+        unrealized_pnl=0.0,
+        daily_pnl=10.0,
+        fees_paid=1.5,
+        timestamp=1700000000000,
+    )
+
+    assert snapshot.cash_balance == 900.0
+    assert snapshot.equity == 1010.0
+    assert snapshot.timestamp == 1700000000000
+
+
+def test_position_snapshot_creation():
+    snapshot = PositionSnapshot(
+        symbol="BTC/USDT:USDT",
+        side=PositionSide.LONG,
+        amount=0.5,
+        entry_price=50000.0,
+        mark_price=50100.0,
+        realized_pnl=5.0,
+        unrealized_pnl=50.0,
+        leverage=2,
+        timestamp=1700000000000,
+    )
+
+    assert snapshot.symbol == "BTC/USDT:USDT"
+    assert snapshot.side == PositionSide.LONG
+    assert snapshot.unrealized_pnl == 50.0
 
 
 def test_bar_creation():

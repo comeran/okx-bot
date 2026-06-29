@@ -18,6 +18,8 @@ class ExchangeSettingsUpdate(BaseModel):
     api_key: str = ""
     secret: str = ""
     passphrase: str = ""
+    market_type: str = "spot"
+    demo: bool = True
 
 
 class BacktestSettings(BaseModel):
@@ -86,6 +88,8 @@ def _serialize_settings(settings: SettingsUpdate) -> dict[str, object]:
             "secret_set": bool(settings.exchange.secret),
             "passphrase": _mask_secret(settings.exchange.passphrase),
             "passphrase_set": bool(settings.exchange.passphrase),
+            "market_type": settings.exchange.market_type,
+            "demo": settings.exchange.demo,
         },
         "backtest": settings.backtest.model_dump(),
         "risk": settings.risk.model_dump(),
@@ -106,6 +110,8 @@ def _default_settings() -> SettingsUpdate:
             api_key=config.exchange.api_key,
             secret=config.exchange.secret,
             passphrase=config.exchange.passphrase,
+            market_type=config.exchange.market_type,
+            demo=config.exchange.demo,
         ),
         backtest=BacktestSettings(
             initial_capital=config.backtest.initial_capital,
@@ -167,6 +173,8 @@ def create_router() -> APIRouter:
             settings.exchange.passphrase,
             update.exchange.passphrase,
         )
+        settings.exchange.market_type = update.exchange.market_type
+        settings.exchange.demo = update.exchange.demo
         settings.backtest = update.backtest
         settings.risk = update.risk
         settings.notify.telegram_bot_token = _merge_secret(

@@ -4,7 +4,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.data.repository import Repository
-from src.web.api import backtest, market, settings, strategies, trading
+from src.web.api import backtest, market, ops, settings, strategies, trading
 from src.web.ws import WebSocketManager
 
 ws_manager = WebSocketManager()
@@ -75,6 +75,7 @@ def create_app() -> FastAPI:
     app.include_router(backtest.router, prefix="/api/backtest", tags=["backtest"])
     app.include_router(trading.router, prefix="/api/trading", tags=["trading"])
     app.include_router(market.router, prefix="/api/market", tags=["market"])
+    app.include_router(ops.create_router(ws_manager.broadcast), prefix="/api/ops", tags=["ops"])
     app.include_router(settings.create_router(), prefix="/api/settings", tags=["settings"])
     return app
 

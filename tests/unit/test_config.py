@@ -1,6 +1,43 @@
 import textwrap
 
-from src.core.config import load_config
+from src.core.config import AppConfig, load_config
+
+
+def test_app_config_defaults_keep_demo_enabled():
+    config = AppConfig()
+
+    assert config.exchange.demo is True
+    assert config.exchange.market_type == "spot"
+    assert config.risk.allow_live_open_orders is False
+    assert config.risk.live_max_order_notional == 0.0
+
+
+def test_load_config_accepts_live_exchange_and_risk_keys(tmp_path):
+    config_file = tmp_path / "settings.yaml"
+    config_file.write_text(
+        textwrap.dedent(
+            """
+            mode: live
+            exchange:
+              market_type: swap
+              demo: true
+            risk:
+              max_daily_loss_pct: 0.03
+              max_drawdown_pct: 0.12
+              max_total_position_pct: 0.7
+              allow_live_open_orders: false
+              live_max_order_notional: 250.0
+            """
+        )
+    )
+
+    config = load_config(str(config_file))
+
+    assert config.mode == "live"
+    assert config.exchange.market_type == "swap"
+    assert config.exchange.demo is True
+    assert config.risk.allow_live_open_orders is False
+    assert config.risk.live_max_order_notional == 250.0
 
 
 def test_loads_explicit_config_values(tmp_path):

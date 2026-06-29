@@ -177,6 +177,8 @@ async def test_order_manager_persists_filled_order_and_applies_accounting():
         {
             "id": None,
             "order_id": order.id,
+            "exchange_order_id": "",
+            "client_order_id": "",
             "strategy": "ma_cross",
             "symbol": "BTC-USDT",
             "side": "buy",
@@ -186,11 +188,14 @@ async def test_order_manager_persists_filled_order_and_applies_accounting():
             "status": "filled",
             "fill_price": 50000.0,
             "timestamp": 1700000000000,
+            "updated_at": 0,
         }
     ]
     assert [saved.model_dump() for saved in repository.trades] == [
         {
             "id": None,
+            "exchange_trade_id": "",
+            "order_id": "",
             "strategy": "ma_cross",
             "symbol": "BTC-USDT",
             "side": "buy",
