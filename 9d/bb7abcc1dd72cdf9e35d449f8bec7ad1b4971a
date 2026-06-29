@@ -1,0 +1,36 @@
+src/web/api/strategies.py
+  s_ac84eed0b220bb::t_32ce709e38e9f7 25,39-40,42,94,98,102-103,106-108,122-152,154-155,162,164-182,184-194,197,203,206-214,234-243,263-279,315,334-343,346-350,499-502,505-536
+  s_ac84eed0b220bb::t_cc5f4cf2a2a2b0 153
+  s_ac84eed0b220bb::t_fb0fc8da42dbc0 537-539
+src/exchange/base.py
+  s_ac84eed0b220bb::t_1165c80af9ac94 41,43,47-65,71-79,88-96,102-239,247-259,269,273-291,336-337,340,344,357-423,433-434,439-442,444,446,449,456-460,463,471
+  s_ac84eed0b220bb::t_91270216520571 39-40
+  s_ac84eed0b220bb::t_8b779a742c5108 42
+  s_ac84eed0b220bb::t_4967da95dcaebd 44-46
+src/core/types.py
+  s_ac84eed0b220bb::t_a78c2ce3370af6 66,68-91,97-102,104-108,110-111,126
+tests/integration/test_exchange_adapter.py
+  s_ac84eed0b220bb::t_8e686b46b98027 32,48,55,58-64,70-73,77-107,109,112,117,119-124,127-128,132,137,140-157,162,164-165,182-214,216,219,221-222,230,232,234-244,251-252,278,290-291,314-347,349,351-355,365,368-377,381,383-387,398,401-414,421,434,448,460-463,466,474,506,570
+  s_ac84eed0b220bb::t_c9588d54de8174 108
+  s_ac84eed0b220bb::t_6d162a33d32d41 215
+  s_ac84eed0b220bb::t_0498b1bee2c02a 217-218
+  s_ac84eed0b220bb::t_5d5ab2e65c75e6 348
+  s_ac84eed0b220bb::t_b2763b51b29b12 350
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "9dbb7abcc1dd72cdf9e35d449f8bec7ad1b4971a",
+  "prompts": {},
+  "logical_commit_id": "9dbb7abcc1dd72cdf9e35d449f8bec7ad1b4971a",
+  "sessions": {
+    "s_ac84eed0b220bb": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6d88ca3c-c0c0-4957-880e-1b7187133895",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Zane <zane@bigo.sg>"
+    }
+  }
+}
