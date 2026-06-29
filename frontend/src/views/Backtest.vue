@@ -3,9 +3,19 @@ import { computed, onMounted, reactive, ref } from 'vue';
 import { ElMessage } from 'element-plus';
 import { useI18n } from 'vue-i18n';
 
-import { runBacktest, fetchBacktestResults } from '@/services/backtest';
+import Candlestick from '@/components/charts/Candlestick.vue';
+import {
+  runBacktest,
+  fetchBacktestResultDetail,
+  fetchBacktestResults,
+} from '@/services/backtest';
 import { listStrategies } from '@/services/strategies';
-import type { BacktestMetrics, BacktestRequest, BacktestResult } from '@/types/backtest';
+import type {
+  BacktestMetrics,
+  BacktestRequest,
+  BacktestResult,
+  BacktestResultDetail,
+} from '@/types/backtest';
 import type { StrategySummary } from '@/types/strategy';
 import { getBacktestApiErrorMessage, getBacktestValidationError } from '@/utils/backtest';
 
@@ -35,9 +45,14 @@ const form = reactive<{
 const strategies = ref<StrategySummary[]>([]);
 const latestMetrics = ref<BacktestMetrics | null>(null);
 const results = ref<BacktestResult[]>([]);
+const selectedResultId = ref<string | null>(null);
+const selectedDetail = ref<BacktestResultDetail | null>(null);
 const strategiesLoading = ref(false);
 const running = ref(false);
 const resultsLoading = ref(false);
+const detailLoading = ref(false);
+const detailError = ref(false);
+let detailRequestToken = 0;
 
 const strategyOptions = computed(() => {
   const names = strategies.value.map((strategy) => strategy.name);
@@ -126,6 +141,34 @@ async function loadResults(): Promise<void> {
   } finally {
     resultsLoading.value = false;
   }
+}
+
+async function loadResultDetail(id: string): Promise<void> {
+  const requestToken = ++detailRequestToken;
+  detailLoading.value = true;
+  detailError.value = false;
+  selectedDetail.value = null;
+
+  try {
+    const detail = await fetchBacktestResultDetail(id);
+    if (requestToken === detailRequestToken && selectedResultId.value === id) {
+      selectedDetail.value = detail;
+    }
+  } catch {
+    if (requestToken === detailRequestToken && selectedResultId.value === id) {
+      selectedDetail.value = null;
+      detailError.value = true;
+    }
+  } finally {
+    if (requestToken === detailRequestToken && selectedResultId.value === id) {
+      detailLoading.value = false;
+    }
+  }
+}
+
+function handleResultRowClick(row: BacktestResult): void {
+  selectedResultId.value = row.id;
+  void loadResultDetail(row.id);
 }
 
 async function handleRun(): Promise<void> {
@@ -240,7 +283,15 @@ onMounted(() => {
 
     <el-card shadow="hover" class="backtest-card">
       <template #header>{{ t('backtest.history') }}</template>
-      <el-table v-loading="resultsLoading" :data="results" empty-text=" " stripe>
+      <el-table
+        v-loading="resultsLoading"
+        :data="results"
+        empty-text=" "
+        highlight-current-row
+        row-key="id"
+        stripe
+        @row-click="handleResultRowClick"
+      >
         <el-table-column prop="strategy" :label="t('backtest.strategy')" min-width="120" />
         <el-table-column prop="symbol" :label="t('common.symbol')" min-width="120" />
         <el-table-column prop="timeframe" :label="t('common.timeframe')" min-width="100" />
@@ -277,6 +328,32 @@ onMounted(() => {
         <el-table-column prop="total_trades" :label="t('backtest.metrics.totalTrades')" min-width="120" />
       </el-table>
       <el-empty v-if="!resultsLoading && results.length === 0" :description="t('backtest.noResults')" />
+    </el-card>
+
+    <el-card shadow="hover" class="backtest-card">
+      <template #header>{{ t('backtest.historyChart') }}</template>
+      <div v-loading="detailLoading" class="history-chart">
+        <el-alert
+          v-if="detailError"
+          :title="t('backtest.detailLoadError')"
+          type="error"
+          show-icon
+          :closable="false"
+          class="history-chart__error"
+        />
+        <el-empty
+          v-if="!selectedResultId && !detailError"
+          :description="t('backtest.selectHistoryEmpty')"
+        />
+        <Candlestick
+          v-else-if="selectedDetail && selectedDetail.result.id === selectedResultId"
+          :klines="selectedDetail.klines"
+          :markers="selectedDetail.markers"
+          :symbol="selectedDetail.result.symbol"
+          :timeframe="selectedDetail.result.timeframe"
+          :height="460"
+        />
+      </div>
     </el-card>
   </section>
 </template>
@@ -325,5 +402,17 @@ onMounted(() => {
   color: #303133;
   font-size: 24px;
   font-weight: 600;
+}
+
+.history-chart {
+  min-height: 320px;
+}
+
+.history-chart__error {
+  margin-bottom: 16px;
+}
+
+.backtest-card :deep(.el-table__row) {
+  cursor: pointer;
 }
 </style>

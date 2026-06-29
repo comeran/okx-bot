@@ -1,6 +1,11 @@
 import axios from 'axios';
 
-import type { BacktestMetrics, BacktestRequest, BacktestResult } from '@/types/backtest';
+import type {
+  BacktestMetrics,
+  BacktestRequest,
+  BacktestResult,
+  BacktestResultDetail,
+} from '@/types/backtest';
 
 export async function runBacktest(request: BacktestRequest): Promise<BacktestMetrics> {
   const response = await axios.post<BacktestMetrics>('/api/backtest/run', request);
@@ -9,5 +14,10 @@ export async function runBacktest(request: BacktestRequest): Promise<BacktestMet
 
 export async function fetchBacktestResults(): Promise<BacktestResult[]> {
   const response = await axios.get<BacktestResult[]>('/api/backtest/results');
+  return response.data;
+}
+
+export async function fetchBacktestResultDetail(id: string): Promise<BacktestResultDetail> {
+  const response = await axios.get<BacktestResultDetail>(`/api/backtest/results/${id}`);
   return response.data;
 }

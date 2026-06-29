@@ -1,4 +1,4 @@
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -25,10 +25,11 @@ from src.exchange.okx_swap import OKXSwapAdapter
         (OKXOptionsAdapter, "option"),
     ],
 )
-def test_okx_adapters_configure_market_type(adapter_cls, default_type):
+def test_okx_adapters_configure_market_type_and_enable_sandbox_by_default(
+    adapter_cls, default_type
+):
     with patch("src.exchange.base.ccxt") as ccxt:
-        exchange = MagicMock()
-        ccxt.okx.return_value = exchange
+        exchange = ccxt.okx.return_value
         adapter_cls("api-key", "secret", "passphrase")
 
     ccxt.okx.assert_called_once_with(
@@ -44,79 +45,124 @@ def test_okx_adapters_configure_market_type(adapter_cls, default_type):
 
 def test_okx_adapter_can_disable_demo_mode_for_live_configuration():
     with patch("src.exchange.base.ccxt") as ccxt:
-        exchange = MagicMock()
-        ccxt.okx.return_value = exchange
+        exchange = ccxt.okx.return_value
         OKXSpotAdapter("api-key", "secret", "passphrase", demo=False)
 
     exchange.set_sandbox_mode.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_fetch_ohlcv_maps_rows_to_bars():
+async def test_fetch_spot_ohlcv_uses_raw_public_candles_and_maps_rows_to_bars():
     with patch("src.exchange.base.ccxt") as ccxt:
         exchange = AsyncMock()
-        exchange.fetch_ohlcv.return_value = [
-            [1700000000000, 50000, 51000, 49000, 50500, 100.5],
-            [1700000060000, 50500, 51500, 50000, 51200, 80.25],
-        ]
+        exchange.set_sandbox_mode = Mock()
+        exchange.public_get_market_candles.return_value = {
+            "data": [
+                ["1700000060000", "50500", "51500", "50000", "51200", "80.25"],
+                ["1700000000000", "50000", "51000", "49000", "50500", "100.5"],
+            ]
+        }
         ccxt.okx.return_value = exchange
         adapter = OKXSpotAdapter("api-key", "secret", "passphrase")
 
     bars = await adapter.fetch_ohlcv("BTC-USDT", "1m", limit=2)
 
-    exchange.fetch_ohlcv.assert_awaited_once_with("BTC-USDT", "1m", since=None, limit=2)
+    exchange.fetch_ohlcv.assert_not_awaited()
+    exchange.public_get_market_candles.assert_awaited_once_with(
+        {"instId": "BTC-USDT", "bar": "1m", "limit": 2}
+    )
     assert [bar.timestamp for bar in bars] == [1700000000000, 1700000060000]
     assert bars[0].open == 50000.0
     assert bars[1].close == 51200.0
 
 
 @pytest.mark.asyncio
-async def test_fetch_ohlcv_forwards_since_to_exchange():
+async def test_fetch_spot_ohlcv_with_since_uses_raw_history_candles():
     with patch("src.exchange.base.ccxt") as ccxt:
         exchange = AsyncMock()
-        exchange.fetch_ohlcv.return_value = [
-            [1700000060000, 50500, 51500, 50000, 51200, 80.25],
-        ]
+        exchange.set_sandbox_mode = Mock()
+        exchange.public_get_market_history_candles.return_value = {
+            "data": [
+                ["1700000060000", "50500", "51500", "50000", "51200", "80.25"],
+            ]
+        }
         ccxt.okx.return_value = exchange
         adapter = OKXSpotAdapter("api-key", "secret", "passphrase")
 
     bars = await adapter.fetch_ohlcv("BTC-USDT", "1m", limit=1, since=1700000060000)
 
-    exchange.fetch_ohlcv.assert_awaited_once_with(
-        "BTC-USDT",
-        "1m",
-        since=1700000060000,
-        limit=1,
+    exchange.fetch_ohlcv.assert_not_awaited()
+    exchange.public_get_market_candles.assert_not_awaited()
+    exchange.public_get_market_history_candles.assert_awaited_once_with(
+        {
+            "instId": "BTC-USDT",
+            "bar": "1m",
+            "limit": 1,
+            "before": 1700000059999,
+            "after": 1700000120000,
+        }
     )
     assert [bar.timestamp for bar in bars] == [1700000060000]
 
 
 @pytest.mark.asyncio
-async def test_fetch_tickers_maps_public_ticker_fields():
+async def test_fetch_non_spot_ohlcv_uses_ccxt_symbol_unchanged():
     with patch("src.exchange.base.ccxt") as ccxt:
         exchange = AsyncMock()
-        exchange.fetch_tickers.return_value = {
-            "BTC-USDT": {
-                "symbol": "BTC-USDT",
-                "last": 68000,
-                "bid": 67999.5,
-                "ask": 68000.5,
-                "baseVolume": 123.45,
-            },
-            "ETH-USDT": {
-                "symbol": "ETH-USDT",
-                "last": 3800,
-                "bid": 3799.5,
-                "ask": 3800.5,
-                "baseVolume": 456.78,
-            },
+        exchange.set_sandbox_mode = Mock()
+        exchange.fetch_ohlcv.return_value = [
+            [1700000060000, 50500, 51500, 50000, 51200, 80.25],
+        ]
+        ccxt.okx.return_value = exchange
+        adapter = OKXSwapAdapter("api-key", "secret", "passphrase")
+
+    bars = await adapter.fetch_ohlcv(
+        "BTC-USDT-SWAP",
+        "1h",
+        limit=1,
+        since=1700000060000,
+    )
+
+    exchange.fetch_ohlcv.assert_awaited_once_with(
+        "BTC-USDT-SWAP",
+        "1h",
+        since=1700000060000,
+        limit=1,
+    )
+    exchange.public_get_market_candles.assert_not_awaited()
+    assert [bar.timestamp for bar in bars] == [1700000060000]
+
+
+@pytest.mark.asyncio
+async def test_fetch_spot_tickers_maps_raw_public_ticker_fields():
+    with patch("src.exchange.base.ccxt") as ccxt:
+        exchange = AsyncMock()
+        exchange.set_sandbox_mode = Mock()
+        exchange.public_get_market_tickers.return_value = {
+            "data": [
+                {
+                    "instId": "ETH-USDT",
+                    "last": "3800",
+                    "bidPx": "3799.5",
+                    "askPx": "3800.5",
+                    "vol24h": "456.78",
+                },
+                {
+                    "instId": "BTC-USDT",
+                    "last": "68000",
+                    "bidPx": "67999.5",
+                    "askPx": "68000.5",
+                    "vol24h": "123.45",
+                },
+            ]
         }
         ccxt.okx.return_value = exchange
         adapter = OKXSpotAdapter("api-key", "secret", "passphrase")
 
-    tickers = await adapter.fetch_tickers(["BTC-USDT", "ETH-USDT"])
+    tickers = await adapter.fetch_tickers(["BTC-USDT", "MISSING-USDT", "ETH-USDT"])
 
-    exchange.fetch_tickers.assert_awaited_once_with(["BTC-USDT", "ETH-USDT"])
+    exchange.fetch_tickers.assert_not_awaited()
+    exchange.public_get_market_tickers.assert_awaited_once_with({"instType": "SPOT"})
     assert tickers == [
         {
             "symbol": "BTC-USDT",
@@ -136,24 +182,27 @@ async def test_fetch_tickers_maps_public_ticker_fields():
 
 
 @pytest.mark.asyncio
-async def test_fetch_tickers_preserves_requested_okx_symbols_when_ccxt_normalizes_keys():
+async def test_fetch_spot_tickers_preserves_requested_okx_symbols():
     with patch("src.exchange.base.ccxt") as ccxt:
         exchange = AsyncMock()
-        exchange.fetch_tickers.return_value = {
-            "BTC/USDT": {
-                "symbol": "BTC/USDT",
-                "last": 68000,
-                "bid": 67999.5,
-                "ask": 68000.5,
-                "baseVolume": 123.45,
-            },
-            "ETH/USDT": {
-                "symbol": "ETH/USDT",
-                "last": 3800,
-                "bid": 3799.5,
-                "ask": 3800.5,
-                "baseVolume": 456.78,
-            },
+        exchange.set_sandbox_mode = Mock()
+        exchange.public_get_market_tickers.return_value = {
+            "data": [
+                {
+                    "instId": "BTC-USDT",
+                    "last": "68000",
+                    "bidPx": "67999.5",
+                    "askPx": "68000.5",
+                    "vol24h": "123.45",
+                },
+                {
+                    "instId": "ETH-USDT",
+                    "last": "3800",
+                    "bidPx": "3799.5",
+                    "askPx": "3800.5",
+                    "vol24h": "456.78",
+                },
+            ]
         }
         ccxt.okx.return_value = exchange
         adapter = OKXSpotAdapter("api-key", "secret", "passphrase")
@@ -164,9 +213,43 @@ async def test_fetch_tickers_preserves_requested_okx_symbols_when_ccxt_normalize
 
 
 @pytest.mark.asyncio
+async def test_fetch_non_spot_tickers_uses_ccxt_symbols_unchanged():
+    with patch("src.exchange.base.ccxt") as ccxt:
+        exchange = AsyncMock()
+        exchange.set_sandbox_mode = Mock()
+        exchange.fetch_tickers.return_value = {
+            "BTC-USDT-SWAP": {
+                "symbol": "BTC-USDT-SWAP",
+                "last": 68000,
+                "bid": 67999.5,
+                "ask": 68000.5,
+                "baseVolume": 123.45,
+            },
+        }
+        ccxt.okx.return_value = exchange
+        adapter = OKXSwapAdapter("api-key", "secret", "passphrase")
+
+    tickers = await adapter.fetch_tickers(["BTC-USDT-SWAP"])
+
+    exchange.fetch_tickers.assert_awaited_once_with(["BTC-USDT-SWAP"])
+    exchange.public_get_market_tickers.assert_not_awaited()
+    assert tickers == [
+        {
+            "symbol": "BTC-USDT-SWAP",
+            "last": 68000.0,
+            "bidPx": 67999.5,
+            "askPx": 68000.5,
+            "vol24h": 123.45,
+        },
+    ]
+
+
+@pytest.mark.asyncio
 async def test_submit_creates_order_and_maps_exchange_response():
     with patch("src.exchange.base.ccxt") as ccxt:
         exchange = AsyncMock()
+        exchange.set_sandbox_mode = Mock()
+        exchange.markets = {"BTC-USDT-SWAP": {"limits": {}, "precision": {}}}
         exchange.create_order.return_value = {
             "id": "exchange-order-1",
             "status": "closed",
@@ -192,7 +275,7 @@ async def test_submit_creates_order_and_maps_exchange_response():
         "buy",
         0.1,
         50000,
-        {},
+        {"tdMode": "cross"},
     )
     assert result.id == "exchange-order-1"
     assert result.status == OrderStatus.FILLED
@@ -204,6 +287,8 @@ async def test_submit_creates_order_and_maps_exchange_response():
 async def test_submit_leaves_fill_fields_empty_for_open_order():
     with patch("src.exchange.base.ccxt") as ccxt:
         exchange = AsyncMock()
+        exchange.set_sandbox_mode = Mock()
+        exchange.markets = {"BTC-USDT-SWAP": {"limits": {}, "precision": {}}}
         exchange.create_order.return_value = {
             "id": "exchange-order-1",
             "status": "open",
@@ -229,9 +314,45 @@ async def test_submit_leaves_fill_fields_empty_for_open_order():
 
 
 @pytest.mark.asyncio
-async def test_submit_rejects_stop_orders_without_okx_trigger_params():
+async def test_submit_validates_okx_raw_symbol_with_exchange_market_lookup():
+    market = {"id": "SOL-USDT-SWAP", "limits": {}, "precision": {}}
     with patch("src.exchange.base.ccxt") as ccxt:
-        ccxt.okx.return_value = AsyncMock()
+        exchange = AsyncMock()
+        exchange.set_sandbox_mode = Mock()
+        exchange.markets = {"SOL/USDT:USDT": market}
+        exchange.market = Mock(return_value=market)
+        exchange.create_order.return_value = {"id": "exchange-order-1", "status": "open"}
+        ccxt.okx.return_value = exchange
+        adapter = OKXSwapAdapter("api-key", "secret", "passphrase")
+
+    order = Order(
+        id="local-order-1",
+        symbol="SOL-USDT-SWAP",
+        side=OrderSide.BUY,
+        type=OrderType.MARKET,
+        amount=0.01,
+    )
+
+    await adapter.submit(order)
+
+    exchange.create_order.assert_awaited_once_with(
+        "SOL-USDT-SWAP",
+        "market",
+        "buy",
+        0.01,
+        None,
+        {"tdMode": "cross"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_submit_maps_stop_orders_to_okx_trigger_params():
+    with patch("src.exchange.base.ccxt") as ccxt:
+        exchange = AsyncMock()
+        exchange.set_sandbox_mode = Mock()
+        exchange.markets = {"BTC-USDT-SWAP": {"limits": {}, "precision": {}}}
+        exchange.create_order.return_value = {"id": "exchange-order-1", "status": "open"}
+        ccxt.okx.return_value = exchange
         adapter = OKXSwapAdapter("api-key", "secret", "passphrase")
 
     order = Order(
@@ -241,16 +362,29 @@ async def test_submit_rejects_stop_orders_without_okx_trigger_params():
         type=OrderType.STOP,
         amount=0.1,
         price=50000,
+        trigger_price=49000,
     )
 
-    with pytest.raises(ValueError, match="Stop orders require OKX trigger parameters"):
-        await adapter.submit(order)
+    await adapter.submit(order)
+
+    exchange.create_order.assert_awaited_once_with(
+        "BTC-USDT-SWAP",
+        "limit",
+        "buy",
+        0.1,
+        50000,
+        {"tdMode": "cross", "triggerPrice": 49000},
+    )
 
 
 @pytest.mark.asyncio
-async def test_submit_rejects_stop_loss_or_take_profit_until_okx_params_are_supported():
+async def test_submit_maps_stop_loss_and_take_profit_to_okx_params():
     with patch("src.exchange.base.ccxt") as ccxt:
-        ccxt.okx.return_value = AsyncMock()
+        exchange = AsyncMock()
+        exchange.set_sandbox_mode = Mock()
+        exchange.markets = {"BTC-USDT-SWAP": {"limits": {}, "precision": {}}}
+        exchange.create_order.return_value = {"id": "exchange-order-1", "status": "open"}
+        ccxt.okx.return_value = exchange
         adapter = OKXSwapAdapter("api-key", "secret", "passphrase")
 
     order = Order(
@@ -261,16 +395,30 @@ async def test_submit_rejects_stop_loss_or_take_profit_until_okx_params_are_supp
         amount=0.1,
         price=50000,
         stop_loss=49000,
+        take_profit=52000,
     )
 
-    with pytest.raises(ValueError, match="OKX stop_loss and take_profit are not supported"):
-        await adapter.submit(order)
+    await adapter.submit(order)
+
+    exchange.create_order.assert_awaited_once_with(
+        "BTC-USDT-SWAP",
+        "limit",
+        "buy",
+        0.1,
+        50000,
+        {
+            "tdMode": "cross",
+            "stopLoss": {"triggerPrice": 49000},
+            "takeProfit": {"triggerPrice": 52000},
+        },
+    )
 
 
 @pytest.mark.asyncio
 async def test_cancel_delegates_to_exchange_with_symbol():
     with patch("src.exchange.base.ccxt") as ccxt:
         exchange = AsyncMock()
+        exchange.set_sandbox_mode = Mock()
         ccxt.okx.return_value = exchange
         adapter = OKXSpotAdapter("api-key", "secret", "passphrase")
 
@@ -283,6 +431,7 @@ async def test_cancel_delegates_to_exchange_with_symbol():
 async def test_cancel_requires_symbol_for_okx():
     with patch("src.exchange.base.ccxt") as ccxt:
         exchange = AsyncMock()
+        exchange.set_sandbox_mode = Mock()
         ccxt.okx.return_value = exchange
         adapter = OKXSpotAdapter("api-key", "secret", "passphrase")
 
@@ -296,6 +445,7 @@ async def test_cancel_requires_symbol_for_okx():
 async def test_fetch_account_snapshot_maps_private_balance_response():
     with patch("src.exchange.base.ccxt") as ccxt:
         exchange = AsyncMock()
+        exchange.set_sandbox_mode = Mock()
         exchange.fetch_balance.return_value = {
             "total": {"USDT": 1000, "BTC": 0.1},
             "free": {"USDT": 900, "BTC": 0.05},
@@ -307,14 +457,13 @@ async def test_fetch_account_snapshot_maps_private_balance_response():
     snapshot = await adapter.fetch_account_snapshot()
 
     assert snapshot == AccountSnapshot(
-        initial_equity=1000.1,
-        cash_balance=900.05,
-        equity=1000.1,
+        currency="USDT",
+        equity=1000.0,
+        cash_balance=900.0,
+        available_balance=900.0,
         realized_pnl=0.0,
         unrealized_pnl=0.0,
-        daily_pnl=0.0,
-        fees_paid=0.0,
-        timestamp=1700000000000,
+        updated_at=1700000000000,
     )
 
 
@@ -322,6 +471,7 @@ async def test_fetch_account_snapshot_maps_private_balance_response():
 async def test_fetch_open_order_snapshots_maps_status_and_identifiers():
     with patch("src.exchange.base.ccxt") as ccxt:
         exchange = AsyncMock()
+        exchange.set_sandbox_mode = Mock()
         exchange.fetch_open_orders.return_value = [
             {
                 "id": "ex-1",
@@ -353,6 +503,7 @@ async def test_fetch_open_order_snapshots_maps_status_and_identifiers():
 async def test_fetch_recent_trade_snapshots_maps_fee_cost_and_order_ids():
     with patch("src.exchange.base.ccxt") as ccxt:
         exchange = AsyncMock()
+        exchange.set_sandbox_mode = Mock()
         exchange.fetch_my_trades.return_value = [
             {
                 "id": "trade-1",
@@ -416,6 +567,7 @@ async def test_fetch_recent_trade_snapshots_maps_fee_cost_and_order_ids():
 async def test_close_delegates_to_exchange():
     with patch("src.exchange.base.ccxt") as ccxt:
         exchange = AsyncMock()
+        exchange.set_sandbox_mode = Mock()
         ccxt.okx.return_value = exchange
         adapter = OKXOptionsAdapter("api-key", "secret", "passphrase")
 

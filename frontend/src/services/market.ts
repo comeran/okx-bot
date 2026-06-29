@@ -39,7 +39,12 @@ export async function fetchKlines(query: KlineQuery): Promise<Kline[]> {
   return data.map((item) => normalizeKline(item, query));
 }
 
-export async function fetchTickers(): Promise<MarketTicker[]> {
-  const { data } = await axios.get<RawMarketTicker[]>('/api/market/tickers');
+export async function fetchTickers(marketType = 'spot', symbols?: string[]): Promise<MarketTicker[]> {
+  const { data } = await axios.get<RawMarketTicker[]>('/api/market/tickers', {
+    params: {
+      market_type: marketType,
+      symbols,
+    },
+  });
   return data.map(normalizeTicker);
 }

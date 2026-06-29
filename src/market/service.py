@@ -15,22 +15,44 @@ BarCallback = Callable[[Bar], Awaitable[None]]
 
 class MarketDataService:
     def __init__(self, api_key: str, secret: str, passphrase: str):
-        self._exchange = ccxt.okx({"apiKey": api_key, "secret": secret, "password": passphrase})
+        self._exchange_config = {"apiKey": api_key, "secret": secret, "password": passphrase}
+        self._exchange = self._create_exchange()
+        self._exchange_closed = False
         self._subscriptions: dict[str, list[BarCallback]] = {}
         self._buffers: dict[str, deque[Bar]] = {}
         self._last_bar_timestamps: dict[str, int] = {}
         self._running = False
 
+    def _create_exchange(self):
+        return ccxt.okx(dict(self._exchange_config))
+
+    def _ensure_exchange_open(self) -> None:
+        if self._exchange_closed:
+            self._exchange = self._create_exchange()
+            self._exchange_closed = False
+
     def subscribe(self, symbol: str, timeframe: str, callback: BarCallback) -> None:
         key = f"{symbol}:{timeframe}"
-        self._subscriptions.setdefault(key, []).append(callback)
+        callbacks = self._subscriptions.setdefault(key, [])
+        if callback not in callbacks:
+            callbacks.append(callback)
         self._buffers.setdefault(key, deque(maxlen=1000))
+
+    def unsubscribe(self, symbol: str, timeframe: str, callback: BarCallback) -> None:
+        key = f"{symbol}:{timeframe}"
+        callbacks = self._subscriptions.get(key)
+        if callbacks is None:
+            return
+        self._subscriptions[key] = [existing for existing in callbacks if existing is not callback]
+        if not self._subscriptions[key]:
+            self._subscriptions.pop(key)
 
     def get_recent_bars(self, symbol: str, timeframe: str, count: int = 100) -> list[Bar]:
         key = f"{symbol}:{timeframe}"
         return list(self._buffers.get(key, deque()))[-count:]
 
     async def _poll_once(self, symbol: str, timeframe: str) -> None:
+        self._ensure_exchange_open()
         key = f"{symbol}:{timeframe}"
         watch_ohlcv = getattr(self._exchange, "watch_ohlcv", None)
         fetch_ohlcv = getattr(self._exchange, "fetch_ohlcv", None)
@@ -60,8 +82,9 @@ class MarketDataService:
             )
             self._last_bar_timestamps[key] = timestamp
             self._buffers.setdefault(key, deque(maxlen=1000)).append(bar)
-            for callback in self._subscriptions.get(key, []):
-                await callback(bar)
+            for callback in list(self._subscriptions.get(key, [])):
+                if any(existing is callback for existing in self._subscriptions.get(key, [])):
+                    await callback(bar)
 
     async def start(self) -> None:
         self._running = True
@@ -75,4 +98,9 @@ class MarketDataService:
 
     async def stop(self) -> None:
         self._running = False
-        await self._exchange.close()
+        if self._exchange_closed:
+            return
+        try:
+            await self._exchange.close()
+        finally:
+            self._exchange_closed = True

@@ -50,6 +50,8 @@ def test_loads_explicit_config_values(tmp_path):
               api_key: explicit-key
               secret: explicit-secret
               passphrase: explicit-passphrase
+              market_type: swap
+              demo: false
             backtest:
               initial_capital: 250000
               fee_rate: 0.001
@@ -59,6 +61,8 @@ def test_loads_explicit_config_values(tmp_path):
               max_daily_loss_pct: 0.03
               max_drawdown_pct: 0.12
               max_total_position_pct: 0.6
+              allow_live_open_orders: true
+              live_max_order_notional: 2500
             web:
               host: 127.0.0.1
               port: 9000
@@ -72,6 +76,8 @@ def test_loads_explicit_config_values(tmp_path):
     assert config.exchange.api_key == "explicit-key"
     assert config.exchange.secret == "explicit-secret"
     assert config.exchange.passphrase == "explicit-passphrase"
+    assert config.exchange.market_type == "swap"
+    assert config.exchange.demo is False
     assert config.backtest.initial_capital == 250000
     assert config.backtest.fee_rate == 0.001
     assert config.backtest.slippage == 0.002
@@ -79,6 +85,8 @@ def test_loads_explicit_config_values(tmp_path):
     assert config.risk.max_daily_loss_pct == 0.03
     assert config.risk.max_drawdown_pct == 0.12
     assert config.risk.max_total_position_pct == 0.6
+    assert config.risk.allow_live_open_orders is True
+    assert config.risk.live_max_order_notional == 2500
     assert config.web.host == "127.0.0.1"
     assert config.web.port == 9000
 
@@ -112,5 +120,9 @@ def test_uses_defaults_for_missing_optional_values(tmp_path):
     assert config.backtest.initial_capital == 50000
     assert config.backtest.fee_rate == 0.0005
     assert config.backtest.slippage == 0.001
+    assert config.exchange.market_type == "spot"
+    assert config.exchange.demo is True
     assert config.risk.max_daily_loss_pct == 0.02
     assert config.risk.max_drawdown_pct == 0.15
+    assert config.risk.allow_live_open_orders is False
+    assert config.risk.live_max_order_notional == 0.0

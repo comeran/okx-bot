@@ -5,12 +5,16 @@ export interface ExchangeSettingsView {
   secret_set: boolean;
   passphrase: string;
   passphrase_set: boolean;
+  market_type: string;
+  demo: boolean;
 }
 
 export interface ExchangeSettingsUpdate {
   api_key: string;
   secret: string;
   passphrase: string;
+  market_type: string;
+  demo: boolean;
 }
 
 export interface BacktestSettings {
@@ -24,6 +28,8 @@ export interface RiskSettings {
   max_daily_loss_pct: number;
   max_drawdown_pct: number;
   max_total_position_pct: number;
+  allow_live_open_orders: boolean;
+  live_max_order_notional: number;
 }
 
 export interface NotifySettingsView {

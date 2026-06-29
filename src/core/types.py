@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 
 
@@ -43,11 +43,14 @@ class Order:
     type: OrderType
     amount: float
     price: float | None = None
+    trigger_price: float | None = None
     stop_loss: float | None = None
     take_profit: float | None = None
     status: OrderStatus = OrderStatus.PENDING
     fill_price: float | None = None
     fill_time: int | None = None
+    reduce_only: bool = False
+    params: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass
@@ -60,32 +63,52 @@ class Position:
     leverage: int = 1
 
 
-@dataclass
+@dataclass(frozen=True)
 class AccountSnapshot:
-    initial_equity: float
-    cash_balance: float
-    equity: float
-    realized_pnl: float
-    unrealized_pnl: float
-    daily_pnl: float
-    fees_paid: float
-    timestamp: int
+    equity: float = 0.0
+    cash_balance: float = 0.0
+    initial_equity: float = 0.0
+    realized_pnl: float = 0.0
+    unrealized_pnl: float = 0.0
+    daily_pnl: float = 0.0
+    fees_paid: float = 0.0
+    timestamp: int = 0
+    currency: str = ""
+    available_balance: float = 0.0
+    updated_at: int = 0
+
+    def __post_init__(self) -> None:
+        if self.initial_equity == 0.0 and self.equity != 0.0:
+            object.__setattr__(self, "initial_equity", self.equity)
+        if self.available_balance == 0.0 and self.cash_balance != 0.0:
+            object.__setattr__(self, "available_balance", self.cash_balance)
+        if self.updated_at == 0 and self.timestamp != 0:
+            object.__setattr__(self, "updated_at", self.timestamp)
+        if self.timestamp == 0 and self.updated_at != 0:
+            object.__setattr__(self, "timestamp", self.updated_at)
 
 
-@dataclass
+@dataclass(frozen=True)
 class PositionSnapshot:
     symbol: str
     side: PositionSide
     amount: float
     entry_price: float
-    mark_price: float
-    realized_pnl: float
-    unrealized_pnl: float
-    leverage: int
-    timestamp: int
+    mark_price: float | None = None
+    unrealized_pnl: float = 0.0
+    realized_pnl: float = 0.0
+    leverage: int = 1
+    timestamp: int = 0
+    updated_at: int = 0
+
+    def __post_init__(self) -> None:
+        if self.updated_at == 0 and self.timestamp != 0:
+            object.__setattr__(self, "updated_at", self.timestamp)
+        if self.timestamp == 0 and self.updated_at != 0:
+            object.__setattr__(self, "timestamp", self.updated_at)
 
 
-@dataclass
+@dataclass(frozen=True)
 class ExchangeOrderSnapshot:
     exchange_order_id: str
     client_order_id: str
@@ -100,7 +123,7 @@ class ExchangeOrderSnapshot:
     updated_at: int
 
 
-@dataclass
+@dataclass(frozen=True)
 class ExchangeTradeSnapshot:
     exchange_trade_id: str
     exchange_order_id: str
