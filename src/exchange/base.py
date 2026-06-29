@@ -2,13 +2,17 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from decimal import Decimal, InvalidOperation
+from inspect import isawaitable
 
 import ccxt.async_support as ccxt
 
 from src.core.types import (
     AccountSnapshot,
     Bar,
+    ExchangeOrderSnapshot,
+    ExchangeTradeSnapshot,
     Order,
+    OrderSide,
     OrderStatus,
     OrderType,
     PositionSide,
@@ -40,6 +44,22 @@ class ExchangeAdapter(OrderHandler, ABC):
     async def fetch_position_snapshots(
         self, symbols: list[str] | None = None
     ) -> list[PositionSnapshot]:
+        pass
+
+    @abstractmethod
+    async def fetch_open_order_snapshots(
+        self,
+        symbols: list[str] | None = None,
+    ) -> list[ExchangeOrderSnapshot]:
+        pass
+
+    @abstractmethod
+    async def fetch_recent_trade_snapshots(
+        self,
+        symbols: list[str] | None = None,
+        since: int | None = None,
+        limit: int = 100,
+    ) -> list[ExchangeTradeSnapshot]:
         pass
 
     @abstractmethod
@@ -75,7 +95,9 @@ class OKXBaseAdapter(ExchangeAdapter):
         self._default_type = default_type
         self._exchange = ccxt.okx(config)
         if demo and hasattr(self._exchange, "set_sandbox_mode"):
-            self._exchange.set_sandbox_mode(True)
+            result = self._exchange.set_sandbox_mode(True)
+            if isawaitable(result):
+                result.close()
 
     def _to_ccxt_symbol(self, symbol: str) -> str:
         if self._default_type != "spot":
@@ -123,7 +145,8 @@ class OKXBaseAdapter(ExchangeAdapter):
 
     async def fetch_account_snapshot(self) -> AccountSnapshot:
         balance = await self._exchange.fetch_balance()
-        data = (balance.get("info") or {}).get("data") or []
+        info = balance.get("info") if isinstance(balance.get("info"), dict) else {}
+        data = info.get("data") or []
         details = []
         for account in data:
             details.extend(account.get("details") or [])
@@ -149,6 +172,10 @@ class OKXBaseAdapter(ExchangeAdapter):
         currency = self._balance_currency(balance) or "USDT"
         fallback_total = self._safe_float(self._balance_value(balance, currency, "total"))
         fallback_free = self._safe_float(self._balance_value(balance, currency, "free"))
+        updated_at = self._safe_int(
+            account_row.get("uTime"),
+            self._safe_int(info.get("uTime"), self._safe_int(info.get("ts"))),
+        )
         return AccountSnapshot(
             currency=currency,
             equity=self._safe_float(account_row.get("totalEq"), fallback_total),
@@ -156,7 +183,7 @@ class OKXBaseAdapter(ExchangeAdapter):
             available_balance=self._safe_float(account_row.get("availEq"), fallback_free),
             unrealized_pnl=self._safe_float(account_row.get("upl")),
             realized_pnl=self._safe_float(account_row.get("realizedPnl")),
-            updated_at=self._safe_int(account_row.get("uTime")),
+            updated_at=updated_at,
         )
 
     async def fetch_position_snapshots(
@@ -279,6 +306,32 @@ class OKXBaseAdapter(ExchangeAdapter):
             )
         return tickers
 
+    async def fetch_open_order_snapshots(
+        self,
+        symbols: list[str] | None = None,
+    ) -> list[ExchangeOrderSnapshot]:
+        orders: list[ExchangeOrderSnapshot] = []
+        for symbol in symbols or [None]:
+            rows = (
+                await self._exchange.fetch_open_orders(symbol)
+                if symbol is not None
+                else await self._exchange.fetch_open_orders()
+            )
+            orders.extend(self._map_order(row) for row in rows)
+        return orders
+
+    async def fetch_recent_trade_snapshots(
+        self,
+        symbols: list[str] | None = None,
+        since: int | None = None,
+        limit: int = 100,
+    ) -> list[ExchangeTradeSnapshot]:
+        trades: list[ExchangeTradeSnapshot] = []
+        for symbol in symbols or [None]:
+            rows = await self._exchange.fetch_my_trades(symbol, since=since, limit=limit)
+            trades.extend(self._map_trade(row) for row in rows)
+        return trades
+
     async def submit(self, order: Order) -> Order:
         order_type, params = self._okx_order_type_and_params(order)
         await self._validate_order_against_market(order)
@@ -377,10 +430,42 @@ class OKXBaseAdapter(ExchangeAdapter):
     async def close(self) -> None:
         await self._exchange.close()
 
-    def _map_status(self, status: str | None) -> OrderStatus:
+    def _map_order(self, row: dict[str, object]) -> ExchangeOrderSnapshot:
+        timestamp = self._safe_int(row.get("timestamp"))
+        return ExchangeOrderSnapshot(
+            exchange_order_id=str(row.get("id") or ""),
+            client_order_id=str(row.get("clientOrderId") or row.get("clientOid") or ""),
+            symbol=str(row.get("symbol") or ""),
+            side=OrderSide(str(row.get("side") or "buy").lower()),
+            type=OrderType(str(row.get("type") or "limit").lower()),
+            amount=self._safe_float(row.get("amount")),
+            price=self._safe_float(row.get("price")),
+            status=self._map_status(row.get("status")),
+            fill_price=self._safe_float(row.get("average")),
+            timestamp=timestamp,
+            updated_at=self._safe_int(row.get("lastTradeTimestamp"), self._safe_int(row.get("updated"), timestamp)),
+        )
+
+    def _map_trade(self, row: dict[str, object]) -> ExchangeTradeSnapshot:
+        fee = row.get("fee") or {}
+        return ExchangeTradeSnapshot(
+            exchange_trade_id=str(row.get("id") or ""),
+            exchange_order_id=str(row.get("order") or row.get("orderId") or ""),
+            client_order_id=str(row.get("clientOrderId") or row.get("clientOid") or ""),
+            symbol=str(row.get("symbol") or ""),
+            side=OrderSide(str(row.get("side") or "buy").lower()),
+            amount=self._safe_float(row.get("amount")),
+            price=self._safe_float(row.get("price")),
+            fee=self._safe_float(fee.get("cost")) if isinstance(fee, dict) else 0.0,
+            timestamp=self._safe_int(row.get("timestamp")),
+        )
+
+    def _map_status(self, status: object) -> OrderStatus:
         return {
+            "open": OrderStatus.PENDING,
             "closed": OrderStatus.FILLED,
+            "filled": OrderStatus.FILLED,
             "canceled": OrderStatus.CANCELLED,
             "cancelled": OrderStatus.CANCELLED,
             "rejected": OrderStatus.REJECTED,
-        }.get(status or "", OrderStatus.PENDING)
+        }.get(str(status or "").lower(), OrderStatus.PENDING)

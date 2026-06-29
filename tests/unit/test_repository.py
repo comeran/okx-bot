@@ -504,3 +504,111 @@ def test_upsert_position_and_open_positions_filter_flat_rows(repo: Repository):
     assert position.amount == 0.2
     assert position.mark_price == 52000.0
     assert [(pos.symbol, pos.amount) for pos in open_positions] == [("BTC-USDT", 0.2)]
+
+
+def test_kill_switch_defaults_to_disengaged(repo: Repository):
+    state = repo.get_kill_switch()
+
+    assert state.engaged is False
+    assert state.reason == ""
+    assert state.updated_at == 0
+
+
+def test_set_kill_switch_persists_latest_state(repo: Repository):
+    repo.set_kill_switch(True, "operator emergency stop", 1700000000000)
+    repo.set_kill_switch(False, "demo reset", 1700000005000)
+
+    state = repo.get_kill_switch()
+
+    assert state.engaged is False
+    assert state.reason == "demo reset"
+    assert state.updated_at == 1700000005000
+
+
+def test_save_risk_event_persists_payload_fields(repo: Repository):
+    saved = repo.save_risk_event(
+        {
+            "type": "risk_event",
+            "strategy": "ma_cross",
+            "reason_code": "kill_switch_engaged",
+            "reason": "Kill switch engaged",
+            "symbol": "BTC/USDT",
+            "timestamp": 1700000000000,
+        }
+    )
+
+    events = repo.get_risk_events()
+
+    assert len(events) == 1
+    assert events[0].id == saved.id
+    assert events[0].event_type == "risk_event"
+    assert events[0].strategy == "ma_cross"
+    assert events[0].reason_code == "kill_switch_engaged"
+    assert events[0].payload["symbol"] == "BTC/USDT"
+
+
+def test_upsert_order_updates_existing_exchange_order(repo: Repository):
+    repo.upsert_order(
+        OrderRecord(
+            order_id="local-1",
+            exchange_order_id="okx-1",
+            client_order_id="client-1",
+            strategy="ma_cross",
+            symbol="BTC/USDT",
+            side="buy",
+            type="limit",
+            amount=1.0,
+            price=50000.0,
+            status="pending",
+            fill_price=0.0,
+            timestamp=1700000000000,
+            updated_at=1700000000000,
+        )
+    )
+    repo.upsert_order(
+        OrderRecord(
+            order_id="local-2",
+            exchange_order_id="okx-1",
+            client_order_id="client-1",
+            strategy="ma_cross",
+            symbol="BTC/USDT",
+            side="buy",
+            type="limit",
+            amount=1.0,
+            price=50000.0,
+            status="filled",
+            fill_price=50100.0,
+            timestamp=1700000000000,
+            updated_at=1700000005000,
+        )
+    )
+
+    orders = repo.get_orders()
+
+    assert len(orders) == 1
+    assert orders[0].order_id == "local-2"
+    assert orders[0].exchange_order_id == "okx-1"
+    assert orders[0].status == "filled"
+    assert orders[0].fill_price == 50100.0
+
+
+def test_upsert_trade_deduplicates_exchange_trade_id(repo: Repository):
+    trade = TradeRecord(
+        exchange_trade_id="trade-1",
+        order_id="okx-1",
+        strategy="ma_cross",
+        symbol="BTC/USDT",
+        side="buy",
+        amount=1.0,
+        price=50000.0,
+        fee=1.2,
+        timestamp=1700000000000,
+    )
+
+    repo.upsert_trade(trade)
+    repo.upsert_trade(trade)
+
+    trades = repo.get_trades("ma_cross")
+
+    assert len(trades) == 1
+    assert trades[0].exchange_trade_id == "trade-1"

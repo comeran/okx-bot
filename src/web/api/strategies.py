@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, Protocol
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -21,19 +22,29 @@ from src.exchange.okx_options import OKXOptionsAdapter
 from src.exchange.okx_spot import OKXSpotAdapter
 from src.exchange.okx_swap import OKXSwapAdapter
 from src.market.service import MarketDataService
+from src.notify.telegram import RiskEventTelegramNotifier, TelegramNotifier
 from src.order.manager import UnifiedOrderManager
 from src.order.mark_to_market import PaperMarkToMarketService
 from src.order.router import OrderHandler, OrderRouter
 from src.risk.manager import RiskManager
 from src.strategy.builtin.ma_cross import register_ma_cross
 from src.strategy.registry import StrategyRegistry
+from src.web.api import settings as settings_api
 from src.web.api import trading
+
+logger = logging.getLogger(__name__)
 
 PriceProvider = Callable[[str], float | None]
 RuntimeBroadcaster = Callable[[dict[str, object]], Awaitable[None]]
-OrderUpdateCallback = Callable[[str], Awaitable[None]]
-RiskEventCallback = Callable[[dict[str, object]], Awaitable[None]]
+OrderUpdateCallback = Callable[[str], Awaitable[None] | None]
+RiskEventCallback = Callable[[dict[str, object]], Awaitable[None] | None]
+KillSwitchChecker = Callable[[], bool]
 _UNSET_ORDER_ROUTER_MODE = object()
+
+
+class RiskEventNotifier(Protocol):
+    async def send_risk_event(self, payload: dict[str, object]) -> None:
+        ...
 
 
 class StrategyConfigRequest(BaseModel):
@@ -99,6 +110,18 @@ def create_risk_manager(live: bool = False) -> RiskManager:
     )
 
 
+def create_risk_event_notifier() -> RiskEventNotifier | None:
+    notify = settings_api._load_settings().notify
+    if not notify.telegram_bot_token or not notify.telegram_chat_id:
+        return None
+    return RiskEventTelegramNotifier(
+        TelegramNotifier(
+            bot_token=notify.telegram_bot_token,
+            chat_id=notify.telegram_chat_id,
+        )
+    )
+
+
 def resolve_order_router_mode(mode: object) -> str:
     if not isinstance(mode, str):
         raise ValueError(f"Unsupported strategy runtime mode: {mode}")
@@ -135,6 +158,7 @@ def create_order_manager(
     repository: Repository | None = None,
     on_order_update: OrderUpdateCallback | None = None,
     on_risk_event: RiskEventCallback | None = None,
+    kill_switch_checker: KillSwitchChecker | None = None,
     order_router_mode: object = _UNSET_ORDER_ROUTER_MODE,
 ) -> UnifiedOrderManager:
     settings = load_runtime_settings()
@@ -178,6 +202,7 @@ def create_order_manager(
         on_risk_event=on_risk_event,
         risk_manager=create_risk_manager(live=resolved_mode == "live"),
         price_provider=latest_price,
+        kill_switch_checker=kill_switch_checker,
         live_safeguards=resolved_mode == "live",
         live_market_type=settings.exchange.market_type if resolved_mode == "live" else "",
         live_state_refresher=live_state_refresher if resolved_mode == "live" else None,
@@ -234,6 +259,7 @@ def create_router(
     router = APIRouter()
     runtime = runtime or StrategyRuntimeState()
     config_repository = Repository()
+    risk_event_notifier = create_risk_event_notifier()
     market_data_service: MarketDataService | None = None
 
     def get_market_data_service() -> MarketDataService:
@@ -368,9 +394,23 @@ def create_router(
             }
         )
 
-    async def broadcast_risk_event(payload: dict[str, object]) -> None:
+    async def persist_broadcast_and_notify_risk_event(
+        repository: Repository,
+        payload: dict[str, object],
+    ) -> None:
+        repository.save_risk_event(payload)
         if broadcast is not None:
             await broadcast(payload)
+        if risk_event_notifier is None:
+            return
+        try:
+            await risk_event_notifier.send_risk_event(payload)
+        except Exception:
+            logger.warning("Failed to send Telegram risk notification", exc_info=True)
+
+    def kill_switch_engaged(repository: Repository) -> bool:
+        get_kill_switch = getattr(repository, "get_kill_switch", None)
+        return get_kill_switch is not None and get_kill_switch().engaged
 
     def create_mark_to_market_service(repository: Repository) -> PaperMarkToMarketService | None:
         required_repository_methods = (
@@ -467,6 +507,8 @@ def create_router(
                 try:
                     runtime.strategy_errors.pop(name, None)
                     repository = Repository()
+                    if kill_switch_engaged(repository):
+                        raise HTTPException(status_code=423, detail="Kill switch engaged")
                     mark_to_market = create_mark_to_market_service(repository)
                     strategy = create_strategy(name)
                     if order_router_mode == "live":
@@ -487,7 +529,11 @@ def create_router(
                                     repository,
                                     strategy_name,
                                 ),
-                                on_risk_event=broadcast_risk_event,
+                                on_risk_event=lambda payload: persist_broadcast_and_notify_risk_event(
+                                    repository,
+                                    payload,
+                                ),
+                                kill_switch_checker=lambda: kill_switch_engaged(repository),
                                 order_router_mode=order_router_mode,
                             )
                         )

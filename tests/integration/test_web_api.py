@@ -1,6 +1,7 @@
 import asyncio
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -24,6 +25,7 @@ from src.strategy.registry import StrategyRegistry
 from src.web import app as web_app
 from src.web.api import backtest as backtest_api
 from src.web.api import market as market_api
+from src.web.api import ops as ops_api
 from src.web.api import strategies as strategy_api
 from src.web.api import trading as trading_api
 from src.web.app import app as exported_app
@@ -37,6 +39,172 @@ def app():
 
 def test_module_exports_fastapi_app():
     assert isinstance(exported_app, FastAPI)
+
+
+class FakeKillSwitchRepository:
+    state = {"engaged": False, "reason": "", "updated_at": 0}
+
+    def get_kill_switch(self):
+        class State:
+            engaged = FakeKillSwitchRepository.state["engaged"]
+            reason = FakeKillSwitchRepository.state["reason"]
+            updated_at = FakeKillSwitchRepository.state["updated_at"]
+
+        return State()
+
+    def set_kill_switch(self, engaged, reason, updated_at):
+        self.state = {"engaged": engaged, "reason": reason, "updated_at": updated_at}
+        FakeKillSwitchRepository.state = self.state
+        return self.get_kill_switch()
+
+    def get_strategy_configs(self):
+        return []
+
+
+def test_kill_switch_api_defaults_to_disengaged(monkeypatch):
+    FakeKillSwitchRepository.state = {"engaged": False, "reason": "", "updated_at": 0}
+    monkeypatch.setattr(ops_api, "Repository", FakeKillSwitchRepository, raising=False)
+
+    client = TestClient(create_app())
+    response = client.get("/api/ops/kill-switch")
+
+    assert response.status_code == 200
+    assert response.json()["engaged"] is False
+    assert response.json()["reason"] == ""
+
+
+def test_kill_switch_api_persists_engaged_state(monkeypatch):
+    FakeKillSwitchRepository.state = {"engaged": False, "reason": "", "updated_at": 0}
+    monkeypatch.setattr(ops_api, "Repository", FakeKillSwitchRepository, raising=False)
+    monkeypatch.setattr(ops_api, "current_timestamp_ms", lambda: 1700000000000, raising=False)
+
+    client = TestClient(create_app())
+    response = client.put(
+        "/api/ops/kill-switch",
+        json={"engaged": True, "reason": "operator emergency stop"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["engaged"] is True
+    assert response.json()["reason"] == "operator emergency stop"
+    assert response.json()["updated_at"] == 1700000000000
+    assert client.get("/api/ops/kill-switch").json()["engaged"] is True
+
+
+def private_sync_settings(demo=True, market_type="spot"):
+    return SimpleNamespace(
+        exchange=SimpleNamespace(
+            api_key="api-key",
+            secret="secret",
+            passphrase="passphrase",
+            market_type=market_type,
+            demo=demo,
+        ),
+        notify=SimpleNamespace(telegram_bot_token="", telegram_chat_id=""),
+    )
+
+
+def test_private_sync_endpoint_rejects_live_mode(monkeypatch):
+    monkeypatch.setattr(
+        ops_api.settings_api,
+        "_load_settings",
+        lambda: private_sync_settings(demo=False),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        ops_api,
+        "_create_adapter",
+        lambda settings: (_ for _ in ()).throw(AssertionError("adapter should not be created")),
+    )
+    app = FastAPI()
+    app.include_router(ops_api.create_router(), prefix="/api/ops")
+
+    response = TestClient(app).post("/api/ops/sync/private", json={})
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Private sync is only available in OKX demo mode"
+
+
+def test_private_sync_endpoint_returns_counts_in_demo_mode(monkeypatch):
+    class FakeAdapter:
+        closed = False
+
+        async def close(self):
+            self.closed = True
+
+    class FakeRepository:
+        pass
+
+    class FakeResult:
+        def as_response(self):
+            return {
+                "account_upserted": 1,
+                "orders_upserted": 2,
+                "trades_upserted": 3,
+                "risk_events_saved": 1,
+                "kill_switch_engaged": True,
+                "divergences": [{"type": "risk_event"}],
+            }
+
+    adapter = FakeAdapter()
+    captured = {}
+
+    async def fake_sync(repository, sync_adapter, **kwargs):
+        captured["repository"] = repository
+        captured["adapter"] = sync_adapter
+        captured["kwargs"] = kwargs
+        return FakeResult()
+
+    monkeypatch.setattr(
+        ops_api.settings_api,
+        "_load_settings",
+        lambda: private_sync_settings(demo=True),
+        raising=False,
+    )
+    monkeypatch.setattr(ops_api, "Repository", FakeRepository, raising=False)
+    monkeypatch.setattr(ops_api, "_create_adapter", lambda settings: adapter)
+    monkeypatch.setattr(ops_api, "sync_private_state", fake_sync)
+    app = FastAPI()
+    app.include_router(ops_api.create_router(), prefix="/api/ops")
+
+    response = TestClient(app).post(
+        "/api/ops/sync/private",
+        json={"symbols": ["BTC-USDT"], "since": 1700000000000},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "account_upserted": 1,
+        "orders_upserted": 2,
+        "trades_upserted": 3,
+        "risk_events_saved": 1,
+        "kill_switch_engaged": True,
+        "divergences": [{"type": "risk_event"}],
+    }
+    assert isinstance(captured["repository"], FakeRepository)
+    assert captured["adapter"] is adapter
+    assert captured["kwargs"]["symbols"] == ["BTC-USDT"]
+    assert captured["kwargs"]["since"] == 1700000000000
+    assert adapter.closed is True
+
+
+@pytest.mark.asyncio
+async def test_strategy_start_blocked_when_kill_switch_engaged(monkeypatch):
+    FakeKillSwitchRepository.state = {
+        "engaged": True,
+        "reason": "operator emergency stop",
+        "updated_at": 1700000000000,
+    }
+    monkeypatch.setattr(ops_api, "Repository", FakeKillSwitchRepository, raising=False)
+    monkeypatch.setattr(strategy_api, "Repository", FakeKillSwitchRepository, raising=False)
+
+    transport = ASGITransport(app=create_app())
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/api/strategies/ma_cross/start")
+
+    assert response.status_code == 423
+    assert response.json()["detail"] == "Kill switch engaged"
 
 
 @pytest.mark.asyncio
@@ -1095,6 +1263,7 @@ async def test_runtime_risk_rejection_broadcasts_risk_event_before_trading_updat
 
     class FakeRepository:
         orders = []
+        risk_events = []
 
         def get_strategy_config(self, name):
             if name == config.name:
@@ -1107,6 +1276,10 @@ async def test_runtime_risk_rejection_broadcasts_risk_event_before_trading_updat
         def save_order(self, order):
             self.orders.append(order)
             return order
+
+        def save_risk_event(self, event):
+            self.risk_events.append(event)
+            return event
 
         def get_orders(self):
             return self.orders
@@ -1121,8 +1294,18 @@ async def test_runtime_risk_rejection_broadcasts_risk_event_before_trading_updat
             return []
 
     FakeRepository.orders = []
+    FakeRepository.risk_events = []
     market_data = FakeMarketDataService()
     messages = []
+
+    class FakeRiskEventNotifier:
+        def __init__(self):
+            self.payloads = []
+
+        async def send_risk_event(self, payload):
+            self.payloads.append(payload)
+
+    risk_event_notifier = FakeRiskEventNotifier()
 
     async def broadcast(message):
         messages.append(message)
@@ -1138,6 +1321,12 @@ async def test_runtime_risk_rejection_broadcasts_risk_event_before_trading_updat
         raising=False,
     )
     monkeypatch.setattr(strategy_api, "current_timestamp_ms", lambda: 1700000000000, raising=False)
+    monkeypatch.setattr(
+        strategy_api,
+        "create_risk_event_notifier",
+        lambda: risk_event_notifier,
+        raising=False,
+    )
     monkeypatch.setattr(web_app.ws_manager, "broadcast", broadcast)
 
     app = create_app()
@@ -1165,6 +1354,8 @@ async def test_runtime_risk_rejection_broadcasts_risk_event_before_trading_updat
         "reason_code": "max_position_exceeded",
         "timestamp": 1700000000000,
     }
+    assert FakeRepository.risk_events == [messages[0]]
+    assert risk_event_notifier.payloads == [messages[0]]
     assert messages[1] == {
         "type": "orders",
         "orders": [order.model_dump() for order in FakeRepository.orders],
@@ -2186,6 +2377,8 @@ async def test_start_strategy_wires_repository_backed_order_manager(monkeypatch)
         {
             "id": None,
             "order_id": FakeRepository.orders[0].order_id,
+            "exchange_order_id": "",
+            "client_order_id": "",
             "strategy": "buyer",
             "symbol": "BTC-USDT",
             "side": "buy",
@@ -2195,11 +2388,14 @@ async def test_start_strategy_wires_repository_backed_order_manager(monkeypatch)
             "status": "filled",
             "fill_price": 50000.0,
             "timestamp": 1700000000000,
+            "updated_at": 0,
         }
     ]
     assert [trade.model_dump() for trade in FakeRepository.trades] == [
         {
             "id": None,
+            "exchange_trade_id": "",
+            "order_id": "",
             "strategy": "buyer",
             "symbol": "BTC-USDT",
             "side": "buy",

@@ -65,13 +65,27 @@ class Position:
 
 @dataclass(frozen=True)
 class AccountSnapshot:
-    currency: str
-    equity: float
-    cash_balance: float
-    available_balance: float
-    unrealized_pnl: float = 0.0
+    equity: float = 0.0
+    cash_balance: float = 0.0
+    initial_equity: float = 0.0
     realized_pnl: float = 0.0
+    unrealized_pnl: float = 0.0
+    daily_pnl: float = 0.0
+    fees_paid: float = 0.0
+    timestamp: int = 0
+    currency: str = ""
+    available_balance: float = 0.0
     updated_at: int = 0
+
+    def __post_init__(self) -> None:
+        if self.initial_equity == 0.0 and self.equity != 0.0:
+            object.__setattr__(self, "initial_equity", self.equity)
+        if self.available_balance == 0.0 and self.cash_balance != 0.0:
+            object.__setattr__(self, "available_balance", self.cash_balance)
+        if self.updated_at == 0 and self.timestamp != 0:
+            object.__setattr__(self, "updated_at", self.timestamp)
+        if self.timestamp == 0 and self.updated_at != 0:
+            object.__setattr__(self, "timestamp", self.updated_at)
 
 
 @dataclass(frozen=True)
@@ -84,4 +98,39 @@ class PositionSnapshot:
     unrealized_pnl: float = 0.0
     realized_pnl: float = 0.0
     leverage: int = 1
+    timestamp: int = 0
     updated_at: int = 0
+
+    def __post_init__(self) -> None:
+        if self.updated_at == 0 and self.timestamp != 0:
+            object.__setattr__(self, "updated_at", self.timestamp)
+        if self.timestamp == 0 and self.updated_at != 0:
+            object.__setattr__(self, "timestamp", self.updated_at)
+
+
+@dataclass(frozen=True)
+class ExchangeOrderSnapshot:
+    exchange_order_id: str
+    client_order_id: str
+    symbol: str
+    side: OrderSide
+    type: OrderType
+    amount: float
+    price: float
+    status: OrderStatus
+    fill_price: float
+    timestamp: int
+    updated_at: int
+
+
+@dataclass(frozen=True)
+class ExchangeTradeSnapshot:
+    exchange_trade_id: str
+    exchange_order_id: str
+    client_order_id: str
+    symbol: str
+    side: OrderSide
+    amount: float
+    price: float
+    fee: float
+    timestamp: int
