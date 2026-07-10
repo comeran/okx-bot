@@ -443,7 +443,10 @@ class OKXBaseAdapter(ExchangeAdapter):
             status=self._map_status(row.get("status")),
             fill_price=self._safe_float(row.get("average")),
             timestamp=timestamp,
-            updated_at=self._safe_int(row.get("lastTradeTimestamp"), self._safe_int(row.get("updated"), timestamp)),
+            updated_at=self._safe_int(
+                row.get("lastTradeTimestamp"),
+                self._safe_int(row.get("updated"), timestamp),
+            ),
         )
 
     def _map_trade(self, row: dict[str, object]) -> ExchangeTradeSnapshot:

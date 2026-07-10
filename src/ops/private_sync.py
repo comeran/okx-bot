@@ -5,7 +5,12 @@ from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
 from typing import Protocol
 
-from src.core.types import AccountSnapshot, ExchangeOrderSnapshot, ExchangeTradeSnapshot, OrderStatus
+from src.core.types import (
+    AccountSnapshot,
+    ExchangeOrderSnapshot,
+    ExchangeTradeSnapshot,
+    OrderStatus,
+)
 from src.data.models import AccountRecord, OrderRecord, TradeRecord
 
 EXCHANGE_STRATEGY = "__exchange__"
@@ -295,7 +300,11 @@ def _account_record(snapshot: AccountSnapshot) -> AccountRecord:
 
 def _order_record(snapshot: ExchangeOrderSnapshot, local: OrderRecord | None) -> OrderRecord:
     return OrderRecord(
-        order_id=local.order_id if local is not None else _external_order_id(snapshot.exchange_order_id),
+        order_id=(
+            local.order_id
+            if local is not None
+            else _external_order_id(snapshot.exchange_order_id)
+        ),
         exchange_order_id=snapshot.exchange_order_id,
         client_order_id=snapshot.client_order_id,
         strategy=local.strategy if local is not None else EXCHANGE_STRATEGY,
@@ -314,7 +323,11 @@ def _order_record(snapshot: ExchangeOrderSnapshot, local: OrderRecord | None) ->
 def _trade_record(snapshot: ExchangeTradeSnapshot, local: OrderRecord | None) -> TradeRecord:
     return TradeRecord(
         exchange_trade_id=snapshot.exchange_trade_id,
-        order_id=local.order_id if local is not None else _external_order_id(snapshot.exchange_order_id),
+        order_id=(
+            local.order_id
+            if local is not None
+            else _external_order_id(snapshot.exchange_order_id)
+        ),
         strategy=local.strategy if local is not None else EXCHANGE_STRATEGY,
         symbol=snapshot.symbol,
         side=snapshot.side.value,

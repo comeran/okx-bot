@@ -205,7 +205,9 @@ async def test_high_risk_divergence_engages_kill_switch_before_events_and_upsert
     assert repo.calls.index("set_kill_switch") < repo.calls.index(
         f"save_risk_event:high:{event_key}"
     )
-    assert repo.calls.index(f"save_risk_event:high:{event_key}") < repo.calls.index("upsert_account")
+    assert repo.calls.index(f"save_risk_event:high:{event_key}") < repo.calls.index(
+        "upsert_account"
+    )
     assert repo.risk_events[0]["reason_code"] == "private_sync_divergence"
 
 

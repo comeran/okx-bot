@@ -23,3 +23,6 @@ frontend/dist/
 .claude/settings.local.json
 .playwright-cli/
 .playwright-mcp/
+
+# Local backtest chart screenshots
+*.png
