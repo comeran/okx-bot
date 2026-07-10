@@ -1,0 +1,32 @@
+src/ops/private_sync.py
+  s_072c69461f4a56::t_5dcbbc73a68c25 303-307
+  s_072c69461f4a56::t_b82137a3c4296b 8-13
+  s_072c69461f4a56::t_37eb2657481d7e 326-330
+.gitignore
+  s_072c69461f4a56::t_8db39436ca7694 26-28
+src/exchange/base.py
+  s_072c69461f4a56::t_f3ab5f24fa69aa 446-449
+src/web/api/strategies.py
+  s_072c69461f4a56::t_438c714ce4369d 532-533
+tests/unit/test_private_sync.py
+  s_072c69461f4a56::t_31467963978f12 208-210
+docs/superpowers/plans/2026-06-12-backtest-kline-progress-plan.md
+  s_072c69461f4a56::t_af40b9dd9effdd 7
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "8fed8bbf63ecd47038b4c21a9cc34d0d9548f1ba",
+  "prompts": {},
+  "logical_commit_id": "8fed8bbf63ecd47038b4c21a9cc34d0d9548f1ba",
+  "sessions": {
+    "s_072c69461f4a56": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "16483746-7fc0-490b-9fc5-c5811ad9d70d",
+        "model": "glm-5.2"
+      },
+      "human_author": "Zane <zane@bigo.sg>"
+    }
+  }
+}
