@@ -4,7 +4,7 @@
 
 **Goal:** Add a candlestick/K-line chart to the Backtest History page and mark buy/sell points for the selected backtest result.
 
-**Status:** Planning and decision review are complete. Implementation has not yet successfully changed source files for this feature.
+**Status:** Implemented. Backend detail endpoint, `BacktestTradeRecord` persistence, engine marker fields, repository accessors, and frontend K-line chart with buy/sell markers are all landed on `main` (merged via PR #9). Backend tests (`test_backtest_engine`, `test_repository`, `test_web_api`) and frontend service tests pass locally.
 
 ---
 

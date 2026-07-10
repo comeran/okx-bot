@@ -529,9 +529,8 @@ def create_router(
                                     repository,
                                     strategy_name,
                                 ),
-                                on_risk_event=lambda payload: persist_broadcast_and_notify_risk_event(
-                                    repository,
-                                    payload,
+                                on_risk_event=lambda payload: (
+                                    persist_broadcast_and_notify_risk_event(repository, payload)
                                 ),
                                 kill_switch_checker=lambda: kill_switch_engaged(repository),
                                 order_router_mode=order_router_mode,
