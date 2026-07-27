@@ -1,9 +1,17 @@
 <script setup lang="ts">
-import { computed, onMounted, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import * as echarts from 'echarts/core';
+import { PieChart } from 'echarts/charts';
+import { LegendComponent, TooltipComponent } from 'echarts/components';
+import { CanvasRenderer } from 'echarts/renderers';
+import type { PieSeriesOption } from 'echarts/charts';
+import type { ComposeOption, ECharts } from 'echarts/core';
+import type { LegendComponentOption, TooltipComponentOption } from 'echarts/components';
 import { useI18n } from 'vue-i18n';
 
 import { useWebSocket } from '@/composables/useWebSocket';
 import { useDashboardStore } from '@/stores/dashboard';
+import type { AssetBalance } from '@/types/dashboard';
 import {
   formatRuntimeCurrency,
   formatRuntimeNumber,
@@ -14,6 +22,16 @@ import {
   getDashboardStrategyStatusTagType,
 } from '@/utils/dashboard';
 
+echarts.use([CanvasRenderer, LegendComponent, PieChart, TooltipComponent]);
+
+type AccountAllocationOption = ComposeOption<
+  LegendComponentOption | PieSeriesOption | TooltipComponentOption
+>;
+
+type AssetAllocationRow = AssetBalance & {
+  allocationShare: number;
+};
+
 const { t } = useI18n();
 const dashboard = useDashboardStore();
 const websocket = useWebSocket('/ws', {
@@ -22,14 +40,105 @@ const websocket = useWebSocket('/ws', {
 
 const latestMessages = computed(() => dashboard.websocketMessages.slice(0, 5));
 const lastUpdatedText = computed(() => formatRuntimeTime(dashboard.lastUpdatedAt ?? undefined));
+const accountAllocationChartRef = ref<HTMLDivElement | null>(null);
+let accountAllocationChart: ECharts | null = null;
+
+const positiveAccountAssets = computed(() => (
+  dashboard.account?.assets?.filter((asset) => asset.eq_utd > 0) ?? []
+));
+const accountAllocationTotal = computed(() => (
+  positiveAccountAssets.value.reduce((sum, asset) => sum + asset.eq_utd, 0)
+));
+const accountAssetRows = computed<AssetAllocationRow[]>(() => (
+  dashboard.account?.assets?.map((asset) => ({
+    ...asset,
+    allocationShare: asset.eq_utd > 0 && accountAllocationTotal.value > 0
+      ? (asset.eq_utd / accountAllocationTotal.value) * 100
+      : 0,
+  })) ?? []
+));
+const accountAllocationPieData = computed(() => (
+  positiveAccountAssets.value.map((asset) => ({
+    name: asset.ccy,
+    value: asset.eq_utd,
+  }))
+));
+const hasAccountAssets = computed(() => accountAssetRows.value.length > 0);
+const hasAccountAllocationAssets = computed(() => accountAllocationPieData.value.length > 0);
+
+function disposeAccountAllocationChart() {
+  accountAllocationChart?.dispose();
+  accountAllocationChart = null;
+}
+
+function resizeAccountAllocationChart() {
+  accountAllocationChart?.resize();
+}
+
+async function updateAccountAllocationChart() {
+  if (!hasAccountAllocationAssets.value) {
+    disposeAccountAllocationChart();
+    return;
+  }
+
+  await nextTick();
+  const chartElement = accountAllocationChartRef.value;
+  if (!chartElement) {
+    return;
+  }
+
+  accountAllocationChart = echarts.getInstanceByDom(chartElement) ?? echarts.init(chartElement);
+
+  const option: AccountAllocationOption = {
+    tooltip: {
+      trigger: 'item',
+      valueFormatter: (value) => formatRuntimeCurrency(Number(value)),
+    },
+    legend: {
+      bottom: 0,
+      type: 'scroll',
+    },
+    series: [
+      {
+        name: t('dashboard.assetAllocation'),
+        type: 'pie',
+        radius: ['42%', '70%'],
+        center: ['50%', '44%'],
+        avoidLabelOverlap: true,
+        data: accountAllocationPieData.value,
+        label: {
+          formatter: '{b}: {d}%',
+        },
+      },
+    ],
+  };
+
+  accountAllocationChart.setOption(option, true);
+  accountAllocationChart.resize();
+}
 
 watch(websocket.connected, (connected) => {
   dashboard.setWebSocketConnected(connected);
 });
 
+watch(
+  accountAllocationPieData,
+  () => {
+    void updateAccountAllocationChart();
+  },
+  { deep: true },
+);
+
 onMounted(() => {
   void dashboard.loadInitialData();
   websocket.connect();
+  window.addEventListener('resize', resizeAccountAllocationChart);
+  void updateAccountAllocationChart();
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', resizeAccountAllocationChart);
+  disposeAccountAllocationChart();
 });
 </script>
 
@@ -95,6 +204,52 @@ onMounted(() => {
         <el-card shadow="hover" v-loading="dashboard.loading">
           <template #header>{{ t('dashboard.activeStrategies') }}</template>
           <div class="metric">{{ dashboard.activeStrategyCount }}</div>
+        </el-card>
+      </el-col>
+    </el-row>
+
+    <el-row :gutter="16" class="dashboard-section">
+      <el-col :span="24">
+        <el-card shadow="never" v-loading="dashboard.loading">
+          <template #header>
+            <div class="account-overview__header">
+              <span>{{ t('dashboard.accountOverview') }}</span>
+              <span class="account-overview__total">
+                {{ t('dashboard.totalEquity') }}: {{ formatRuntimeCurrency(dashboard.account?.equity) }}
+              </span>
+            </div>
+          </template>
+          <el-empty v-if="!hasAccountAssets" :description="t('dashboard.noAssets')" />
+          <el-row v-else :gutter="16" class="account-overview">
+            <el-col :xs="24" :lg="8">
+              <div
+                v-if="hasAccountAllocationAssets"
+                class="account-allocation-chart"
+                ref="accountAllocationChartRef"
+              />
+              <el-empty v-else :description="t('dashboard.noAssets')" />
+            </el-col>
+            <el-col :xs="24" :lg="16">
+              <el-table :data="accountAssetRows" size="small">
+                <el-table-column prop="ccy" :label="t('dashboard.currency')" min-width="90" />
+                <el-table-column :label="t('dashboard.assetCashBalance')" min-width="130">
+                  <template #default="{ row }">{{ formatRuntimeNumber(row.cash_bal) }}</template>
+                </el-table-column>
+                <el-table-column :label="t('dashboard.nativeEquity')" min-width="130">
+                  <template #default="{ row }">{{ formatRuntimeNumber(row.eq) }}</template>
+                </el-table-column>
+                <el-table-column :label="t('dashboard.convertedEquity')" min-width="140">
+                  <template #default="{ row }">{{ formatRuntimeCurrency(row.eq_utd) }}</template>
+                </el-table-column>
+                <el-table-column :label="t('dashboard.unrealizedPnl')" min-width="130">
+                  <template #default="{ row }">{{ formatRuntimeNumber(row.upl) }}</template>
+                </el-table-column>
+                <el-table-column :label="t('dashboard.allocationShare')" min-width="130">
+                  <template #default="{ row }">{{ formatRuntimeNumber(row.allocationShare) }}%</template>
+                </el-table-column>
+              </el-table>
+            </el-col>
+          </el-row>
         </el-card>
       </el-col>
     </el-row>
@@ -272,6 +427,28 @@ h2 {
 
 .dashboard-section {
   margin-top: 16px;
+}
+
+.account-overview__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.account-overview__total {
+  font-size: 14px;
+  font-weight: 600;
+  color: #409eff;
+}
+
+.account-overview {
+  align-items: center;
+}
+
+.account-allocation-chart {
+  width: 100%;
+  min-height: 280px;
 }
 
 .dashboard-message-payload {

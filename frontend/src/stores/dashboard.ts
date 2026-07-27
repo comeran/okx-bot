@@ -75,8 +75,10 @@ function isZeroAccountPlaceholder(
 ): boolean {
   return (
     positions.length === 0
+    && (account.assets?.length ?? 0) === 0
     && [
       account.cash_balance ?? 0,
+      account.available_balance ?? 0,
       account.equity,
       account.realized_pnl ?? 0,
       account.unrealized_pnl ?? 0,

@@ -8,6 +8,7 @@ import ccxt.async_support as ccxt
 
 from src.core.types import (
     AccountSnapshot,
+    AssetBalance,
     Bar,
     ExchangeOrderSnapshot,
     ExchangeTradeSnapshot,
@@ -147,43 +148,60 @@ class OKXBaseAdapter(ExchangeAdapter):
         balance = await self._exchange.fetch_balance()
         info = balance.get("info") if isinstance(balance.get("info"), dict) else {}
         data = info.get("data") or []
-        details = []
-        for account in data:
-            details.extend(account.get("details") or [])
-
-        row = next((detail for detail in details if detail.get("ccy") == "USDT"), None)
-        if row is None and details:
-            row = details[0]
-        if row is not None:
-            currency = str(row.get("ccy") or self._balance_currency(balance))
-            fallback_total = self._safe_float(self._balance_value(balance, currency, "total"))
-            fallback_free = self._safe_float(self._balance_value(balance, currency, "free"))
-            return AccountSnapshot(
-                currency=currency,
-                equity=self._safe_float(row.get("eq"), fallback_total),
-                cash_balance=self._safe_float(row.get("cashBal"), fallback_total),
-                available_balance=self._safe_float(row.get("availBal"), fallback_free),
-                unrealized_pnl=self._safe_float(row.get("upl")),
-                realized_pnl=self._safe_float(row.get("realizedPnl")),
-                updated_at=self._safe_int(row.get("uTime")),
+        account_row = next((row for row in data if isinstance(row, dict)), {})
+        details = [
+            detail
+            for account in data
+            if isinstance(account, dict)
+            for detail in account.get("details") or []
+            if isinstance(detail, dict)
+        ]
+        assets = [
+            AssetBalance(
+                ccy=str(detail.get("ccy") or ""),
+                cash_bal=self._safe_float(detail.get("cashBal")),
+                eq=self._safe_float(detail.get("eq")),
+                eq_utd=self._safe_float(detail.get("eqUtd"), self._safe_float(detail.get("eqUsd"))),
+                avail_bal=self._safe_float(detail.get("availBal")),
+                upl=self._safe_float(detail.get("upl")),
             )
+            for detail in details
+            if detail.get("ccy")
+        ]
 
-        account_row = data[0] if data else {}
-        currency = self._balance_currency(balance) or "USDT"
+        currency = "USDT"
+        row = next((detail for detail in details if detail.get("ccy") == currency), None)
         fallback_total = self._safe_float(self._balance_value(balance, currency, "total"))
         fallback_free = self._safe_float(self._balance_value(balance, currency, "free"))
+        assets_equity = sum(asset.eq_utd for asset in assets)
         updated_at = self._safe_int(
-            account_row.get("uTime"),
-            self._safe_int(info.get("uTime"), self._safe_int(info.get("ts"))),
+            row.get("uTime") if row is not None else None,
+            self._safe_int(
+                account_row.get("uTime"),
+                self._safe_int(info.get("uTime"), self._safe_int(info.get("ts"))),
+            ),
         )
         return AccountSnapshot(
             currency=currency,
-            equity=self._safe_float(account_row.get("totalEq"), fallback_total),
-            cash_balance=fallback_free,
-            available_balance=self._safe_float(account_row.get("availEq"), fallback_free),
-            unrealized_pnl=self._safe_float(account_row.get("upl")),
-            realized_pnl=self._safe_float(account_row.get("realizedPnl")),
+            equity=self._safe_float(
+                account_row.get("totalEq"),
+                assets_equity if assets_equity else fallback_total,
+            ),
+            cash_balance=self._safe_float(
+                row.get("cashBal") if row is not None else None,
+                fallback_free,
+            ),
+            available_balance=self._safe_float(
+                row.get("availBal") if row is not None else None,
+                self._safe_float(account_row.get("availEq"), fallback_free),
+            ),
+            unrealized_pnl=self._safe_float(
+                account_row.get("upl"),
+                sum(asset.upl for asset in assets),
+            ),
+            realized_pnl=sum(self._safe_float(detail.get("realizedPnl")) for detail in details),
             updated_at=updated_at,
+            assets=assets,
         )
 
     async def fetch_position_snapshots(

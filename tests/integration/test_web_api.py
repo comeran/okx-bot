@@ -1530,11 +1530,13 @@ async def test_runtime_bar_marks_open_position_and_broadcasts_positions_then_acc
             "type": "account",
             "account": {
                 "cash_balance": 95000.0,
+                "available_balance": 0.0,
                 "equity": 100100.0,
                 "realized_pnl": 0.0,
                 "unrealized_pnl": 100.0,
                 "daily_pnl": 0.0,
                 "fees_paid": 0.0,
+                "assets": [],
             },
         },
     ]
@@ -2435,11 +2437,13 @@ async def test_start_strategy_wires_repository_backed_order_manager(monkeypatch)
             "type": "account",
             "account": {
                 "cash_balance": 94997.5,
+                "available_balance": 0.0,
                 "equity": 99997.5,
                 "realized_pnl": 0.0,
                 "unrealized_pnl": 0.0,
                 "daily_pnl": 0.0,
                 "fees_paid": 2.5,
+                "assets": [],
             },
         },
     ]
@@ -3169,11 +3173,13 @@ def test_websocket_accepts_connection_and_sends_snapshot(monkeypatch):
         "data": {
             "account": {
                 "cash_balance": 100000.0,
+                "available_balance": 0.0,
                 "equity": 100100.0,
                 "realized_pnl": 100.0,
                 "unrealized_pnl": 0.0,
                 "daily_pnl": 100.0,
                 "fees_paid": 1.5,
+                "assets": [],
             },
             "positions": [],
             "orders": [],
@@ -3581,6 +3587,8 @@ async def test_get_account_returns_paper_account_state(monkeypatch, app):
         unrealized_pnl = 0.0
         daily_pnl = 500.0
         fees_paid = 2.5
+        available_balance = 94000.0
+        assets = [{"ccy": "USDT", "avail_bal": 94000.0}]
 
     class FakeRepository:
         def get_account(self, strategy=None):
@@ -3601,8 +3609,35 @@ async def test_get_account_returns_paper_account_state(monkeypatch, app):
         "unrealized_pnl": 0.0,
         "daily_pnl": 500.0,
         "fees_paid": 2.5,
+        "available_balance": 94000.0,
+        "assets": [{"ccy": "USDT", "avail_bal": 94000.0}],
     }
-    assert "available_balance" not in resp.json()
+
+
+@pytest.mark.asyncio
+async def test_get_account_returns_zero_state_with_assets_when_account_absent(monkeypatch, app):
+    class FakeRepository:
+        def get_account(self, strategy=None):
+            assert strategy is None
+            return None
+
+    monkeypatch.setattr(trading_api, "Repository", FakeRepository, raising=False)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/trading/account")
+
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "cash_balance": 0.0,
+        "equity": 0.0,
+        "realized_pnl": 0.0,
+        "unrealized_pnl": 0.0,
+        "daily_pnl": 0.0,
+        "fees_paid": 0.0,
+        "available_balance": 0.0,
+        "assets": [],
+    }
 
 
 @pytest.mark.asyncio

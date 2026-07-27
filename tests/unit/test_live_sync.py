@@ -1,6 +1,6 @@
 import pytest
 
-from src.core.types import AccountSnapshot, PositionSide, PositionSnapshot
+from src.core.types import AccountSnapshot, AssetBalance, PositionSide, PositionSnapshot
 from src.data.models import AccountRecord, PositionRecord
 from src.exchange.live_sync import LiveStateSyncService
 
@@ -11,10 +11,11 @@ class FakeAdapter:
             currency="USDT",
             equity=1000.0,
             cash_balance=975.0,
-            available_balance=975.0,
+            available_balance=965.0,
             unrealized_pnl=25.0,
             realized_pnl=4.0,
             updated_at=1700000000000,
+            assets=[AssetBalance(ccy="USDT", cash_bal=975.0, eq=1000.0, avail_bal=965.0)],
         )
         self.positions = [
             PositionSnapshot(
@@ -84,12 +85,23 @@ async def test_live_state_sync_persists_account_and_positions():
     assert account == result.account
     assert account.initial_equity == 1000.0
     assert account.cash_balance == 975.0
+    assert account.available_balance == 965.0
     assert account.equity == 1000.0
     assert account.realized_pnl == 4.0
     assert account.unrealized_pnl == 25.0
     assert account.daily_pnl == 0.0
     assert account.fees_paid == 0.0
     assert account.updated_at == 1700000000000
+    assert account.assets == [
+        {
+            "ccy": "USDT",
+            "cash_bal": 975.0,
+            "eq": 1000.0,
+            "eq_utd": 0.0,
+            "avail_bal": 965.0,
+            "upl": 0.0,
+        }
+    ]
     position = repository.positions[("ma_cross", "BTC-USDT-SWAP")]
     assert position.side == "long"
     assert position.amount == 2.0

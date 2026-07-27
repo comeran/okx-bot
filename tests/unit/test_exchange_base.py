@@ -1,6 +1,6 @@
 import pytest
 
-from src.core.types import Order, OrderSide, OrderType, PositionSide
+from src.core.types import AssetBalance, Order, OrderSide, OrderType, PositionSide
 from src.exchange import base as exchange_base
 from src.exchange.base import OKXBaseAdapter
 
@@ -476,21 +476,34 @@ async def test_okx_base_adapter_fetch_account_snapshot_parses_balance_totals():
     adapter = OKXBaseAdapter("api-key", "secret", "passphrase", "swap")
     fake = FakeOKX.instances[0]
     fake.balance_response = {
-        "USDT": {"total": "125.5", "free": "100.25", "used": "25.25"},
+        "USDT": {"total": "560", "free": "525", "used": "35"},
         "info": {
             "data": [
                 {
+                    "totalEq": "660.5",
+                    "upl": "7.75",
                     "details": [
                         {
                             "ccy": "USDT",
-                            "eq": "125.5",
-                            "cashBal": "120",
-                            "availBal": "100.25",
+                            "eq": "565.5",
+                            "eqUtd": "560",
+                            "cashBal": "550",
+                            "availBal": "525",
                             "upl": "5.5",
                             "realizedPnl": "1.25",
                             "uTime": "1700000000000",
-                        }
-                    ]
+                        },
+                        {
+                            "ccy": "BTC",
+                            "eq": "0.002",
+                            "eqUsd": "100",
+                            "cashBal": "0.002",
+                            "availBal": "0.0015",
+                            "upl": "2",
+                            "realizedPnl": "0.75",
+                            "uTime": "1700000000001",
+                        },
+                    ],
                 }
             ]
         },
@@ -500,12 +513,61 @@ async def test_okx_base_adapter_fetch_account_snapshot_parses_balance_totals():
 
     assert fake.fetch_balance_calls == 1
     assert snapshot.currency == "USDT"
-    assert snapshot.equity == 125.5
-    assert snapshot.cash_balance == 120.0
-    assert snapshot.available_balance == 100.25
-    assert snapshot.unrealized_pnl == 5.5
-    assert snapshot.realized_pnl == 1.25
+    assert snapshot.equity == 660.5
+    assert snapshot.cash_balance == 550.0
+    assert snapshot.available_balance == 525.0
+    assert snapshot.unrealized_pnl == 7.75
+    assert snapshot.realized_pnl == 2.0
     assert snapshot.updated_at == 1700000000000
+    assert snapshot.assets == [
+        AssetBalance(
+            ccy="USDT",
+            cash_bal=550.0,
+            eq=565.5,
+            eq_utd=560.0,
+            avail_bal=525.0,
+            upl=5.5,
+        ),
+        AssetBalance(
+            ccy="BTC",
+            cash_bal=0.002,
+            eq=0.002,
+            eq_utd=100.0,
+            avail_bal=0.0015,
+            upl=2.0,
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_okx_base_adapter_fetch_account_snapshot_preserves_zero_available_balance():
+    adapter = OKXBaseAdapter("api-key", "secret", "passphrase", "swap")
+    fake = FakeOKX.instances[0]
+    fake.balance_response = {
+        "info": {
+            "data": [
+                {
+                    "totalEq": "660.5",
+                    "details": [
+                        {
+                            "ccy": "USDT",
+                            "eq": "565.5",
+                            "eqUtd": "560",
+                            "cashBal": "550",
+                            "availBal": "0",
+                            "uTime": "1700000000000",
+                        }
+                    ],
+                }
+            ]
+        },
+    }
+
+    snapshot = await adapter.fetch_account_snapshot()
+
+    assert snapshot.cash_balance == 550.0
+    assert snapshot.available_balance == 0.0
+    assert isinstance(snapshot.available_balance, float)
 
 
 @pytest.mark.asyncio
@@ -537,6 +599,7 @@ async def test_okx_base_adapter_fetch_account_snapshot_parses_account_level_tota
     assert snapshot.unrealized_pnl == 12.75
     assert snapshot.realized_pnl == 0.0
     assert snapshot.updated_at == 1700000000123
+    assert snapshot.assets == []
 
 
 @pytest.mark.asyncio

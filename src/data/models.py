@@ -9,12 +9,14 @@ class AccountRecord(SQLModel, table=True):
     strategy: str = Field(index=True)
     initial_equity: float
     cash_balance: float
+    available_balance: float = 0.0
     equity: float
     realized_pnl: float
     unrealized_pnl: float
     daily_pnl: float
     fees_paid: float
     updated_at: int
+    assets: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON))
 
 
 class CashLedgerRecord(SQLModel, table=True):

@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 from src.core.types import AccountSnapshot, PositionSnapshot
 from src.data.models import AccountRecord, PositionRecord
@@ -36,12 +36,14 @@ class LiveStateSyncService:
             strategy=strategy,
             initial_equity=existing.initial_equity if existing is not None else snapshot.equity,
             cash_balance=snapshot.cash_balance,
+            available_balance=snapshot.available_balance,
             equity=snapshot.equity,
             realized_pnl=snapshot.realized_pnl,
             unrealized_pnl=snapshot.unrealized_pnl,
             daily_pnl=existing.daily_pnl if existing is not None else 0.0,
             fees_paid=existing.fees_paid if existing is not None else 0.0,
             updated_at=snapshot.updated_at or self.timestamp_ms(),
+            assets=[asdict(asset) for asset in snapshot.assets],
         )
         return self.repository.upsert_account(account)
 
