@@ -1,0 +1,127 @@
+frontend/src/stores/dashboard.ts
+  s_a7a31bff19cdd0::t_341d92d580b57e 78
+  s_a7a31bff19cdd0::t_797312af24507b 81
+tests/unit/test_live_sync.py
+  s_a7a31bff19cdd0::t_9fd3fbacaa149f 14,18
+  s_a7a31bff19cdd0::t_5af269f390fffa 3
+  s_a7a31bff19cdd0::t_ecc2d9b79e83bd 88
+  s_a7a31bff19cdd0::t_86b7621351fcac 96-103
+  s_a7a31bff19cdd0::t_c393ff629cbec0 95,104
+src/data/repository.py
+  s_a7a31bff19cdd0::t_adcdc16e1f697f 430
+  s_a7a31bff19cdd0::t_d8f69cfb805861 86
+  s_a7a31bff19cdd0::t_4eb98c36261b04 93
+  s_a7a31bff19cdd0::t_f417320d0ff1b9 113-118,123
+  s_a7a31bff19cdd0::t_f3f6fbf501481f 429,431-432
+  s_a7a31bff19cdd0::t_739e822a7cde61 191,220,362,397,450
+src/exchange/live_sync.py
+  s_a7a31bff19cdd0::t_2bc03c98d991cb 39
+  s_a7a31bff19cdd0::t_8685cc7fb8b0d8 2
+  s_a7a31bff19cdd0::t_e2a6843cea38bd 46
+tests/unit/test_exchange_base.py
+  s_a7a31bff19cdd0::t_aa2630733fcf2f 543-570
+  s_a7a31bff19cdd0::t_79204ecf90e0e1 602
+  s_a7a31bff19cdd0::t_3a76dd2b48bfbd 479,483-484,488-491,495-506,516-520,522-539
+  s_a7a31bff19cdd0::t_801ede9bb042bc 3
+  s_a7a31bff19cdd0::t_f1c7fc5943d071 540-542
+frontend/src/stores/dashboard.test.ts
+  s_a7a31bff19cdd0::t_a9a424ab052d3a 70,72-180,182,212
+  s_a7a31bff19cdd0::t_9d365969d8e104 214-248,250
+  s_a7a31bff19cdd0::t_18b838d2bfe3fa 12-20
+  s_a7a31bff19cdd0::t_ff159517f41102 71
+  s_a7a31bff19cdd0::t_940b36013fd015 213
+tests/unit/test_repository.py
+  s_a7a31bff19cdd0::t_7a084be7cf6f56 444-483
+  s_a7a31bff19cdd0::t_59ea927de63439 399,401
+  s_a7a31bff19cdd0::t_0047da9edd2ec6 384,386
+  s_a7a31bff19cdd0::t_d5bfb4b9e887c5 439-440
+  s_a7a31bff19cdd0::t_a4dc0eac2a388d 410
+  s_a7a31bff19cdd0::t_b46623e8c6e2a8 369,371
+  s_a7a31bff19cdd0::t_fce3e283087054 424
+  s_a7a31bff19cdd0::t_5f47db836cea44 442-443
+tests/unit/test_types.py
+  s_a7a31bff19cdd0::t_caf32fa703d45a 42,45-51
+  s_a7a31bff19cdd0::t_df8012095f4fdb 3
+  s_a7a31bff19cdd0::t_a714a517966d68 32-41,43-44,52-53
+  s_a7a31bff19cdd0::t_acf90edb269abd 30-31
+frontend/src/locales/zh-CN.ts
+  s_a7a31bff19cdd0::t_c41fd252a40ca6 35-42
+src/data/models.py
+  s_a7a31bff19cdd0::t_e34021e73925ee 19
+  s_a7a31bff19cdd0::t_6d1f3ad9d8c3d3 12
+tests/unit/test_private_sync.py
+  s_a7a31bff19cdd0::t_86b7621351fcac 260-267
+  s_a7a31bff19cdd0::t_4f9453bdd4836f 5
+  s_a7a31bff19cdd0::t_5e08b33e903be2 234-259,268-270
+src/core/types.py
+  s_a7a31bff19cdd0::t_710734215d545b 67-76
+  s_a7a31bff19cdd0::t_489c1d8ea0c83e 87,94,96-97
+  s_a7a31bff19cdd0::t_cea786f12101de 89
+src/web/api/trading.py
+  s_a7a31bff19cdd0::t_bd6d97017d1f2f 16
+  s_a7a31bff19cdd0::t_e4d4fb4c023f75 64-65,68,73,77-79
+  s_a7a31bff19cdd0::t_557190c50784f3 23-24
+  s_a7a31bff19cdd0::t_ca0371b0b20b03 138
+frontend/src/types/dashboard.ts
+  s_a7a31bff19cdd0::t_f5bef1c5379f9c 1-9,18
+tests/integration/test_web_api.py
+  s_a7a31bff19cdd0::t_1667bfd9c73235 1533
+  s_a7a31bff19cdd0::t_64d2c9ce7120a9 3612-3613,3615-3640
+  s_a7a31bff19cdd0::t_8adf8e054344d3 3176,3182
+  s_a7a31bff19cdd0::t_08c2afa9c2c3c8 3590-3591
+  s_a7a31bff19cdd0::t_330cd036c824fb 1539
+  s_a7a31bff19cdd0::t_015c2f0c70d9a7 2440
+  s_a7a31bff19cdd0::t_8dc5748494d005 2446
+frontend/src/locales/en.ts
+  s_a7a31bff19cdd0::t_2e97fd3db941a9 35-42
+src/exchange/base.py
+  s_a7a31bff19cdd0::t_22d10407fd8d20 11
+  s_a7a31bff19cdd0::t_7a1745352a9b01 151-166,168-173,176,178-182,186-202,204
+src/ops/private_sync.py
+  s_a7a31bff19cdd0::t_7217527d6d67c8 70-78
+  s_a7a31bff19cdd0::t_dac643dcf70d0c 298
+  s_a7a31bff19cdd0::t_16e609b6c5b1c5 3
+  s_a7a31bff19cdd0::t_c98580b8524522 19
+  s_a7a31bff19cdd0::t_45f824271b7e1f 291
+  s_a7a31bff19cdd0::t_86b7621351fcac 25,30,37,137,305,326
+frontend/src/views/Dashboard.vue
+  s_a7a31bff19cdd0::t_b837d68e48afba 214-221,223-224,231-252,256
+  s_a7a31bff19cdd0::t_e3ea84a571d449 222,225-230
+  s_a7a31bff19cdd0::t_df003b51561dcb 53,55,58
+  s_a7a31bff19cdd0::t_da861e4e3a43f6 66
+  s_a7a31bff19cdd0::t_940fdc8ca30e12 43-52,54,56-57,59-65,67-118
+  s_a7a31bff19cdd0::t_a4b97b95f538cd 124-131,135-141
+  s_a7a31bff19cdd0::t_6f08da35c1baa8 2-9,14,25-33
+  s_a7a31bff19cdd0::t_2e67ceab35313d 430,432-451,453
+  s_a7a31bff19cdd0::t_79a9b66c78223c 34
+  s_a7a31bff19cdd0::t_dc83fc273aeeda 211-213
+  s_a7a31bff19cdd0::t_a765998fd8b5d4 431
+  s_08c73492c1e26a::t_4eb31c35d32755 207-210
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "aee370e4b9a155859ef5e4d90ea6ef458efab395",
+  "prompts": {},
+  "logical_commit_id": "aee370e4b9a155859ef5e4d90ea6ef458efab395",
+  "sessions": {
+    "s_08c73492c1e26a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "agent-a233aa2a8b063f637",
+        "model": "unknown"
+      },
+      "human_author": "Zane <zane@bigo.sg>"
+    },
+    "s_a7a31bff19cdd0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4a702a07-cfa5-4b53-bb69-e9a6827322ca",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Zane <zane@bigo.sg>",
+      "total_additions": 715,
+      "total_deletions": 81
+    }
+  }
+}
