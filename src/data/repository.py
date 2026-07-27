@@ -83,12 +83,14 @@ class Repository:
 
             existing.initial_equity = account.initial_equity
             existing.cash_balance = account.cash_balance
+            existing.available_balance = account.available_balance
             existing.equity = account.equity
             existing.realized_pnl = account.realized_pnl
             existing.unrealized_pnl = account.unrealized_pnl
             existing.daily_pnl = account.daily_pnl
             existing.fees_paid = account.fees_paid
             existing.updated_at = account.updated_at
+            existing.assets = account.assets
             session.add(existing)
             session.commit()
             session.refresh(existing)
@@ -108,10 +110,17 @@ class Repository:
                 return None
             if len(accounts) == 1:
                 return accounts[0]
+            exchange_account = next(
+                (account for account in accounts if account.strategy == "__exchange__"),
+                None,
+            )
+            if exchange_account is not None:
+                return exchange_account
             return AccountRecord(
                 strategy="",
                 initial_equity=sum(account.initial_equity for account in accounts),
                 cash_balance=sum(account.cash_balance for account in accounts),
+                available_balance=sum(account.available_balance for account in accounts),
                 equity=sum(account.equity for account in accounts),
                 realized_pnl=sum(account.realized_pnl for account in accounts),
                 unrealized_pnl=sum(account.unrealized_pnl for account in accounts),
@@ -179,9 +188,7 @@ class Repository:
         with Session(self.engine) as session:
             return list(session.exec(statement).all())
 
-    def upsert_strategy_config(
-        self, config: StrategyConfigRecord
-    ) -> StrategyConfigRecord:
+    def upsert_strategy_config(self, config: StrategyConfigRecord) -> StrategyConfigRecord:
         with Session(self.engine) as session:
             existing = session.exec(
                 select(StrategyConfigRecord).where(StrategyConfigRecord.name == config.name)
@@ -210,9 +217,7 @@ class Repository:
             ).first()
 
     def get_strategy_configs(self) -> list[StrategyConfigRecord]:
-        statement = select(StrategyConfigRecord).order_by(
-            StrategyConfigRecord.created_at.desc()
-        )
+        statement = select(StrategyConfigRecord).order_by(StrategyConfigRecord.created_at.desc())
         with Session(self.engine) as session:
             return list(session.exec(statement).all())
 
@@ -354,9 +359,7 @@ class Repository:
         with Session(self.engine) as session:
             return list(session.exec(statement).all())
 
-    def save_backtest_result(
-        self, result: BacktestResultRecord
-    ) -> BacktestResultRecord:
+    def save_backtest_result(self, result: BacktestResultRecord) -> BacktestResultRecord:
         with Session(self.engine) as session:
             session.add(result)
             session.commit()
@@ -391,9 +394,7 @@ class Repository:
         with Session(self.engine) as session:
             return list(session.exec(statement).all())
 
-    def save_backtest_trades(
-        self, trades: list[BacktestTradeRecord]
-    ) -> list[BacktestTradeRecord]:
+    def save_backtest_trades(self, trades: list[BacktestTradeRecord]) -> list[BacktestTradeRecord]:
         with Session(self.engine) as session:
             for trade in trades:
                 session.add(trade)
@@ -425,6 +426,10 @@ class Repository:
             return
         with engine.begin() as connection:
             table_migrations = {
+                "accountrecord": {
+                    "available_balance": "ALTER TABLE accountrecord ADD COLUMN available_balance FLOAT DEFAULT 0.0",
+                    "assets": "ALTER TABLE accountrecord ADD COLUMN assets JSON DEFAULT '[]'",
+                },
                 "positionrecord": {
                     "mark_price": "ALTER TABLE positionrecord ADD COLUMN mark_price FLOAT",
                     "realized_pnl": "ALTER TABLE positionrecord ADD COLUMN realized_pnl FLOAT DEFAULT 0.0",
@@ -442,8 +447,7 @@ class Repository:
             }
             for table, migrations in table_migrations.items():
                 columns = {
-                    row[1]
-                    for row in connection.execute(text(f"PRAGMA table_info({table})"))
+                    row[1] for row in connection.execute(text(f"PRAGMA table_info({table})"))
                 }
                 if not columns:
                     continue

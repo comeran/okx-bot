@@ -1,3 +1,12 @@
+export interface AssetBalance {
+  ccy: string;
+  cash_bal: number;
+  eq: number;
+  eq_utd: number;
+  avail_bal: number;
+  upl: number;
+}
+
 export interface AccountSummary {
   equity: number;
   daily_pnl: number;
@@ -6,6 +15,7 @@ export interface AccountSummary {
   unrealized_pnl?: number;
   fees_paid?: number;
   available_balance?: number;
+  assets?: AssetBalance[];
   margin_ratio?: number;
 }
 

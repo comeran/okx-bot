@@ -13,13 +13,15 @@ router = APIRouter()
 
 PAPER_ACCOUNT_KEYS = (
     "cash_balance",
+    "available_balance",
     "equity",
     "realized_pnl",
     "unrealized_pnl",
     "daily_pnl",
     "fees_paid",
 )
-ZERO_PAPER_ACCOUNT = {key: 0.0 for key in PAPER_ACCOUNT_KEYS}
+ZERO_PAPER_ACCOUNT: dict[str, Any] = {key: 0.0 for key in PAPER_ACCOUNT_KEYS}
+ZERO_PAPER_ACCOUNT["assets"] = []
 
 
 def current_timestamp_ms() -> int:
@@ -59,18 +61,22 @@ def account_mapping(account: object) -> dict[str, Any]:
         return account.model_dump()
     if isinstance(account, dict):
         return account
-    return {key: getattr(account, key) for key in PAPER_ACCOUNT_KEYS if hasattr(account, key)}
+    keys = (*PAPER_ACCOUNT_KEYS, "assets")
+    return {key: getattr(account, key) for key in keys if hasattr(account, key)}
 
 
-def serialize_account(account: object | None) -> dict[str, float]:
+def serialize_account(account: object | None) -> dict[str, Any]:
     if account is None:
         return dict(ZERO_PAPER_ACCOUNT)
 
     values = account_mapping(account)
-    return {
+    response: dict[str, Any] = {
         key: float(values.get(key, 0.0)) if isinstance(values.get(key, 0.0), int | float) else 0.0
         for key in PAPER_ACCOUNT_KEYS
     }
+    assets = values.get("assets", [])
+    response["assets"] = assets if isinstance(assets, list) else []
+    return response
 
 
 @router.post("/live-state/refresh")
@@ -129,7 +135,7 @@ async def get_trades(strategy: str | None = None) -> list[dict[str, Any]]:
 
 
 @router.get("/account")
-async def get_account() -> dict[str, float]:
+async def get_account() -> dict[str, Any]:
     repository = Repository()
     if hasattr(repository, "get_account"):
         return serialize_account(repository.get_account())

@@ -64,6 +64,16 @@ class Position:
 
 
 @dataclass(frozen=True)
+class AssetBalance:
+    ccy: str
+    cash_bal: float = 0.0
+    eq: float = 0.0
+    eq_utd: float = 0.0
+    avail_bal: float = 0.0
+    upl: float = 0.0
+
+
+@dataclass(frozen=True)
 class AccountSnapshot:
     equity: float = 0.0
     cash_balance: float = 0.0
@@ -74,14 +84,17 @@ class AccountSnapshot:
     fees_paid: float = 0.0
     timestamp: int = 0
     currency: str = ""
-    available_balance: float = 0.0
+    available_balance: float | None = None
     updated_at: int = 0
+    assets: list[AssetBalance] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.initial_equity == 0.0 and self.equity != 0.0:
             object.__setattr__(self, "initial_equity", self.equity)
-        if self.available_balance == 0.0 and self.cash_balance != 0.0:
+        if self.available_balance is None:
             object.__setattr__(self, "available_balance", self.cash_balance)
+        else:
+            object.__setattr__(self, "available_balance", float(self.available_balance))
         if self.updated_at == 0 and self.timestamp != 0:
             object.__setattr__(self, "updated_at", self.timestamp)
         if self.timestamp == 0 and self.updated_at != 0:

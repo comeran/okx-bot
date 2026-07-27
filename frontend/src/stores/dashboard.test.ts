@@ -9,6 +9,15 @@ const jsonResponse = (data: unknown) =>
     json: () => Promise.resolve(data),
   } as Response);
 
+const usdtAsset = {
+  ccy: 'USDT',
+  cash_bal: 100,
+  eq: 100,
+  eq_utd: 100,
+  avail_bal: 90,
+  upl: 0,
+};
+
 describe('dashboard store', () => {
   beforeEach(() => {
     setActivePinia(createPinia());
@@ -60,6 +69,117 @@ describe('dashboard store', () => {
     expect(dashboard.lastUpdatedAt).toEqual(expect.any(Number));
   });
 
+  it('preserves assets from initial account API load', async () => {
+    const fetchMock = vi.fn((url: string) => {
+      const responses: Record<string, unknown> = {
+        '/api/trading/account': {
+          cash_balance: 100,
+          equity: 100,
+          realized_pnl: 0,
+          unrealized_pnl: 0,
+          daily_pnl: 0,
+          fees_paid: 0,
+          available_balance: 90,
+          assets: [usdtAsset],
+        },
+        '/api/trading/positions': [],
+        '/api/trading/orders': [],
+        '/api/strategies': [{ name: 'ma_cross', status: 'stopped' }],
+        '/api/market/tickers': [],
+      };
+
+      return jsonResponse(responses[url]);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const dashboard = useDashboardStore();
+
+    await dashboard.loadInitialData();
+
+    expect(dashboard.account?.assets).toEqual([usdtAsset]);
+    expect(dashboard.account?.available_balance).toBe(90);
+  });
+
+  it('retains zero-valued account API load when assets are present', async () => {
+    const fetchMock = vi.fn((url: string) => {
+      const responses: Record<string, unknown> = {
+        '/api/trading/account': {
+          cash_balance: 0,
+          equity: 0,
+          realized_pnl: 0,
+          unrealized_pnl: 0,
+          daily_pnl: 0,
+          fees_paid: 0,
+          assets: [usdtAsset],
+        },
+        '/api/trading/positions': [],
+        '/api/trading/orders': [],
+        '/api/strategies': [{ name: 'ma_cross', status: 'stopped' }],
+        '/api/market/tickers': [],
+      };
+
+      return jsonResponse(responses[url]);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const dashboard = useDashboardStore();
+
+    await dashboard.loadInitialData();
+
+    expect(dashboard.account).toEqual({
+      cash_balance: 0,
+      equity: 0,
+      realized_pnl: 0,
+      unrealized_pnl: 0,
+      daily_pnl: 0,
+      fees_paid: 0,
+      assets: [usdtAsset],
+    });
+  });
+
+  it('preserves assets from direct account websocket messages', () => {
+    const dashboard = useDashboardStore();
+
+    dashboard.addWebSocketMessage({
+      type: 'account',
+      account: {
+        cash_balance: 100,
+        equity: 100,
+        realized_pnl: 0,
+        unrealized_pnl: 0,
+        daily_pnl: 0,
+        fees_paid: 0,
+        assets: [usdtAsset],
+      },
+    });
+
+    expect(dashboard.account?.assets).toEqual([usdtAsset]);
+  });
+
+  it('preserves assets from snapshot websocket account messages', () => {
+    const dashboard = useDashboardStore();
+
+    dashboard.addWebSocketMessage({
+      type: 'snapshot',
+      data: {
+        account: {
+          cash_balance: 100,
+          equity: 100,
+          realized_pnl: 0,
+          unrealized_pnl: 0,
+          daily_pnl: 0,
+          fees_paid: 0,
+          assets: [usdtAsset],
+        },
+        positions: [],
+        orders: [],
+        strategies: [],
+      },
+    });
+
+    expect(dashboard.account?.assets).toEqual([usdtAsset]);
+  });
+
   it('treats all-zero account responses without runtime rows as missing account state', async () => {
     const fetchMock = vi.fn((url: string) => {
       const responses: Record<string, unknown> = {
@@ -89,6 +209,43 @@ describe('dashboard store', () => {
     expect(dashboard.positions).toEqual([]);
     expect(dashboard.orders).toEqual([]);
     expect(dashboard.error).toBeNull();
+  });
+
+  it('retains otherwise zero account responses when available balance is non-zero', async () => {
+    const fetchMock = vi.fn((url: string) => {
+      const responses: Record<string, unknown> = {
+        '/api/trading/account': {
+          cash_balance: 0,
+          available_balance: 25,
+          equity: 0,
+          realized_pnl: 0,
+          unrealized_pnl: 0,
+          daily_pnl: 0,
+          fees_paid: 0,
+        },
+        '/api/trading/positions': [],
+        '/api/trading/orders': [],
+        '/api/strategies': [{ name: 'ma_cross', status: 'stopped' }],
+        '/api/market/tickers': [],
+      };
+
+      return jsonResponse(responses[url]);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const dashboard = useDashboardStore();
+
+    await dashboard.loadInitialData();
+
+    expect(dashboard.account).toEqual({
+      cash_balance: 0,
+      available_balance: 25,
+      equity: 0,
+      realized_pnl: 0,
+      unrealized_pnl: 0,
+      daily_pnl: 0,
+      fees_paid: 0,
+    });
   });
 
   it('keeps rejected orders while treating all-zero account responses as missing account state', async () => {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
@@ -15,27 +16,25 @@ from src.data.models import AccountRecord, OrderRecord, TradeRecord
 
 EXCHANGE_STRATEGY = "__exchange__"
 PRIVATE_SYNC_DIVERGENCE = "private_sync_divergence"
+logger = logging.getLogger(__name__)
 
 RiskEventNotifier = Callable[[dict[str, object]], Awaitable[None]]
 
 
 class PrivateSyncAdapter(Protocol):
-    async def fetch_account_snapshot(self) -> AccountSnapshot:
-        ...
+    async def fetch_account_snapshot(self) -> AccountSnapshot: ...
 
     async def fetch_open_order_snapshots(
         self,
         symbols: list[str] | None = None,
-    ) -> list[ExchangeOrderSnapshot]:
-        ...
+    ) -> list[ExchangeOrderSnapshot]: ...
 
     async def fetch_recent_trade_snapshots(
         self,
         symbols: list[str] | None = None,
         since: int | None = None,
         limit: int = 100,
-    ) -> list[ExchangeTradeSnapshot]:
-        ...
+    ) -> list[ExchangeTradeSnapshot]: ...
 
 
 @dataclass(frozen=True)
@@ -68,11 +67,15 @@ async def sync_private_state(
     target_symbols = symbols or None
     account = await adapter.fetch_account_snapshot()
     exchange_orders = await adapter.fetch_open_order_snapshots(target_symbols)
-    exchange_trades = await adapter.fetch_recent_trade_snapshots(
-        target_symbols,
-        since=since,
-        limit=limit,
-    )
+    try:
+        exchange_trades = await adapter.fetch_recent_trade_snapshots(
+            target_symbols,
+            since=since,
+            limit=limit,
+        )
+    except Exception:
+        logger.warning("Failed to fetch recent trade snapshots", exc_info=True)
+        exchange_trades = []
     local_orders = list(repository.get_orders())
     local_by_exchange_id, local_by_client_id = _local_order_indexes(local_orders)
     divergences = _find_divergences(
@@ -131,11 +134,7 @@ def _local_order_indexes(
             for order in orders
             if getattr(order, "exchange_order_id", "")
         },
-        {
-            order.client_order_id: order
-            for order in orders
-            if getattr(order, "client_order_id", "")
-        },
+        {order.client_order_id: order for order in orders if getattr(order, "client_order_id", "")},
     )
 
 
@@ -289,21 +288,21 @@ def _account_record(snapshot: AccountSnapshot) -> AccountRecord:
         strategy=EXCHANGE_STRATEGY,
         initial_equity=snapshot.initial_equity,
         cash_balance=snapshot.cash_balance,
+        available_balance=snapshot.available_balance,
         equity=snapshot.equity,
         realized_pnl=snapshot.realized_pnl,
         unrealized_pnl=snapshot.unrealized_pnl,
         daily_pnl=snapshot.daily_pnl,
         fees_paid=snapshot.fees_paid,
         updated_at=snapshot.timestamp,
+        assets=[asdict(asset) for asset in snapshot.assets],
     )
 
 
 def _order_record(snapshot: ExchangeOrderSnapshot, local: OrderRecord | None) -> OrderRecord:
     return OrderRecord(
         order_id=(
-            local.order_id
-            if local is not None
-            else _external_order_id(snapshot.exchange_order_id)
+            local.order_id if local is not None else _external_order_id(snapshot.exchange_order_id)
         ),
         exchange_order_id=snapshot.exchange_order_id,
         client_order_id=snapshot.client_order_id,
@@ -324,9 +323,7 @@ def _trade_record(snapshot: ExchangeTradeSnapshot, local: OrderRecord | None) ->
     return TradeRecord(
         exchange_trade_id=snapshot.exchange_trade_id,
         order_id=(
-            local.order_id
-            if local is not None
-            else _external_order_id(snapshot.exchange_order_id)
+            local.order_id if local is not None else _external_order_id(snapshot.exchange_order_id)
         ),
         strategy=local.strategy if local is not None else EXCHANGE_STRATEGY,
         symbol=snapshot.symbol,

@@ -2,6 +2,7 @@ import pytest
 
 from src.core.types import (
     AccountSnapshot,
+    AssetBalance,
     ExchangeOrderSnapshot,
     ExchangeTradeSnapshot,
     OrderSide,
@@ -230,3 +231,40 @@ async def test_private_sync_dedupes_divergence_events_within_one_request():
         "unmatched_exchange_order:ETH-USDT:okx:ex-unmatched:ex-unmatched::"
     ]
     assert repo.calls.count("set_kill_switch") == 1
+
+
+@pytest.mark.asyncio
+async def test_recent_trade_error_does_not_block_account_and_order_persistence():
+    class TradeFailingAdapter(FakeAdapter):
+        async def fetch_recent_trade_snapshots(self, symbols=None, since=None, limit=100):
+            raise TimeoutError("trades timed out")
+
+    repo = FakeRepository()
+    adapter = TradeFailingAdapter(
+        account=AccountSnapshot(
+            initial_equity=1000.0,
+            cash_balance=900.0,
+            available_balance=850.0,
+            equity=1010.0,
+            timestamp=1700000000000,
+            assets=[AssetBalance(ccy="USDT", cash_bal=900.0, eq=1010.0, avail_bal=850.0)],
+        ),
+        orders=[exchange_order(exchange_order_id="ex-1", client_order_id="")],
+    )
+
+    result = await sync_private_state(repo, adapter, timestamp_ms=lambda: 1700000005000)
+
+    assert result.trades_upserted == 0
+    assert repo.accounts[0].available_balance == 850.0
+    assert repo.accounts[0].assets == [
+        {
+            "ccy": "USDT",
+            "cash_bal": 900.0,
+            "eq": 1010.0,
+            "eq_utd": 0.0,
+            "avail_bal": 850.0,
+            "upl": 0.0,
+        }
+    ]
+    assert [order.order_id for order in repo.upserted_orders] == ["okx:ex-1"]
+    assert repo.upserted_trades == []

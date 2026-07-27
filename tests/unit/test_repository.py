@@ -366,7 +366,9 @@ def test_upsert_and_get_account(repo: Repository):
             strategy="ma_cross",
             initial_equity=100000.0,
             cash_balance=95000.0,
+            available_balance=94000.0,
             equity=100500.0,
+            assets=[{"ccy": "USDT", "avail_bal": 94000.0}],
             realized_pnl=500.0,
             unrealized_pnl=0.0,
             daily_pnl=500.0,
@@ -379,7 +381,9 @@ def test_upsert_and_get_account(repo: Repository):
             strategy="ma_cross",
             initial_equity=100000.0,
             cash_balance=96000.0,
+            available_balance=95000.0,
             equity=101000.0,
+            assets=[{"ccy": "BTC", "avail_bal": 1.0}],
             realized_pnl=1000.0,
             unrealized_pnl=0.0,
             daily_pnl=1000.0,
@@ -392,7 +396,9 @@ def test_upsert_and_get_account(repo: Repository):
 
     assert account is not None
     assert account.cash_balance == 96000.0
+    assert account.available_balance == 95000.0
     assert account.realized_pnl == 1000.0
+    assert account.assets == [{"ccy": "BTC", "avail_bal": 1.0}]
 
 
 def test_get_account_aggregates_all_strategies(repo: Repository):
@@ -401,6 +407,7 @@ def test_get_account_aggregates_all_strategies(repo: Repository):
             strategy="a",
             initial_equity=100.0,
             cash_balance=90.0,
+            available_balance=80.0,
             equity=110.0,
             realized_pnl=10.0,
             unrealized_pnl=1.0,
@@ -414,6 +421,7 @@ def test_get_account_aggregates_all_strategies(repo: Repository):
             strategy="b",
             initial_equity=200.0,
             cash_balance=180.0,
+            available_balance=170.0,
             equity=210.0,
             realized_pnl=20.0,
             unrealized_pnl=2.0,
@@ -428,7 +436,49 @@ def test_get_account_aggregates_all_strategies(repo: Repository):
     assert account is not None
     assert account.initial_equity == 300.0
     assert account.cash_balance == 270.0
+    assert account.available_balance == 250.0
+    assert account.assets == []
     assert account.updated_at == 2
+
+
+def test_get_account_without_strategy_prefers_exchange_account(repo: Repository):
+    repo.upsert_account(
+        AccountRecord(
+            strategy="__exchange__",
+            initial_equity=1000.0,
+            cash_balance=900.0,
+            available_balance=850.0,
+            equity=1010.0,
+            realized_pnl=10.0,
+            unrealized_pnl=20.0,
+            daily_pnl=5.0,
+            fees_paid=1.0,
+            updated_at=3,
+            assets=[{"ccy": "USDT", "avail_bal": 850.0}],
+        )
+    )
+    repo.upsert_account(
+        AccountRecord(
+            strategy="ma_cross",
+            initial_equity=100.0,
+            cash_balance=90.0,
+            available_balance=80.0,
+            equity=110.0,
+            realized_pnl=1.0,
+            unrealized_pnl=2.0,
+            daily_pnl=3.0,
+            fees_paid=0.1,
+            updated_at=4,
+        )
+    )
+
+    account = repo.get_account()
+
+    assert account is not None
+    assert account.strategy == "__exchange__"
+    assert account.cash_balance == 900.0
+    assert account.available_balance == 850.0
+    assert account.assets == [{"ccy": "USDT", "avail_bal": 850.0}]
 
 
 def test_cash_ledger_filters_by_strategy(repo: Repository):
