@@ -188,6 +188,47 @@ class Repository:
         with Session(self.engine) as session:
             return list(session.exec(statement).all())
 
+    def create_strategy_config(self, config: StrategyConfigRecord) -> StrategyConfigRecord:
+        with Session(self.engine) as session:
+            session.add(config)
+            session.commit()
+            session.refresh(config)
+            return config
+
+    def update_strategy_config(
+        self,
+        name: str,
+        config: StrategyConfigRecord,
+    ) -> StrategyConfigRecord | None:
+        with Session(self.engine) as session:
+            existing = session.exec(
+                select(StrategyConfigRecord).where(StrategyConfigRecord.name == name)
+            ).first()
+            if existing is None:
+                return None
+
+            existing.strategy_type = config.strategy_type
+            existing.symbol = config.symbol
+            existing.timeframe = config.timeframe
+            existing.params = config.params
+            existing.enabled = config.enabled
+            existing.updated_at = config.updated_at
+            session.add(existing)
+            session.commit()
+            session.refresh(existing)
+            return existing
+
+    def delete_strategy_config(self, name: str) -> bool:
+        with Session(self.engine) as session:
+            existing = session.exec(
+                select(StrategyConfigRecord).where(StrategyConfigRecord.name == name)
+            ).first()
+            if existing is None:
+                return False
+            session.delete(existing)
+            session.commit()
+            return True
+
     def upsert_strategy_config(self, config: StrategyConfigRecord) -> StrategyConfigRecord:
         with Session(self.engine) as session:
             existing = session.exec(
@@ -427,21 +468,33 @@ class Repository:
         with engine.begin() as connection:
             table_migrations = {
                 "accountrecord": {
-                    "available_balance": "ALTER TABLE accountrecord ADD COLUMN available_balance FLOAT DEFAULT 0.0",
+                    "available_balance": (
+                        "ALTER TABLE accountrecord ADD COLUMN available_balance FLOAT DEFAULT 0.0"
+                    ),
                     "assets": "ALTER TABLE accountrecord ADD COLUMN assets JSON DEFAULT '[]'",
                 },
                 "positionrecord": {
                     "mark_price": "ALTER TABLE positionrecord ADD COLUMN mark_price FLOAT",
-                    "realized_pnl": "ALTER TABLE positionrecord ADD COLUMN realized_pnl FLOAT DEFAULT 0.0",
-                    "unrealized_pnl": "ALTER TABLE positionrecord ADD COLUMN unrealized_pnl FLOAT DEFAULT 0.0",
+                    "realized_pnl": (
+                        "ALTER TABLE positionrecord ADD COLUMN realized_pnl FLOAT DEFAULT 0.0"
+                    ),
+                    "unrealized_pnl": (
+                        "ALTER TABLE positionrecord ADD COLUMN unrealized_pnl FLOAT DEFAULT 0.0"
+                    ),
                 },
                 "traderecord": {
-                    "exchange_trade_id": "ALTER TABLE traderecord ADD COLUMN exchange_trade_id VARCHAR DEFAULT ''",
+                    "exchange_trade_id": (
+                        "ALTER TABLE traderecord ADD COLUMN exchange_trade_id VARCHAR DEFAULT ''"
+                    ),
                     "order_id": "ALTER TABLE traderecord ADD COLUMN order_id VARCHAR DEFAULT ''",
                 },
                 "orderrecord": {
-                    "exchange_order_id": "ALTER TABLE orderrecord ADD COLUMN exchange_order_id VARCHAR DEFAULT ''",
-                    "client_order_id": "ALTER TABLE orderrecord ADD COLUMN client_order_id VARCHAR DEFAULT ''",
+                    "exchange_order_id": (
+                        "ALTER TABLE orderrecord ADD COLUMN exchange_order_id VARCHAR DEFAULT ''"
+                    ),
+                    "client_order_id": (
+                        "ALTER TABLE orderrecord ADD COLUMN client_order_id VARCHAR DEFAULT ''"
+                    ),
                     "updated_at": "ALTER TABLE orderrecord ADD COLUMN updated_at INTEGER DEFAULT 0",
                 },
             }

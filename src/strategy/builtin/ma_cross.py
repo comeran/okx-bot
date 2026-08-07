@@ -1,7 +1,14 @@
 from __future__ import annotations
 
+import math
+
 from src.core.types import Bar
 from src.strategy.base import BaseStrategy
+from src.strategy.definitions import (
+    StrategyDefinition,
+    StrategyParameterDefinition,
+    StrategyValidationIssue,
+)
 from src.strategy.registry import StrategyRegistry
 
 
@@ -16,10 +23,15 @@ class MACrossStrategy(BaseStrategy):
         amount: float = 0.1,
     ) -> None:
         super().__init__()
-        if fast_window <= 0:
+        if not _is_integral_window(fast_window) or fast_window < 1:
             raise ValueError("fast_window must be positive")
-        if slow_window <= 0:
+        if not _is_integral_window(slow_window) or slow_window < 1:
             raise ValueError("slow_window must be positive")
+        if not _is_positive_number(amount):
+            raise ValueError("amount must be positive")
+        fast_window = int(fast_window)
+        slow_window = int(slow_window)
+        amount = float(amount)
         if fast_window > slow_window:
             raise ValueError("fast_window must be less than or equal to slow_window")
         self.symbol = symbol
@@ -56,5 +68,70 @@ class MACrossStrategy(BaseStrategy):
         return sum(values) / window
 
 
+def _is_integral_window(value: object) -> bool:
+    return (
+        type(value) is int
+        or (type(value) is float and math.isfinite(value) and value.is_integer())
+    )
+
+
+def _is_positive_number(value: object) -> bool:
+    return type(value) in {int, float} and math.isfinite(value) and value > 0
+
+
+def validate_ma_cross(params: dict[str, object]) -> list[StrategyValidationIssue]:
+    if params["fast_window"] > params["slow_window"]:
+        return [
+            StrategyValidationIssue(
+                path="params.fast_window",
+                code="invalid_window_order",
+                message="fast_window must be less than or equal to slow_window",
+            )
+        ]
+    return []
+
+
+def ma_cross_definition() -> StrategyDefinition:
+    return StrategyDefinition(
+        strategy_type="ma_cross",
+        label="Moving Average Cross",
+        description="Trade when fast and slow moving averages cross.",
+        strategy_cls=MACrossStrategy,
+        parameters=(
+            StrategyParameterDefinition(
+                "fast_window",
+                "integer",
+                label="Fast window",
+                description="Number of bars in the fast moving average.",
+                default=10,
+                minimum=1,
+                step=1,
+            ),
+            StrategyParameterDefinition(
+                "slow_window",
+                "integer",
+                label="Slow window",
+                description="Number of bars in the slow moving average.",
+                default=30,
+                minimum=1,
+                step=1,
+            ),
+            StrategyParameterDefinition(
+                "amount",
+                "number",
+                label="Order amount",
+                description="Base asset amount submitted for each signal.",
+                default=0.1,
+                minimum=0,
+                step=0.01,
+                exclusive_min=True,
+            ),
+        ),
+        validate=validate_ma_cross,
+        allow_unknown_params=False,
+        implicit_instance=True,
+    )
+
+
 def register_ma_cross(registry: StrategyRegistry) -> None:
-    registry.register("ma_cross", MACrossStrategy)
+    registry.register_definition(ma_cross_definition())

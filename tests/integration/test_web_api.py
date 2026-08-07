@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from httpx import ASGITransport, AsyncClient
 
 from src.core.config import AppConfig, ExchangeConfig, RiskConfig
+from src.core.engine import BotEngine
 from src.core.types import Bar, Order, OrderSide, OrderStatus, OrderType
 from src.data.models import (
     AccountRecord,
@@ -20,7 +21,12 @@ from src.data.models import (
     StrategyConfigRecord,
 )
 from src.exchange.live_sync import LiveStateSyncResult
+from src.order.manager import UnifiedOrderManager
 from src.strategy.base import BaseStrategy
+from src.strategy.builtin.bollinger_mean_reversion import BollingerMeanReversionStrategy
+from src.strategy.builtin.donchian_breakout import DonchianBreakoutStrategy
+from src.strategy.builtin.ma_cross import MACrossStrategy
+from src.strategy.builtin.rsi_mean_reversion import RSIMeanReversionStrategy
 from src.strategy.registry import StrategyRegistry
 from src.web import app as web_app
 from src.web.api import backtest as backtest_api
@@ -241,7 +247,81 @@ async def test_get_strategies(app):
         resp = await client.get("/api/strategies")
 
     assert resp.status_code == 200
-    assert {"name": "ma_cross", "status": "stopped"} in resp.json()
+    assert resp.json() == [{"name": "ma_cross", "status": "stopped"}]
+
+
+@pytest.mark.asyncio
+async def test_registered_builtin_types_are_not_implicit_runtime_strategies(app):
+    registry = strategy_api.create_strategy_registry()
+
+    assert [definition.name for definition in registry.list_definitions()] == [
+        "ma_cross",
+        "rsi_mean_reversion",
+        "bollinger_mean_reversion",
+        "donchian_breakout",
+    ]
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/strategies")
+        start_resp = await client.post("/api/strategies/rsi_mean_reversion/start")
+
+    assert resp.status_code == 200
+    assert resp.json() == [{"name": "ma_cross", "status": "stopped"}]
+    assert start_resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_legacy_ma_cross_runtime_defaults_to_1m_subscription_and_latest_price(monkeypatch):
+    class FakeRepository:
+        def get_strategy_configs(self):
+            return []
+
+    class FakeMarketDataService:
+        def __init__(self):
+            self.subscriptions = []
+            self.bars = {("BTC-USDT", "1m"): [Bar(1, 10, 11, 9, 123.45, 1)]}
+            self._running = False
+
+        def subscribe(self, symbol, timeframe, callback):
+            self.subscriptions.append((symbol, timeframe, callback))
+
+        def get_recent_bars(self, symbol, timeframe, count=1):
+            return self.bars.get((symbol, timeframe), [])[-count:]
+
+        async def start(self):
+            self._running = True
+
+    class CapturingOrderManager:
+        async def submit(self, *args, **kwargs):
+            return None
+
+    captured = {}
+    market_data = FakeMarketDataService()
+
+    def capture_order_manager(**kwargs):
+        captured["latest_price"] = kwargs["latest_price"]
+        return CapturingOrderManager()
+
+    monkeypatch.setattr(strategy_api, "Repository", FakeRepository, raising=False)
+    monkeypatch.setattr(strategy_api, "create_market_data_service", lambda: market_data)
+    monkeypatch.setattr(strategy_api, "create_order_manager", capture_order_manager)
+    monkeypatch.setattr(strategy_api, "load_runtime_settings", lambda: AppConfig(mode="paper"))
+
+    app = FastAPI()
+    app.include_router(
+        strategy_api.create_router(runtime=strategy_api.StrategyRuntimeState()),
+        prefix="/api/strategies",
+    )
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post("/api/strategies/ma_cross/start")
+
+    assert resp.status_code == 200
+    assert [(symbol, timeframe) for symbol, timeframe, _ in market_data.subscriptions] == [
+        ("BTC-USDT", "1m")
+    ]
+    assert captured["latest_price"]("BTC-USDT") == 123.45
 
 
 @pytest.mark.asyncio
@@ -279,8 +359,7 @@ async def test_strategy_config_api_saves_and_lists_configs(monkeypatch):
         def get_strategy_configs(self):
             return self.configs
 
-        def upsert_strategy_config(self, config):
-            self.configs = [item for item in self.configs if item.name != config.name]
+        def create_strategy_config(self, config):
             self.configs.append(config)
             return config
 
@@ -303,20 +382,1267 @@ async def test_strategy_config_api_saves_and_lists_configs(monkeypatch):
         )
         list_resp = await client.get("/api/strategies/configs")
 
-    assert save_resp.status_code == 200
+    assert save_resp.status_code == 201
     assert save_resp.json() == {
         "id": None,
         "name": "ma_cross_btc",
         "strategy_type": "ma_cross",
         "symbol": "BTC-USDT",
         "timeframe": "1h",
-        "params": {"fast_window": 5, "slow_window": 20},
+        "params": {"fast_window": 5, "slow_window": 20, "amount": 0.1},
         "enabled": True,
         "created_at": 1700000000000,
         "updated_at": 1700000000000,
     }
     assert list_resp.status_code == 200
     assert [item["name"] for item in list_resp.json()] == ["ma_cross_btc"]
+
+
+@pytest.mark.asyncio
+async def test_strategy_config_crud_clone_validate_and_yaml_use_normalized_configs(monkeypatch):
+    class FakeRepository:
+        configs = {}
+
+        def get_strategy_configs(self):
+            return list(self.configs.values())
+
+        def get_strategy_config(self, name):
+            return self.configs.get(name)
+
+        def create_strategy_config(self, config):
+            if config.name in self.configs:
+                raise strategy_api.IntegrityError("duplicate", None, None)
+            config.id = len(self.configs) + 1
+            self.configs[config.name] = config
+            return config
+
+        def update_strategy_config(self, name, config):
+            existing = self.configs.get(name)
+            if existing is None:
+                return None
+            existing.strategy_type = config.strategy_type
+            existing.symbol = config.symbol
+            existing.timeframe = config.timeframe
+            existing.params = config.params
+            existing.enabled = config.enabled
+            existing.updated_at = config.updated_at
+            return existing
+
+        def delete_strategy_config(self, name):
+            return self.configs.pop(name, None) is not None
+
+        def get_open_positions(self, strategy=None):
+            return []
+
+    FakeRepository.configs = {}
+    monkeypatch.setattr(strategy_api, "Repository", FakeRepository, raising=False)
+    monkeypatch.setattr(strategy_api, "current_timestamp_ms", lambda: 1700000000000)
+    messages = []
+
+    async def broadcast(message):
+        messages.append(message)
+
+    app = FastAPI()
+    app.include_router(strategy_api.create_router(broadcast=broadcast), prefix="/api/strategies")
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        types_resp = await client.get("/api/strategies/types")
+        validate_resp = await client.post(
+            "/api/strategies/configs/validate",
+            json={
+                "name": "ma_cross_btc",
+                "strategy_type": "ma_cross",
+                "symbol": " BTC-USDT ",
+                "timeframe": "1h",
+                "params": {"fast_window": 5, "slow_window": 20},
+            },
+        )
+        yaml_resp = await client.post(
+            "/api/strategies/configs/validate-yaml",
+            content=(
+                "name: ma_cross_btc\n"
+                "strategy_type: ma_cross\n"
+                "symbol: BTC-USDT\n"
+                "timeframe: 1h\n"
+                "params:\n"
+                "  fast_window: 5\n"
+                "  slow_window: 20\n"
+            ),
+        )
+        create_resp = await client.post(
+            "/api/strategies/configs",
+            json=validate_resp.json()["config"],
+        )
+        duplicate_resp = await client.post(
+            "/api/strategies/configs",
+            json=validate_resp.json()["config"],
+        )
+        get_resp = await client.get("/api/strategies/configs/ma_cross_btc")
+        update_resp = await client.put(
+            "/api/strategies/configs/ma_cross_btc",
+            json={
+                "name": "ma_cross_btc",
+                "strategy_type": "ma_cross",
+                "symbol": "ETH-USDT",
+                "timeframe": "15m",
+                "enabled": False,
+                "params": {"fast_window": 6, "slow_window": 20},
+            },
+        )
+        clone_resp = await client.post(
+            "/api/strategies/configs/ma_cross_btc/clone",
+            json={"target_name": "ma_cross_clone", "overrides": {"params": {"fast_window": 7}}},
+        )
+        delete_resp = await client.delete("/api/strategies/configs/ma_cross_btc")
+
+    assert types_resp.status_code == 200
+    assert types_resp.json()[0]["strategy_type"] == "ma_cross"
+    assert validate_resp.status_code == 200
+    assert validate_resp.json()["config"]["symbol"] == "BTC-USDT"
+    assert yaml.safe_load(yaml_resp.json()["yaml"]) == validate_resp.json()["config"]
+    assert create_resp.status_code == 201
+    assert duplicate_resp.status_code == 409
+    assert get_resp.status_code == 200
+    assert update_resp.status_code == 200
+    assert update_resp.json()["params"] == {"fast_window": 6, "slow_window": 20, "amount": 0.1}
+    assert clone_resp.status_code == 201
+    assert clone_resp.json()["name"] == "ma_cross_clone"
+    assert clone_resp.json()["enabled"] is False
+    assert delete_resp.status_code == 204
+    assert [message["type"] for message in messages] == [
+        "strategy_config_created",
+        "strategy_config_updated",
+        "strategy_config_created",
+        "strategy_config_deleted",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_strategy_config_yaml_validation_reports_syntax_and_semantic_envelopes(monkeypatch):
+    class FakeRepository:
+        def get_strategy_configs(self):
+            return []
+
+    monkeypatch.setattr(strategy_api, "Repository", FakeRepository, raising=False)
+    app = FastAPI()
+    app.include_router(strategy_api.create_router(), prefix="/api/strategies")
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        syntax_resp = await client.post(
+            "/api/strategies/configs/validate-yaml",
+            content="name: bad\nparams:\n  fast_window: [\n",
+        )
+        scalar_resp = await client.post("/api/strategies/configs/validate-yaml", content="42\n")
+        multi_resp = await client.post(
+            "/api/strategies/configs/validate-yaml",
+            content="name: a\n---\nname: b\n",
+        )
+        unknown_resp = await client.post(
+            "/api/strategies/configs/validate-yaml",
+            content=(
+                "name: x\n"
+                "strategy_type: ma_cross\n"
+                "symbol: BTC-USDT\n"
+                "timeframe: 1m\n"
+                "unexpected: true\n"
+                "params: {}\n"
+            ),
+        )
+        unsupported_resp = await client.post(
+            "/api/strategies/configs/validate",
+            json={
+                "name": "x",
+                "strategy_type": "grid",
+                "symbol": "BTC-USDT",
+                "timeframe": "1m",
+                "params": {},
+            },
+        )
+        semantic_resp = await client.post(
+            "/api/strategies/configs/validate?expected_name=expected",
+            json={
+                "name": "other",
+                "strategy_type": "ma_cross",
+                "symbol": "BTC-USDT",
+                "timeframe": "1m",
+                "params": {"fast_window": 30, "slow_window": 10},
+            },
+        )
+
+    assert syntax_resp.status_code == 400
+    assert syntax_resp.json()["detail"]["code"] == "strategy_yaml_invalid"
+    assert syntax_resp.json()["detail"]["issues"][0]["line"] == 3
+    assert syntax_resp.json()["detail"]["issues"][0]["column"] > 0
+    assert scalar_resp.status_code == 400
+    assert multi_resp.status_code == 400
+    assert unknown_resp.status_code == 400
+    assert unknown_resp.json()["detail"]["code"] == "strategy_validation_failed"
+    assert unknown_resp.json()["detail"]["issues"][0]["code"] == "unknown_field"
+    assert unsupported_resp.status_code == 400
+    assert unsupported_resp.json()["detail"]["code"] == "strategy_validation_failed"
+    assert semantic_resp.status_code == 422
+    assert {issue["code"] for issue in semantic_resp.json()["detail"]["issues"]} == {
+        "name_mismatch",
+        "invalid_window_order",
+    }
+
+
+def strategy_config_payload(**overrides):
+    payload = {
+        "name": "ma_cross_btc",
+        "strategy_type": "ma_cross",
+        "symbol": "BTC-USDT",
+        "timeframe": "1h",
+        "enabled": True,
+        "params": {"fast_window": 5, "slow_window": 20},
+    }
+    payload.update(overrides)
+    return payload
+
+
+PERSISTED_BUILTIN_STRATEGY_CASES = [
+    pytest.param(
+        {
+            "name": "persisted_ma_cross",
+            "strategy_type": "ma_cross",
+            "strategy_class": MACrossStrategy,
+            "symbol": "ETH-USDT",
+            "timeframe": "15m",
+            "params": {"fast_window": 3.0, "slow_window": 4.0, "amount": 0.25},
+            "expected_params": {"fast_window": 3, "slow_window": 4, "amount": 0.25},
+        },
+        id="ma-cross",
+    ),
+    pytest.param(
+        {
+            "name": "persisted_rsi_mean_reversion",
+            "strategy_type": "rsi_mean_reversion",
+            "strategy_class": RSIMeanReversionStrategy,
+            "symbol": "ETH-USDT",
+            "timeframe": "15m",
+            "params": {
+                "period": 14.0,
+                "oversold": 28,
+                "overbought": 72.5,
+                "amount": 0.15,
+            },
+            "expected_params": {
+                "period": 14,
+                "oversold": 28.0,
+                "overbought": 72.5,
+                "amount": 0.15,
+            },
+        },
+        id="rsi-mean-reversion",
+    ),
+    pytest.param(
+        {
+            "name": "persisted_bollinger_mean_reversion",
+            "strategy_type": "bollinger_mean_reversion",
+            "strategy_class": BollingerMeanReversionStrategy,
+            "symbol": "ETH-USDT",
+            "timeframe": "15m",
+            "params": {"window": 21.0, "stddev_multiplier": 2, "amount": 0.2},
+            "expected_params": {
+                "window": 21,
+                "stddev_multiplier": 2.0,
+                "amount": 0.2,
+            },
+        },
+        id="bollinger-mean-reversion",
+    ),
+    pytest.param(
+        {
+            "name": "persisted_donchian_breakout",
+            "strategy_type": "donchian_breakout",
+            "strategy_class": DonchianBreakoutStrategy,
+            "symbol": "ETH-USDT",
+            "timeframe": "15m",
+            "params": {
+                "entry_window": 20.0,
+                "exit_window": 9.0,
+                "amount": 0.3,
+            },
+            "expected_params": {"entry_window": 20, "exit_window": 9, "amount": 0.3},
+        },
+        id="donchian-breakout",
+    ),
+]
+
+
+class IsolatedStrategyConfigRepository:
+    configs = {}
+    positions = {}
+    fail_next_create = False
+    fail_next_update = False
+    fail_next_delete = False
+
+    def get_strategy_configs(self):
+        return list(self.configs.values())
+
+    def get_strategy_config(self, name):
+        return self.configs.get(name)
+
+    def create_strategy_config(self, config):
+        if self.fail_next_create:
+            self.__class__.fail_next_create = False
+            raise RuntimeError("create failed")
+        if config.name in self.configs:
+            raise strategy_api.IntegrityError("duplicate", None, None)
+        self.configs[config.name] = config
+        return config
+
+    def update_strategy_config(self, name, config):
+        if self.fail_next_update:
+            self.__class__.fail_next_update = False
+            raise RuntimeError("update failed")
+        existing = self.configs.get(name)
+        if existing is None:
+            return None
+        existing.strategy_type = config.strategy_type
+        existing.symbol = config.symbol
+        existing.timeframe = config.timeframe
+        existing.params = config.params
+        existing.enabled = config.enabled
+        existing.updated_at = config.updated_at
+        return existing
+
+    def delete_strategy_config(self, name):
+        if self.fail_next_delete:
+            self.__class__.fail_next_delete = False
+            raise RuntimeError("delete failed")
+        return self.configs.pop(name, None) is not None
+
+    def get_open_positions(self, strategy=None):
+        return self.positions.get(strategy, [])
+
+    def get_kill_switch(self):
+        return SimpleNamespace(engaged=False)
+
+
+class FakeMarketDataService:
+    def __init__(self):
+        self.subscriptions = []
+        self.unsubscriptions = []
+        self.start_calls = 0
+        self.stop_calls = 0
+        self._running = False
+
+    def subscribe(self, symbol, timeframe, callback):
+        self.subscriptions.append((symbol, timeframe, callback))
+
+    def unsubscribe(self, symbol, timeframe, callback):
+        self.unsubscriptions.append((symbol, timeframe, callback))
+
+    def get_recent_bars(self, symbol, timeframe, count=1):
+        return []
+
+    async def start(self):
+        self.start_calls += 1
+        self._running = True
+
+    async def stop(self):
+        self.stop_calls += 1
+        self._running = False
+
+
+@pytest.fixture
+def isolated_strategy_config_api(monkeypatch):
+    IsolatedStrategyConfigRepository.configs = {}
+    IsolatedStrategyConfigRepository.positions = {}
+    IsolatedStrategyConfigRepository.fail_next_create = False
+    IsolatedStrategyConfigRepository.fail_next_update = False
+    IsolatedStrategyConfigRepository.fail_next_delete = False
+    monkeypatch.setattr(strategy_api, "Repository", IsolatedStrategyConfigRepository, raising=False)
+    monkeypatch.setattr(strategy_api, "current_timestamp_ms", lambda: 1700000000000)
+    messages = []
+
+    async def broadcast(message):
+        messages.append(message)
+
+    runtime = strategy_api.StrategyRuntimeState()
+    app = FastAPI()
+    app.include_router(
+        strategy_api.create_router(broadcast=broadcast, runtime=runtime),
+        prefix="/api/strategies",
+    )
+    return app, runtime, messages
+
+
+@pytest.fixture
+def hermetic_persisted_builtin_strategy_api(monkeypatch):
+    IsolatedStrategyConfigRepository.configs = {}
+    IsolatedStrategyConfigRepository.positions = {}
+    IsolatedStrategyConfigRepository.fail_next_create = False
+    IsolatedStrategyConfigRepository.fail_next_update = False
+    IsolatedStrategyConfigRepository.fail_next_delete = False
+    safe_settings = AppConfig(
+        mode="paper",
+        exchange=ExchangeConfig(demo=True),
+        risk=RiskConfig(allow_live_open_orders=False, live_max_order_notional=0.0),
+    )
+    market_data = FakeMarketDataService()
+    notifier_factory_calls = []
+
+    def create_noop_risk_event_notifier():
+        notifier_factory_calls.append(True)
+        return None
+
+    def fail_live_order_handler(settings):
+        raise AssertionError("Live order handler must not be created")
+
+    async def fail_live_sync(*args, **kwargs):
+        raise AssertionError("Live state synchronization must not run")
+
+    monkeypatch.setattr(strategy_api, "Repository", IsolatedStrategyConfigRepository, raising=False)
+    monkeypatch.setattr(strategy_api, "load_runtime_settings", lambda: safe_settings, raising=False)
+    monkeypatch.setattr(
+        strategy_api,
+        "create_market_data_service",
+        lambda: market_data,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        strategy_api,
+        "create_risk_event_notifier",
+        create_noop_risk_event_notifier,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        strategy_api,
+        "create_live_order_handler",
+        fail_live_order_handler,
+        raising=False,
+    )
+    monkeypatch.setattr(strategy_api, "refresh_okx_live_state", fail_live_sync, raising=False)
+    monkeypatch.setattr(
+        strategy_api,
+        "current_timestamp_ms",
+        lambda: 1700000000000,
+        raising=False,
+    )
+    messages = []
+
+    async def broadcast(message):
+        messages.append(message)
+
+    runtime = strategy_api.StrategyRuntimeState()
+    app = FastAPI()
+    app.include_router(
+        strategy_api.create_router(broadcast=broadcast, runtime=runtime),
+        prefix="/api/strategies",
+    )
+    return SimpleNamespace(
+        app=app,
+        runtime=runtime,
+        messages=messages,
+        market_data=market_data,
+        notifier_factory_calls=notifier_factory_calls,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case",
+    PERSISTED_BUILTIN_STRATEGY_CASES,
+)
+async def test_strategy_config_api_accepts_all_registered_builtin_types(
+    hermetic_persisted_builtin_strategy_api,
+    case,
+):
+    environment = hermetic_persisted_builtin_strategy_api
+    payload = {
+        "name": case["name"],
+        "strategy_type": case["strategy_type"],
+        "symbol": case["symbol"],
+        "timeframe": case["timeframe"],
+        "params": dict(case["params"]),
+        "enabled": True,
+    }
+    expected_config = {
+        "name": case["name"],
+        "strategy_type": case["strategy_type"],
+        "symbol": case["symbol"],
+        "timeframe": case["timeframe"],
+        "params": dict(case["expected_params"]),
+        "enabled": True,
+    }
+
+    transport = ASGITransport(app=environment.app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        validate_response = await client.post(
+            "/api/strategies/configs/validate",
+            json=payload,
+        )
+        create_response = await client.post(
+            "/api/strategies/configs",
+            json=payload,
+        )
+        fetch_response = await client.get(f"/api/strategies/configs/{case['name']}")
+        configs_response = await client.get("/api/strategies/configs")
+        statuses_response = await client.get("/api/strategies")
+        types_response = await client.get("/api/strategies/types")
+
+    assert validate_response.status_code == 200
+    assert create_response.status_code == 201
+    assert fetch_response.status_code == 200
+    assert configs_response.status_code == 200
+    assert statuses_response.status_code == 200
+    assert types_response.status_code == 200
+
+    validation_result = validate_response.json()
+    validated = validation_result["config"]
+    validation_yaml = validation_result["yaml"]
+    created = create_response.json()
+    fetched = fetch_response.json()
+    configs = configs_response.json()
+    statuses = statuses_response.json()
+    strategy_types = types_response.json()
+
+    for field, expected_value in expected_config.items():
+        assert validated[field] == expected_value
+        assert created[field] == expected_value
+        assert fetched[field] == expected_value
+
+    parsed_yaml = yaml.safe_load(validation_yaml)
+    assert parsed_yaml == expected_config
+    assert any(
+        config["name"] == case["name"]
+        and all(
+            config[field] == expected_value
+            for field, expected_value in expected_config.items()
+        )
+        for config in configs
+    )
+    assert {"name": case["name"], "status": "stopped"} in statuses
+    assert case["strategy_type"] in {
+        definition["strategy_type"] for definition in strategy_types
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case",
+    PERSISTED_BUILTIN_STRATEGY_CASES,
+)
+async def test_persisted_builtin_strategy_configs_share_start_stop_lifecycle(
+    hermetic_persisted_builtin_strategy_api,
+    case,
+):
+    environment = hermetic_persisted_builtin_strategy_api
+    assert environment.runtime.strategy_status == {
+        "ma_cross": "stopped",
+    }
+    assert environment.runtime.strategy_errors == {}
+    assert environment.runtime.engines == {}
+    assert environment.runtime.starting_engines == {}
+    assert environment.runtime.lifecycle_locks == {}
+
+    payload = {
+        "name": case["name"],
+        "strategy_type": case["strategy_type"],
+        "symbol": case["symbol"],
+        "timeframe": case["timeframe"],
+        "params": dict(case["params"]),
+        "enabled": True,
+    }
+
+    transport = ASGITransport(app=environment.app)
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://test",
+    ) as client:
+        create_response = await client.post(
+            "/api/strategies/configs",
+            json=payload,
+        )
+        assert create_response.status_code == 201
+        assert environment.runtime.strategy_status == {
+            "ma_cross": "stopped",
+            case["name"]: "stopped",
+        }
+        assert environment.runtime.strategy_errors == {}
+        assert environment.runtime.engines == {}
+        assert environment.runtime.starting_engines == {}
+        assert set(environment.runtime.lifecycle_locks) == {
+            case["name"],
+        }
+        lifecycle_lock = environment.runtime.lifecycle_locks[case["name"]]
+        environment.messages.clear()
+
+        start_response = await client.post(
+            f"/api/strategies/{case['name']}/start"
+        )
+
+        assert start_response.status_code == 200
+        assert start_response.json() == {
+            "status": "started",
+            "strategy": case["name"],
+        }
+        assert environment.runtime.strategy_status == {
+            "ma_cross": "stopped",
+            case["name"]: "running",
+        }
+        assert environment.runtime.strategy_errors == {}
+        assert set(environment.runtime.engines) == {
+            case["name"],
+        }
+        assert environment.runtime.starting_engines == {}
+        assert set(environment.runtime.lifecycle_locks) == {
+            case["name"],
+        }
+        assert environment.runtime.lifecycle_locks[case["name"]] is lifecycle_lock
+
+        engine = environment.runtime.engines[case["name"]]
+        assert isinstance(engine, BotEngine)
+        assert len(engine.strategies) == 1
+        strategy = engine.strategies[0]
+        assert isinstance(strategy, case["strategy_class"])
+        assert strategy.name == case["name"]
+        assert strategy.symbol == case["symbol"]
+        assert strategy.timeframe == case["timeframe"]
+        for field, expected_value in case["expected_params"].items():
+            assert getattr(strategy, field) == expected_value
+        assert isinstance(strategy._order_manager, UnifiedOrderManager)
+
+        assert len(environment.market_data.subscriptions) == 1
+        subscribed_symbol, subscribed_timeframe, subscribed_callback = (
+            environment.market_data.subscriptions[0]
+        )
+        assert subscribed_symbol == case["symbol"]
+        assert subscribed_timeframe == case["timeframe"]
+        assert environment.market_data.start_calls == 1
+        assert environment.messages == [
+            {
+                "type": "strategy_status",
+                "strategy": case["name"],
+                "status": "running",
+                "timestamp": 1700000000000,
+            }
+        ]
+
+        stop_response = await client.post(
+            f"/api/strategies/{case['name']}/stop"
+        )
+
+    assert stop_response.status_code == 200
+    assert stop_response.json() == {
+        "status": "stopped",
+        "strategy": case["name"],
+    }
+    assert environment.runtime.strategy_status == {
+        "ma_cross": "stopped",
+        case["name"]: "stopped",
+    }
+    assert environment.runtime.strategy_errors == {}
+    assert environment.runtime.engines == {}
+    assert environment.runtime.starting_engines == {}
+    assert set(environment.runtime.lifecycle_locks) == {
+        case["name"],
+    }
+    assert environment.runtime.lifecycle_locks[case["name"]] is lifecycle_lock
+    assert len(environment.market_data.unsubscriptions) == 1
+    unsubscribed_symbol, unsubscribed_timeframe, unsubscribed_callback = (
+        environment.market_data.unsubscriptions[0]
+    )
+    assert unsubscribed_symbol == case["symbol"]
+    assert unsubscribed_timeframe == case["timeframe"]
+    assert unsubscribed_callback is subscribed_callback
+    assert environment.market_data.stop_calls == 1
+    assert environment.market_data._running is False
+    assert environment.messages == [
+        {
+            "type": "strategy_status",
+            "strategy": case["name"],
+            "status": "running",
+            "timestamp": 1700000000000,
+        },
+        {
+            "type": "strategy_status",
+            "strategy": case["name"],
+            "status": "stopped",
+            "timestamp": 1700000000000,
+        },
+    ]
+    assert not any(
+        message["type"] == "strategy_error"
+        for message in environment.messages
+    )
+    assert environment.notifier_factory_calls == [True]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case",
+    PERSISTED_BUILTIN_STRATEGY_CASES,
+)
+async def test_disabled_persisted_builtin_configs_cannot_start(
+    hermetic_persisted_builtin_strategy_api,
+    monkeypatch,
+    case,
+):
+    environment = hermetic_persisted_builtin_strategy_api
+    assert environment.runtime.strategy_status == {
+        "ma_cross": "stopped",
+    }
+    assert environment.runtime.strategy_errors == {}
+    assert environment.runtime.engines == {}
+    assert environment.runtime.starting_engines == {}
+    assert environment.runtime.lifecycle_locks == {}
+
+    payload = {
+        "name": case["name"],
+        "strategy_type": case["strategy_type"],
+        "symbol": case["symbol"],
+        "timeframe": case["timeframe"],
+        "params": dict(case["params"]),
+        "enabled": False,
+    }
+
+    transport = ASGITransport(app=environment.app)
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://test",
+    ) as client:
+        create_response = await client.post(
+            "/api/strategies/configs",
+            json=payload,
+        )
+        assert create_response.status_code == 201
+        assert environment.runtime.strategy_status == {
+            "ma_cross": "stopped",
+            case["name"]: "stopped",
+        }
+        assert environment.runtime.strategy_errors == {}
+        assert environment.runtime.engines == {}
+        assert environment.runtime.starting_engines == {}
+        assert set(environment.runtime.lifecycle_locks) == {
+            case["name"],
+        }
+        lifecycle_lock = environment.runtime.lifecycle_locks[case["name"]]
+        environment.messages.clear()
+
+        def fail_runtime_construction(*args, **kwargs):
+            raise AssertionError(
+                "Disabled strategy must not construct runtime dependencies"
+            )
+
+        monkeypatch.setattr(
+            environment.runtime.registry,
+            "create_instance",
+            fail_runtime_construction,
+        )
+        monkeypatch.setattr(strategy_api, "Repository", fail_runtime_construction)
+        monkeypatch.setattr(
+            strategy_api,
+            "create_order_manager",
+            fail_runtime_construction,
+        )
+        monkeypatch.setattr(strategy_api, "BotEngine", fail_runtime_construction)
+
+        start_response = await client.post(
+            f"/api/strategies/{case['name']}/start"
+        )
+
+    assert start_response.status_code == 409
+    assert start_response.json()["detail"] == "Strategy config is disabled"
+    assert environment.runtime.strategy_status == {
+        "ma_cross": "stopped",
+        case["name"]: "stopped",
+    }
+    assert environment.runtime.strategy_errors == {}
+    assert environment.runtime.engines == {}
+    assert environment.runtime.starting_engines == {}
+    assert set(environment.runtime.lifecycle_locks) == {
+        case["name"],
+    }
+    assert environment.runtime.lifecycle_locks[case["name"]] is lifecycle_lock
+    assert environment.messages == []
+
+
+def assert_strategy_validation_envelope(response, *, issue_codes):
+    detail = response.json()["detail"]
+    assert detail["code"] == "strategy_validation_failed"
+    assert detail["message"] == "Strategy configuration is invalid"
+    assert {issue["code"] for issue in detail["issues"]} == set(issue_codes)
+    assert all(
+        set(issue) == {"path", "code", "message", "line", "column"}
+        for issue in detail["issues"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_strategy_config_update_rejects_strategy_type_change(
+    isolated_strategy_config_api,
+):
+    app, _runtime, messages = isolated_strategy_config_api
+    original_params = {"fast_window": 5, "slow_window": 20, "amount": 0.1}
+    IsolatedStrategyConfigRepository.configs["ma_cross_btc"] = StrategyConfigRecord(
+        **strategy_config_payload(enabled=False, params=dict(original_params)),
+        created_at=1,
+        updated_at=1,
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.put(
+            "/api/strategies/configs/ma_cross_btc",
+            json=strategy_config_payload(
+                enabled=False,
+                strategy_type="rsi_mean_reversion",
+                params={
+                    "period": 14,
+                    "oversold": 30,
+                    "overbought": 70,
+                    "amount": 0.1,
+                },
+            ),
+        )
+
+    assert response.status_code == 422
+    assert_strategy_validation_envelope(response, issue_codes={"strategy_type_mismatch"})
+    issue = response.json()["detail"]["issues"][0]
+    assert issue["path"] == "strategy_type"
+    assert issue["line"] is None
+    assert issue["column"] is None
+    stored = IsolatedStrategyConfigRepository.configs["ma_cross_btc"]
+    assert stored.strategy_type == "ma_cross"
+    assert stored.params == original_params
+    assert messages == []
+
+
+@pytest.mark.asyncio
+async def test_strategy_config_json_mutations_pass_raw_mapping_to_registry(
+    isolated_strategy_config_api,
+):
+    app, _runtime, _messages = isolated_strategy_config_api
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        malformed_resp = await client.post(
+            "/api/strategies/configs",
+            content='{"name":',
+            headers={"content-type": "application/json"},
+        )
+        list_root_resp = await client.post("/api/strategies/configs", json=[])
+        unknown_create_resp = await client.post(
+            "/api/strategies/configs",
+            json=strategy_config_payload(unexpected=True),
+        )
+        enabled_string_resp = await client.post(
+            "/api/strategies/configs",
+            json=strategy_config_payload(name="ma_cross_eth", enabled="false"),
+        )
+        await client.post("/api/strategies/configs", json=strategy_config_payload())
+        unknown_update_resp = await client.put(
+            "/api/strategies/configs/ma_cross_btc",
+            json=strategy_config_payload(extra="nope"),
+        )
+        trimmed_name_resp = await client.put(
+            "/api/strategies/configs/ma_cross_btc",
+            json=strategy_config_payload(
+                name=" ma_cross_btc ",
+                params={"fast_window": 6, "slow_window": 20},
+            ),
+        )
+        rename_resp = await client.put(
+            "/api/strategies/configs/ma_cross_btc",
+            json=strategy_config_payload(name="ma_cross_eth"),
+        )
+
+    assert malformed_resp.status_code == 400
+    assert malformed_resp.json()["detail"]["code"] == "malformed_config"
+    assert list_root_resp.status_code == 400
+    assert list_root_resp.json()["detail"]["issues"][0]["code"] == "invalid_root"
+    assert unknown_create_resp.status_code == 422
+    assert_strategy_validation_envelope(unknown_create_resp, issue_codes={"unknown_field"})
+    assert enabled_string_resp.status_code == 422
+    assert_strategy_validation_envelope(enabled_string_resp, issue_codes={"invalid_type"})
+    assert unknown_update_resp.status_code == 422
+    assert_strategy_validation_envelope(unknown_update_resp, issue_codes={"unknown_field"})
+    assert trimmed_name_resp.status_code == 200
+    assert rename_resp.status_code == 422
+    assert_strategy_validation_envelope(rename_resp, issue_codes={"name_mismatch"})
+
+
+@pytest.mark.asyncio
+async def test_strategy_config_yaml_and_json_validation_envelopes_match(
+    isolated_strategy_config_api,
+):
+    app, _runtime, _messages = isolated_strategy_config_api
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        syntax_resp = await client.post(
+            "/api/strategies/configs/validate-yaml",
+            content="name: [\n",
+        )
+        root_resp = await client.post("/api/strategies/configs/validate-yaml", content="[]\n")
+        multi_resp = await client.post(
+            "/api/strategies/configs/validate-yaml",
+            content="name: a\n---\nname: b\n",
+        )
+        yaml_unknown_resp = await client.post(
+            "/api/strategies/configs/validate-yaml",
+            content=(
+                "name: ma_cross_btc\nstrategy_type: ma_cross\nsymbol: BTC-USDT\n"
+                "timeframe: 1h\nenabled: true\nunexpected: true\nparams: {}\n"
+            ),
+        )
+        unsupported_resp = await client.post(
+            "/api/strategies/configs/validate",
+            json=strategy_config_payload(strategy_type="grid"),
+        )
+        semantic_json_resp = await client.post(
+            "/api/strategies/configs/validate?expected_name=ma_cross_btc",
+            json=strategy_config_payload(
+                name="other",
+                params={"fast_window": 30, "slow_window": 10, "unknown": 1},
+            ),
+        )
+        semantic_yaml_resp = await client.post(
+            "/api/strategies/configs/validate-yaml?expected_name=ma_cross_btc",
+            content=(
+                "name: other\nstrategy_type: ma_cross\nsymbol: BTC-USDT\ntimeframe: 1h\n"
+                "params:\n  fast_window: 30\n  slow_window: 10\n  unknown: 1\n"
+            ),
+        )
+        invalid_utf8_resp = await client.post(
+            "/api/strategies/configs/validate-yaml",
+            content=b"\xff\xfe\xfa",
+        )
+
+    for response in (syntax_resp, root_resp, multi_resp, invalid_utf8_resp):
+        assert response.status_code == 400
+        assert response.json()["detail"]["code"] == "strategy_yaml_invalid"
+        assert response.json()["detail"]["message"] == "Strategy YAML is invalid"
+        issue = response.json()["detail"]["issues"][0]
+        assert issue["line"] is None or issue["line"] >= 1
+        assert issue["column"] is None or issue["column"] >= 1
+    assert yaml_unknown_resp.status_code == 400
+    assert_strategy_validation_envelope(yaml_unknown_resp, issue_codes={"unknown_field"})
+    assert unsupported_resp.status_code == 400
+    assert_strategy_validation_envelope(unsupported_resp, issue_codes={"unsupported_strategy_type"})
+    assert semantic_json_resp.status_code == 422
+    assert_strategy_validation_envelope(
+        semantic_json_resp,
+        issue_codes={"unknown_param", "invalid_window_order", "name_mismatch"},
+    )
+    assert semantic_yaml_resp.status_code == 422
+    assert semantic_yaml_resp.json()["detail"] == semantic_json_resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_strategy_config_lifecycle_safety_isolated_from_real_runtime(
+    isolated_strategy_config_api,
+    monkeypatch,
+):
+    app, runtime, messages = isolated_strategy_config_api
+    created_engines = []
+
+    class SentinelEngine:
+        def __init__(self, *args, **kwargs):
+            created_engines.append(self)
+
+    monkeypatch.setattr(strategy_api, "BotEngine", SentinelEngine)
+    IsolatedStrategyConfigRepository.configs["ma_cross_btc"] = StrategyConfigRecord(
+        **strategy_config_payload(enabled=False),
+        created_at=1,
+        updated_at=1,
+    )
+    IsolatedStrategyConfigRepository.configs["ma_cross_eth"] = StrategyConfigRecord(
+        **strategy_config_payload(name="ma_cross_eth", symbol="ETH-USDT"),
+        created_at=1,
+        updated_at=1,
+    )
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        disabled_start_resp = await client.post("/api/strategies/ma_cross_btc/start")
+        runtime.engines["ma_cross_eth"] = object()
+        active_update_resp = await client.put(
+            "/api/strategies/configs/ma_cross_eth",
+            json=strategy_config_payload(name="ma_cross_eth", enabled=True),
+        )
+        active_disable_resp = await client.put(
+            "/api/strategies/configs/ma_cross_eth",
+            json=strategy_config_payload(name="ma_cross_eth", enabled=False),
+        )
+        active_delete_resp = await client.delete("/api/strategies/configs/ma_cross_eth")
+        runtime.engines.pop("ma_cross_eth")
+        runtime.starting_engines["ma_cross_eth"] = object()
+        starting_update_resp = await client.put(
+            "/api/strategies/configs/ma_cross_eth",
+            json=strategy_config_payload(name="ma_cross_eth"),
+        )
+        starting_delete_resp = await client.delete("/api/strategies/configs/ma_cross_eth")
+        runtime.starting_engines.pop("ma_cross_eth")
+        IsolatedStrategyConfigRepository.positions["ma_cross_eth"] = [
+            PositionRecord(
+                strategy="ma_cross_eth",
+                symbol="ETH-USDT",
+                side="long",
+                amount=0.1,
+                entry_price=1,
+                leverage=1,
+                timestamp=1,
+            )
+        ]
+        open_update_resp = await client.put(
+            "/api/strategies/configs/ma_cross_eth",
+            json=strategy_config_payload(name="ma_cross_eth"),
+        )
+        open_disable_resp = await client.put(
+            "/api/strategies/configs/ma_cross_eth",
+            json=strategy_config_payload(name="ma_cross_eth", enabled=False),
+        )
+        open_delete_resp = await client.delete("/api/strategies/configs/ma_cross_eth")
+        IsolatedStrategyConfigRepository.positions["ma_cross_eth"] = [
+            PositionRecord(
+                strategy="ma_cross_eth",
+                symbol="ETH-USDT",
+                side="long",
+                amount=0,
+                entry_price=1,
+                leverage=1,
+                timestamp=1,
+            )
+        ]
+        zero_update_resp = await client.put(
+            "/api/strategies/configs/ma_cross_eth",
+            json=strategy_config_payload(
+                name="ma_cross_eth",
+                params={"fast_window": 6, "slow_window": 20},
+            ),
+        )
+        runtime.engines["ma_cross_eth"] = object()
+        active_source_clone_resp = await client.post(
+            "/api/strategies/configs/ma_cross_eth/clone",
+            json={"target_name": "ma_cross_active_source_clone", "overrides": {}},
+        )
+        runtime.engines.pop("ma_cross_eth")
+        clone_resp = await client.post(
+            "/api/strategies/configs/ma_cross_eth/clone",
+            json={"target_name": "ma_cross_clone", "overrides": {}},
+        )
+        invalid_override_params_resp = await client.post(
+            "/api/strategies/configs/ma_cross_eth/clone",
+            json={
+                "target_name": "ma_cross_invalid_params",
+                "overrides": {"params": ["not", "a", "mapping"]},
+            },
+        )
+        runtime.engines["ma_cross_running_target"] = object()
+        create_active_target_resp = await client.post(
+            "/api/strategies/configs",
+            json=strategy_config_payload(name="ma_cross_running_target"),
+        )
+        clone_active_target_resp = await client.post(
+            "/api/strategies/configs/ma_cross_eth/clone",
+            json={"target_name": "ma_cross_running_target", "overrides": {}},
+        )
+        unknown_clone_field_resp = await client.post(
+            "/api/strategies/configs/ma_cross_eth/clone",
+            json={"target_name": "ma_cross_unknown", "overrides": {}, "extra": True},
+        )
+        unknown_override_resp = await client.post(
+            "/api/strategies/configs/ma_cross_eth/clone",
+            json={"target_name": "ma_cross_override", "overrides": {"unexpected": True}},
+        )
+        IsolatedStrategyConfigRepository.fail_next_update = True
+        failed_update_resp = await client.put(
+            "/api/strategies/configs/ma_cross_eth",
+            json=strategy_config_payload(
+                name="ma_cross_eth",
+                params={"fast_window": 7, "slow_window": 20},
+            ),
+        )
+        IsolatedStrategyConfigRepository.fail_next_create = True
+        failed_create_resp = await client.post(
+            "/api/strategies/configs",
+            json=strategy_config_payload(name="ma_cross_create_failure"),
+        )
+        IsolatedStrategyConfigRepository.fail_next_create = True
+        failed_clone_resp = await client.post(
+            "/api/strategies/configs/ma_cross_eth/clone",
+            json={"target_name": "ma_cross_clone_failure", "overrides": {}},
+        )
+        IsolatedStrategyConfigRepository.fail_next_delete = True
+        failed_delete_resp = await client.delete("/api/strategies/configs/ma_cross_eth")
+
+    assert disabled_start_resp.status_code == 409
+    assert disabled_start_resp.json()["detail"] == "Strategy config is disabled"
+    assert created_engines == []
+    for response in (
+        active_update_resp,
+        active_disable_resp,
+        active_delete_resp,
+        starting_update_resp,
+        starting_delete_resp,
+    ):
+        assert response.status_code == 409
+        assert response.json()["detail"] == "Strategy is active"
+    for response in (open_update_resp, open_disable_resp):
+        assert response.status_code == 409
+        assert response.json()["detail"] == "Cannot update strategy config with open positions"
+    assert open_delete_resp.status_code == 409
+    assert open_delete_resp.json()["detail"] == "Cannot delete strategy config with open positions"
+    assert zero_update_resp.status_code == 200
+    assert active_source_clone_resp.status_code == 201
+    assert active_source_clone_resp.json()["enabled"] is False
+    assert clone_resp.status_code == 201
+    assert clone_resp.json()["enabled"] is False
+    assert invalid_override_params_resp.status_code == 422
+    assert_strategy_validation_envelope(
+        invalid_override_params_resp,
+        issue_codes={"invalid_type"},
+    )
+    invalid_override_params_issue = invalid_override_params_resp.json()["detail"]["issues"][0]
+    assert invalid_override_params_issue["path"] == "overrides.params"
+    assert invalid_override_params_issue["code"] == "invalid_type"
+    assert invalid_override_params_issue["line"] is None
+    assert invalid_override_params_issue["column"] is None
+    for response in (create_active_target_resp, clone_active_target_resp):
+        assert response.status_code == 409
+        assert response.json()["detail"] == "Strategy is active"
+    assert unknown_clone_field_resp.status_code == 422
+    assert_strategy_validation_envelope(unknown_override_resp, issue_codes={"unknown_field"})
+    for response, expected_detail, unsafe_detail in (
+        (failed_update_resp, "Failed to update strategy config", "update failed"),
+        (failed_create_resp, "Failed to create strategy config", "create failed"),
+        (failed_clone_resp, "Failed to clone strategy config", "create failed"),
+        (failed_delete_resp, "Failed to delete strategy config", "delete failed"),
+    ):
+        assert response.status_code == 500
+        assert response.json()["detail"] == expected_detail
+        assert unsafe_detail not in response.text
+    assert IsolatedStrategyConfigRepository.configs["ma_cross_eth"].params["fast_window"] == 6
+    assert [message["type"] for message in messages] == [
+        "strategy_config_updated",
+        "strategy_config_created",
+        "strategy_config_created",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_config_delete_event_timestamp_is_captured_before_delayed_broadcast(monkeypatch):
+    class DelayingLifecycleLock:
+        def __init__(self, lock):
+            self.lock = lock
+
+        async def __aenter__(self):
+            await self.lock.acquire()
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            self.lock.release()
+            if DelayDeleteRepository.delay_after_delete:
+                DelayDeleteRepository.delay_after_delete = False
+                delete_lock_released.set()
+                await release_delete_broadcast.wait()
+            return False
+
+    class DelayingRuntime(strategy_api.StrategyRuntimeState):
+        def lifecycle_lock(self, name):
+            lock = self.lifecycle_locks.get(name)
+            if lock is None:
+                lock = DelayingLifecycleLock(asyncio.Lock())
+                self.lifecycle_locks[name] = lock
+            return lock
+
+    class DelayDeleteRepository(IsolatedStrategyConfigRepository):
+        delay_after_delete = False
+
+        def delete_strategy_config(self, name):
+            deleted = super().delete_strategy_config(name)
+            if deleted:
+                self.__class__.delay_after_delete = True
+            return deleted
+
+    timestamps = iter([1000, 2000, 3000, 4000, 5000])
+    monkeypatch.setattr(strategy_api, "Repository", DelayDeleteRepository, raising=False)
+    monkeypatch.setattr(strategy_api, "current_timestamp_ms", lambda: next(timestamps))
+    DelayDeleteRepository.configs = {}
+    DelayDeleteRepository.positions = {}
+    delete_lock_released = asyncio.Event()
+    release_delete_broadcast = asyncio.Event()
+    messages = []
+
+    async def broadcast(message):
+        messages.append(message)
+
+    app = FastAPI()
+    app.include_router(
+        strategy_api.create_router(broadcast=broadcast, runtime=DelayingRuntime()),
+        prefix="/api/strategies",
+    )
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        initial_resp = await client.post("/api/strategies/configs", json=strategy_config_payload())
+        delete_task = asyncio.create_task(client.delete("/api/strategies/configs/ma_cross_btc"))
+        await asyncio.wait_for(delete_lock_released.wait(), timeout=1)
+        recreate_resp = await client.post("/api/strategies/configs", json=strategy_config_payload())
+        release_delete_broadcast.set()
+        delete_resp = await asyncio.wait_for(delete_task, timeout=1)
+
+    assert initial_resp.status_code == 201
+    assert recreate_resp.status_code == 201
+    assert delete_resp.status_code == 204
+    delete_message = next(
+        message for message in messages if message["type"] == "strategy_config_deleted"
+    )
+    recreate_message = messages[-2]
+    assert recreate_message["type"] == "strategy_config_created"
+    assert delete_message["timestamp"] == 2000
+    assert recreate_message["timestamp"] == 3000
+    assert delete_message["timestamp"] < recreate_message["timestamp"]
+
+
+@pytest.mark.asyncio
+async def test_strategy_lifecycle_locks_are_independent_by_name():
+    runtime = strategy_api.StrategyRuntimeState()
+    first_lock = runtime.lifecycle_lock("ma_cross_btc")
+    second_lock = runtime.lifecycle_lock("ma_cross_eth")
+
+    async with first_lock:
+        await asyncio.wait_for(second_lock.acquire(), timeout=0.01)
+        second_lock.release()
+        same_name_acquired = asyncio.Event()
+
+        async def acquire_same_name_lock():
+            async with runtime.lifecycle_lock("ma_cross_btc"):
+                same_name_acquired.set()
+
+        same_name_task = asyncio.create_task(acquire_same_name_lock())
+        await asyncio.sleep(0)
+        assert not same_name_acquired.is_set()
+
+    await asyncio.wait_for(same_name_task, timeout=0.01)
+    assert same_name_acquired.is_set()
+
+
+@pytest.mark.asyncio
+async def test_strategy_start_rechecks_config_after_lifecycle_lock(monkeypatch):
+    class VanishingRepository(IsolatedStrategyConfigRepository):
+        lookups = 0
+
+        def get_strategy_config(self, name):
+            self.__class__.lookups += 1
+            if self.lookups == 1:
+                return StrategyConfigRecord(
+                    **strategy_config_payload(name=name), created_at=1, updated_at=1
+                )
+            return None
+
+    VanishingRepository.configs = {}
+    VanishingRepository.positions = {}
+    VanishingRepository.lookups = 0
+    monkeypatch.setattr(strategy_api, "Repository", VanishingRepository, raising=False)
+    app = FastAPI()
+    app.include_router(strategy_api.create_router(), prefix="/api/strategies")
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/api/strategies/vanishing/start")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Strategy not found"
 
 
 def test_create_order_manager_uses_falsy_repository_instance(monkeypatch):
@@ -899,7 +2225,7 @@ def test_create_risk_manager_without_settings_uses_max_position_only(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_strategy_config_api_rejects_non_ma_cross_strategy_type(monkeypatch):
+async def test_strategy_config_api_rejects_unsupported_strategy_type(monkeypatch):
     class FakeRepository:
         def get_strategy_configs(self):
             return []
@@ -921,7 +2247,10 @@ async def test_strategy_config_api_rejects_non_ma_cross_strategy_type(monkeypatc
         )
 
     assert resp.status_code == 400
-    assert resp.json()["detail"] == "Only ma_cross strategy configs are supported"
+    detail = resp.json()["detail"]
+    assert detail["code"] == "strategy_validation_failed"
+    assert detail["message"] == "Strategy configuration is invalid"
+    assert detail["issues"][0]["code"] == "unsupported_strategy_type"
 
 
 @pytest.mark.asyncio
@@ -981,6 +2310,7 @@ async def test_start_persisted_strategy_config_uses_strategy_type_and_params(mon
     assert {"name": "ma_cross_btc", "status": "running"} in strategies_resp.json()
     assert ConfigurableStrategy.created[0].name == "ma_cross_btc"
     assert ConfigurableStrategy.created[0].symbol == "BTC-USDT-SWAP"
+    assert ConfigurableStrategy.created[0].timeframe == "15m"
     assert ConfigurableStrategy.created[0].fast_window == 5
     assert ConfigurableStrategy.created[0].slow_window == 20
     assert ConfigurableStrategy.created[0].amount == 0.2
@@ -1033,6 +2363,7 @@ async def test_start_persisted_strategy_config_can_override_builtin_name(monkeyp
     assert resp.status_code == 200
     assert ConfigurableStrategy.created[0].name == "ma_cross"
     assert ConfigurableStrategy.created[0].symbol == "ETH-USDT"
+    assert ConfigurableStrategy.created[0].timeframe == "1h"
     assert ConfigurableStrategy.created[0].fast_window == 5
     assert ConfigurableStrategy.created[0].slow_window == 20
 
@@ -3184,6 +4515,8 @@ def test_websocket_accepts_connection_and_sends_snapshot(monkeypatch):
             "positions": [],
             "orders": [],
             "strategies": [{"name": "ma_cross", "status": "stopped"}],
+            "strategy_configs": [],
+            "strategy_errors": {},
         },
     }
 

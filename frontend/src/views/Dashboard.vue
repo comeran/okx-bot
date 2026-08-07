@@ -9,8 +9,8 @@ import type { ComposeOption, ECharts } from 'echarts/core';
 import type { LegendComponentOption, TooltipComponentOption } from 'echarts/components';
 import { useI18n } from 'vue-i18n';
 
-import { useWebSocket } from '@/composables/useWebSocket';
 import { useDashboardStore } from '@/stores/dashboard';
+import { useStrategiesStore } from '@/stores/strategies';
 import type { AssetBalance } from '@/types/dashboard';
 import {
   formatRuntimeCurrency,
@@ -34,9 +34,7 @@ type AssetAllocationRow = AssetBalance & {
 
 const { t } = useI18n();
 const dashboard = useDashboardStore();
-const websocket = useWebSocket('/ws', {
-  onMessage: dashboard.addWebSocketMessage,
-});
+const strategies = useStrategiesStore();
 
 const latestMessages = computed(() => dashboard.websocketMessages.slice(0, 5));
 const lastUpdatedText = computed(() => formatRuntimeTime(dashboard.lastUpdatedAt ?? undefined));
@@ -117,10 +115,6 @@ async function updateAccountAllocationChart() {
   accountAllocationChart.resize();
 }
 
-watch(websocket.connected, (connected) => {
-  dashboard.setWebSocketConnected(connected);
-});
-
 watch(
   accountAllocationPieData,
   () => {
@@ -131,7 +125,7 @@ watch(
 
 onMounted(() => {
   void dashboard.loadInitialData();
-  websocket.connect();
+  void strategies.loadInitialData();
   window.addEventListener('resize', resizeAccountAllocationChart);
   void updateAccountAllocationChart();
 });
@@ -203,7 +197,7 @@ onBeforeUnmount(() => {
       <el-col :xs="24" :sm="12" :lg="4">
         <el-card shadow="hover" v-loading="dashboard.loading">
           <template #header>{{ t('dashboard.activeStrategies') }}</template>
-          <div class="metric">{{ dashboard.activeStrategyCount }}</div>
+          <div class="metric">{{ strategies.activeStrategyCount }}</div>
         </el-card>
       </el-col>
     </el-row>
@@ -348,8 +342,8 @@ onBeforeUnmount(() => {
       <el-col :xs="24" :lg="12">
         <el-card shadow="never" v-loading="dashboard.loading">
           <template #header>{{ t('dashboard.strategies') }}</template>
-          <el-empty v-if="dashboard.strategies.length === 0" :description="t('dashboard.noStrategies')" />
-          <el-table v-else :data="dashboard.strategies" size="small">
+          <el-empty v-if="strategies.runtimeSummaries.length === 0" :description="t('dashboard.noStrategies')" />
+          <el-table v-else :data="strategies.runtimeSummaries" size="small">
             <el-table-column prop="name" :label="t('common.name')" min-width="140" />
             <el-table-column :label="t('common.status')" min-width="110">
               <template #default="{ row }">
@@ -360,7 +354,7 @@ onBeforeUnmount(() => {
             </el-table-column>
             <el-table-column :label="t('dashboard.lastError')" min-width="180">
               <template #default="{ row }">
-                {{ formatRuntimeText(dashboard.strategyErrors[row.name]) }}
+                {{ formatRuntimeText(strategies.errors[row.name]) }}
               </template>
             </el-table-column>
           </el-table>

@@ -1,3 +1,5 @@
+import math
+
 import pytest
 
 from src.core.types import Bar, OrderSide, OrderType
@@ -83,13 +85,42 @@ async def test_ma_cross_sells_when_fast_ma_crosses_below_slow_ma() -> None:
     assert manager.submitted[1]["strategy_name"] == "ma_cross"
 
 
-def test_ma_cross_rejects_invalid_windows() -> None:
-    with pytest.raises(ValueError, match="fast_window must be positive"):
-        MACrossStrategy(fast_window=0, slow_window=3)
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"fast_window": True, "slow_window": 3}, "fast_window must be positive"),
+        ({"fast_window": 2.5, "slow_window": 3}, "fast_window must be positive"),
+        ({"fast_window": math.nan, "slow_window": 3}, "fast_window must be positive"),
+        ({"fast_window": math.inf, "slow_window": 3}, "fast_window must be positive"),
+        ({"fast_window": "2", "slow_window": 3}, "fast_window must be positive"),
+        ({"fast_window": 2, "slow_window": True}, "slow_window must be positive"),
+        ({"fast_window": 2, "slow_window": 3.5}, "slow_window must be positive"),
+        ({"fast_window": 2, "slow_window": math.nan}, "slow_window must be positive"),
+        ({"fast_window": 2, "slow_window": math.inf}, "slow_window must be positive"),
+        ({"fast_window": 2, "slow_window": "3"}, "slow_window must be positive"),
+        ({"fast_window": 2, "slow_window": 3, "amount": True}, "amount must be positive"),
+        ({"fast_window": 2, "slow_window": 3, "amount": math.nan}, "amount must be positive"),
+        ({"fast_window": 2, "slow_window": 3, "amount": math.inf}, "amount must be positive"),
+        ({"fast_window": 2, "slow_window": 3, "amount": "1"}, "amount must be positive"),
+    ],
+)
+def test_ma_cross_rejects_invalid_constructor_inputs(kwargs, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        MACrossStrategy(**kwargs)
 
-    with pytest.raises(ValueError, match="slow_window must be positive"):
-        MACrossStrategy(fast_window=2, slow_window=0)
 
+def test_ma_cross_normalizes_integral_float_windows_and_numeric_amount() -> None:
+    strategy = MACrossStrategy(fast_window=2.0, slow_window=3.0, amount=1)
+
+    assert strategy.fast_window == 2
+    assert type(strategy.fast_window) is int
+    assert strategy.slow_window == 3
+    assert type(strategy.slow_window) is int
+    assert strategy.amount == 1.0
+    assert type(strategy.amount) is float
+
+
+def test_ma_cross_rejects_invalid_window_order() -> None:
     with pytest.raises(ValueError, match="fast_window must be less than or equal to slow_window"):
         MACrossStrategy(fast_window=5, slow_window=3)
 
@@ -102,3 +133,5 @@ def test_register_ma_cross_adds_strategy_to_registry() -> None:
     strategy = registry.create("ma_cross")
     assert isinstance(strategy, MACrossStrategy)
     assert strategy.name == "ma_cross"
+    assert strategy.symbol == "BTC-USDT"
+    assert strategy.timeframe == "1m"
