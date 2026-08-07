@@ -56,11 +56,6 @@ export interface Order {
   reduce_only?: boolean;
 }
 
-export interface StrategySummary {
-  name: string;
-  status: string;
-}
-
 export interface MarketTicker {
   symbol: string;
   last?: number | string;
@@ -73,7 +68,6 @@ export interface DashboardSnapshot {
   account?: AccountSummary | null;
   positions?: Position[];
   orders?: Order[];
-  strategies?: StrategySummary[];
 }
 
 interface DashboardMessageBase {
@@ -107,29 +101,9 @@ export interface OrdersDashboardWebSocketMessage extends DashboardMessageBase {
   data?: Order[];
 }
 
-export interface StrategiesDashboardWebSocketMessage extends DashboardMessageBase {
-  type: 'strategies';
-  strategies?: StrategySummary[];
-  data?: StrategySummary[];
-}
-
-export interface StrategyStatusDashboardWebSocketMessage extends DashboardMessageBase {
-  type: 'strategy_status';
-  strategy: string;
-  status: string;
-  timestamp?: number;
-}
-
-export interface StrategyErrorDashboardWebSocketMessage extends DashboardMessageBase {
-  type: 'strategy_error';
-  strategy: string;
-  error: string;
-  timestamp?: number;
-}
-
 export interface SnapshotDashboardWebSocketMessage extends DashboardMessageBase, DashboardSnapshot {
   type: 'snapshot';
-  data?: DashboardSnapshot;
+  data?: DashboardSnapshot & Record<string, unknown>;
 }
 
 export interface UnknownDashboardWebSocketMessage extends DashboardMessageBase {
@@ -143,8 +117,5 @@ export type DashboardWebSocketMessage =
   | AccountDashboardWebSocketMessage
   | PositionsDashboardWebSocketMessage
   | OrdersDashboardWebSocketMessage
-  | StrategiesDashboardWebSocketMessage
-  | StrategyStatusDashboardWebSocketMessage
-  | StrategyErrorDashboardWebSocketMessage
   | SnapshotDashboardWebSocketMessage
   | UnknownDashboardWebSocketMessage;

@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "vue-tsc --noEmit && vite build",
+    "test": "vitest --config vite.config.ts",
+    "type-check": "vue-tsc -p tsconfig.json --noEmit",
     "preview": "vite preview"
   },
   "dependencies": {

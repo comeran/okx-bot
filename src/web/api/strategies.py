@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, HTTPException, Query, Request, Response
+from sqlalchemy.exc import IntegrityError
 
 from src.core.config import BacktestConfig
 from src.core.engine import BotEngine
@@ -27,10 +28,20 @@ from src.order.manager import UnifiedOrderManager
 from src.order.mark_to_market import PaperMarkToMarketService
 from src.order.router import OrderHandler, OrderRouter
 from src.risk.manager import RiskManager
-from src.strategy.builtin.ma_cross import register_ma_cross
+from src.strategy.builtin import register_builtin_strategies
+from src.strategy.definitions import (
+    NormalizedStrategyConfig,
+    StrategyConfigValidationError,
+    StrategyValidationIssue,
+)
 from src.strategy.registry import StrategyRegistry
 from src.web.api import settings as settings_api
 from src.web.api import trading
+from src.web.strategy_config_yaml import (
+    StrategyConfigYamlError,
+    dump_strategy_config_yaml,
+    load_strategy_config_yaml,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,15 +56,6 @@ _UNSET_ORDER_ROUTER_MODE = object()
 class RiskEventNotifier(Protocol):
     async def send_risk_event(self, payload: dict[str, object]) -> None:
         ...
-
-
-class StrategyConfigRequest(BaseModel):
-    name: str
-    strategy_type: str
-    symbol: str
-    timeframe: str
-    params: dict[str, Any] = Field(default_factory=dict)
-    enabled: bool = True
 
 
 def current_timestamp_ms() -> int:
@@ -217,7 +219,7 @@ def create_order_manager(
 
 def create_strategy_registry() -> StrategyRegistry:
     registry = StrategyRegistry()
-    register_ma_cross(registry)
+    register_builtin_strategies(registry)
     return registry
 
 
@@ -228,7 +230,9 @@ def strategy_exists(name: str) -> bool:
 class StrategyRuntimeState:
     def __init__(self, registry: StrategyRegistry | None = None) -> None:
         self.registry = registry or create_strategy_registry()
-        self.strategy_status = {name: "stopped" for name in self.registry.list_strategies()}
+        self.strategy_status = {
+            name: "stopped" for name in self.registry.list_implicit_strategies()
+        }
         self.strategy_errors: dict[str, str] = {}
         self.engines: dict[str, BotEngine] = {}
         self.starting_engines: dict[str, BotEngine] = {}
@@ -244,8 +248,8 @@ class StrategyRuntimeState:
 
     def list_strategies(self) -> list[dict[str, str]]:
         return [
-            {"name": name, "status": self.strategy_status[name]}
-            for name in self.registry.list_strategies()
+            {"name": name, "status": status}
+            for name, status in self.strategy_status.items()
         ]
 
     def strategy_exists(self, name: str) -> bool:
@@ -299,10 +303,13 @@ def create_router(
             return runtime.registry.create(name)
         if config.strategy_type not in runtime.registry.list_strategies():
             raise HTTPException(status_code=404, detail="Strategy not found")
-        params = {**config.params, "symbol": config.symbol}
-        strategy = runtime.registry.create(config.strategy_type, **params)
-        strategy.name = config.name
-        strategy.timeframe = config.timeframe
+        strategy = runtime.registry.create_instance(
+            config.name,
+            config.strategy_type,
+            config.symbol,
+            config.timeframe,
+            config.params,
+        )
         runtime.strategy_status.setdefault(config.name, "stopped")
         return strategy
 
@@ -447,11 +454,174 @@ def create_router(
     def serialize_strategy_config(config: StrategyConfigRecord) -> dict[str, Any]:
         return config.model_dump()
 
+    def is_active(name: str) -> bool:
+        return name in runtime.engines or name in runtime.starting_engines
+
+    def status_for_strategy(name: str) -> str:
+        if name in runtime.starting_engines:
+            return "starting"
+        if name in runtime.engines:
+            return "running"
+        return runtime.strategy_status.get(name, "stopped")
+
+    def issue_to_dict(issue: StrategyValidationIssue) -> dict[str, Any]:
+        return {
+            "path": issue.path,
+            "code": issue.code,
+            "message": issue.message,
+            "line": None,
+            "column": None,
+        }
+
+    def validation_detail(
+        code: str,
+        message: str,
+        issues: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        return {"code": code, "message": message, "issues": issues}
+
+    def malformed_config_detail(issue_code: str, message: str) -> dict[str, Any]:
+        return validation_detail(
+            "malformed_config",
+            "Strategy config must be a JSON object",
+            [
+                {
+                    "path": "",
+                    "code": issue_code,
+                    "message": message,
+                    "line": None,
+                    "column": None,
+                }
+            ],
+        )
+
+    async def read_json_mapping(request: Request) -> dict[str, Any]:
+        try:
+            payload = await request.json()
+        except json.JSONDecodeError:
+            raise HTTPException(
+                status_code=400,
+                detail=malformed_config_detail("malformed_json", "Malformed JSON body"),
+            ) from None
+        if not isinstance(payload, dict):
+            raise HTTPException(
+                status_code=400,
+                detail=malformed_config_detail(
+                    "invalid_root",
+                    "Strategy config must be a mapping",
+                ),
+            )
+        return payload
+
+    def semantic_validation_detail(issues: list[dict[str, Any]]) -> dict[str, Any]:
+        return validation_detail(
+            "strategy_validation_failed",
+            "Strategy configuration is invalid",
+            issues,
+        )
+
+    def normalized_to_dict(config: NormalizedStrategyConfig) -> dict[str, Any]:
+        return {
+            "name": config.name,
+            "strategy_type": config.strategy_type,
+            "symbol": config.symbol,
+            "timeframe": config.timeframe,
+            "enabled": config.enabled,
+            "params": config.params,
+        }
+
+    def record_from_normalized(
+        config: NormalizedStrategyConfig,
+        *,
+        created_at: int,
+        updated_at: int,
+    ) -> StrategyConfigRecord:
+        return StrategyConfigRecord(
+            name=config.name,
+            strategy_type=config.strategy_type,
+            symbol=config.symbol,
+            timeframe=config.timeframe,
+            params=config.params,
+            enabled=config.enabled,
+            created_at=created_at,
+            updated_at=updated_at,
+        )
+
+    def normalize_config_payload(
+        payload: dict[str, Any],
+        *,
+        expected_name: str | None = None,
+        yaml_payload: bool = False,
+    ) -> NormalizedStrategyConfig:
+        issues: list[StrategyValidationIssue] = []
+        try:
+            normalized = runtime.registry.normalize_config(payload)
+        except StrategyConfigValidationError as exc:
+            issues.extend(exc.issues)
+            normalized = None
+        if expected_name is not None:
+            if normalized is not None:
+                payload_name = normalized.name
+            else:
+                raw_name = payload.get("name")
+                payload_name = raw_name.strip() if isinstance(raw_name, str) else raw_name
+            if payload_name != expected_name:
+                issues.append(
+                    StrategyValidationIssue(
+                        path="name",
+                        code="name_mismatch",
+                        message="Config name must match expected name",
+                    )
+                )
+        if issues:
+            unsupported = any(issue.code == "unsupported_strategy_type" for issue in issues)
+            unknown_field = any(issue.code == "unknown_field" for issue in issues)
+            status_code = 400 if unsupported or (yaml_payload and unknown_field) else 422
+            raise HTTPException(
+                status_code=status_code,
+                detail=semantic_validation_detail([issue_to_dict(issue) for issue in issues]),
+            )
+        assert normalized is not None
+        return normalized
+
+    def ensure_mutation_allowed(name: str, *, deleting: bool = False) -> None:
+        if is_active(name):
+            raise HTTPException(status_code=409, detail="Strategy is active")
+        positions = (
+            config_repository.get_open_positions(name)
+            if hasattr(config_repository, "get_open_positions")
+            else []
+        )
+        if any(position.amount != 0 for position in positions):
+            action = "delete" if deleting else "update"
+            raise HTTPException(
+                status_code=409,
+                detail=f"Cannot {action} strategy config with open positions",
+            )
+
+    async def broadcast_config_event(
+        event_type: str,
+        config: StrategyConfigRecord | str,
+        *,
+        timestamp: int,
+    ) -> None:
+        if broadcast is None:
+            return
+        name = config if isinstance(config, str) else config.name
+        payload: dict[str, object] = {
+            "type": event_type,
+            "strategy": name,
+            "timestamp": timestamp,
+        }
+        if not isinstance(config, str):
+            payload["config"] = serialize_strategy_config(config)
+        await broadcast(payload)
+
     def list_persisted_strategy_statuses() -> list[dict[str, str]]:
         return [
             {
                 "name": config.name,
-                "status": runtime.strategy_status.get(config.name, "stopped"),
+                "status": status_for_strategy(config.name),
             }
             for config in config_repository.get_strategy_configs()
         ]
@@ -465,34 +635,287 @@ def create_router(
                 strategies.append(strategy)
         return strategies
 
+    @router.get("/types")
+    async def list_strategy_types() -> list[dict[str, Any]]:
+        return [definition.to_dict() for definition in runtime.registry.list_definitions()]
+
     @router.get("/configs")
     async def list_strategy_configs() -> list[dict[str, Any]]:
         return [
             serialize_strategy_config(config) for config in config_repository.get_strategy_configs()
         ]
 
-    @router.post("/configs")
-    async def save_strategy_config(config: StrategyConfigRequest) -> dict[str, Any]:
-        if config.strategy_type != "ma_cross":
+    @router.post("/configs/validate")
+    async def validate_strategy_config(
+        request: Request,
+        expected_name: str | None = Query(default=None),
+    ) -> dict[str, Any]:
+        payload = await read_json_mapping(request)
+        normalized = normalize_config_payload(payload, expected_name=expected_name)
+        config_dict = normalized_to_dict(normalized)
+        return {"config": config_dict, "yaml": dump_strategy_config_yaml(config_dict)}
+
+    @router.post("/configs/validate-yaml")
+    async def validate_strategy_config_yaml(
+        request: Request,
+        expected_name: str | None = Query(default=None),
+    ) -> dict[str, Any]:
+        try:
+            content = (await request.body()).decode("utf-8")
+        except UnicodeDecodeError:
             raise HTTPException(
                 status_code=400,
-                detail="Only ma_cross strategy configs are supported",
-            )
-        now = current_timestamp_ms()
-        saved = config_repository.upsert_strategy_config(
-            StrategyConfigRecord(
-                name=config.name,
-                strategy_type=config.strategy_type,
-                symbol=config.symbol,
-                timeframe=config.timeframe,
-                params=config.params,
-                enabled=config.enabled,
-                created_at=now,
-                updated_at=now,
-            )
+                detail=validation_detail(
+                    "strategy_yaml_invalid",
+                    "Strategy YAML is invalid",
+                    [
+                        {
+                            "path": "",
+                            "code": "invalid_encoding",
+                            "message": "YAML body must be valid UTF-8",
+                            "line": None,
+                            "column": None,
+                        }
+                    ],
+                ),
+            ) from None
+        try:
+            payload = load_strategy_config_yaml(content)
+        except StrategyConfigYamlError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=validation_detail(
+                    "strategy_yaml_invalid",
+                    "Strategy YAML is invalid",
+                    [
+                        {
+                            "path": "",
+                            "code": exc.code,
+                            "message": exc.message,
+                            "line": exc.line,
+                            "column": exc.column,
+                        }
+                    ],
+                ),
+            ) from None
+        normalized = normalize_config_payload(
+            payload,
+            expected_name=expected_name,
+            yaml_payload=True,
         )
-        runtime.strategy_status.setdefault(saved.name, "stopped")
+        config_dict = normalized_to_dict(normalized)
+        return {"config": config_dict, "yaml": dump_strategy_config_yaml(config_dict)}
+
+    @router.get("/configs/{name}")
+    async def get_strategy_config(name: str) -> dict[str, Any]:
+        config = get_persisted_strategy_config(name)
+        if config is None:
+            raise HTTPException(status_code=404, detail="Strategy config not found")
+        return serialize_strategy_config(config)
+
+    @router.post("/configs", status_code=201)
+    async def create_strategy_config(request: Request) -> dict[str, Any]:
+        payload = await read_json_mapping(request)
+        normalized = normalize_config_payload(payload)
+        async with runtime.lifecycle_lock(normalized.name):
+            if is_active(normalized.name):
+                raise HTTPException(status_code=409, detail="Strategy is active")
+            try:
+                now = current_timestamp_ms()
+                saved = config_repository.create_strategy_config(
+                    record_from_normalized(normalized, created_at=now, updated_at=now)
+                )
+            except IntegrityError:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Strategy config already exists",
+                ) from None
+            except Exception:
+                logger.exception("Failed to create strategy config %s", normalized.name)
+                raise HTTPException(
+                    status_code=500,
+                    detail="Failed to create strategy config",
+                ) from None
+            runtime.strategy_status.setdefault(saved.name, "stopped")
+            event_timestamp = saved.updated_at
+        await broadcast_config_event(
+            "strategy_config_created",
+            saved,
+            timestamp=event_timestamp,
+        )
         return serialize_strategy_config(saved)
+
+    @router.put("/configs/{name}")
+    async def update_strategy_config(name: str, request: Request) -> dict[str, Any]:
+        payload = await read_json_mapping(request)
+        normalized = normalize_config_payload(payload, expected_name=name)
+        async with runtime.lifecycle_lock(name):
+            existing = get_persisted_strategy_config(name)
+            if existing is None:
+                raise HTTPException(status_code=404, detail="Strategy config not found")
+            ensure_mutation_allowed(name)
+            if normalized.strategy_type != existing.strategy_type:
+                issue = StrategyValidationIssue(
+                    path="strategy_type",
+                    code="strategy_type_mismatch",
+                    message="Config strategy type must match existing strategy type",
+                )
+                raise HTTPException(
+                    status_code=422,
+                    detail=semantic_validation_detail([issue_to_dict(issue)]),
+                )
+            try:
+                saved = config_repository.update_strategy_config(
+                    name,
+                    record_from_normalized(
+                        normalized,
+                        created_at=existing.created_at,
+                        updated_at=current_timestamp_ms(),
+                    ),
+                )
+            except Exception:
+                logger.exception("Failed to update strategy config %s", name)
+                raise HTTPException(
+                    status_code=500,
+                    detail="Failed to update strategy config",
+                ) from None
+            if saved is None:
+                raise HTTPException(status_code=404, detail="Strategy config not found")
+            runtime.strategy_status.setdefault(saved.name, "stopped")
+            event_timestamp = saved.updated_at
+        await broadcast_config_event(
+            "strategy_config_updated",
+            saved,
+            timestamp=event_timestamp,
+        )
+        return serialize_strategy_config(saved)
+
+    @router.post("/configs/{name}/clone", status_code=201)
+    async def clone_strategy_config(name: str, request: Request) -> dict[str, Any]:
+        clone = await read_json_mapping(request)
+        unknown_request_fields = sorted(set(clone) - {"target_name", "overrides"})
+        if unknown_request_fields:
+            raise HTTPException(
+                status_code=422,
+                detail=semantic_validation_detail(
+                    [
+                        {
+                            "path": field,
+                            "code": "unknown_field",
+                            "message": "Unknown clone request field",
+                            "line": None,
+                            "column": None,
+                        }
+                        for field in unknown_request_fields
+                    ]
+                ),
+            )
+        target_name = clone.get("target_name")
+        overrides = clone.get("overrides", {})
+        if not isinstance(overrides, dict):
+            raise HTTPException(
+                status_code=422,
+                detail=semantic_validation_detail(
+                    [
+                        {
+                            "path": "overrides",
+                            "code": "invalid_type",
+                            "message": "Overrides must be a mapping",
+                            "line": None,
+                            "column": None,
+                        }
+                    ]
+                ),
+            )
+        source = get_persisted_strategy_config(name)
+        if source is None:
+            raise HTTPException(status_code=404, detail="Strategy config not found")
+        payload = {
+            "name": target_name,
+            "strategy_type": source.strategy_type,
+            "symbol": source.symbol,
+            "timeframe": source.timeframe,
+            "enabled": False,
+            "params": dict(source.params),
+        }
+        overrides = dict(overrides)
+        override_params = overrides.pop("params", None)
+        if override_params is not None and not isinstance(override_params, dict):
+            raise HTTPException(
+                status_code=422,
+                detail=semantic_validation_detail(
+                    [
+                        {
+                            "path": "overrides.params",
+                            "code": "invalid_type",
+                            "message": "Override params must be a mapping",
+                            "line": None,
+                            "column": None,
+                        }
+                    ]
+                ),
+            )
+        payload.update(overrides)
+        if override_params is not None:
+            params = dict(payload["params"])
+            params.update(override_params)
+            payload["params"] = params
+        payload["name"] = target_name
+        payload["enabled"] = False
+        normalized = normalize_config_payload(payload, expected_name=target_name)
+        async with runtime.lifecycle_lock(normalized.name):
+            if is_active(normalized.name):
+                raise HTTPException(status_code=409, detail="Strategy is active")
+            try:
+                now = current_timestamp_ms()
+                saved = config_repository.create_strategy_config(
+                    record_from_normalized(normalized, created_at=now, updated_at=now)
+                )
+            except IntegrityError:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Strategy config already exists",
+                ) from None
+            except Exception:
+                logger.exception("Failed to clone strategy config %s to %s", name, normalized.name)
+                raise HTTPException(
+                    status_code=500,
+                    detail="Failed to clone strategy config",
+                ) from None
+            runtime.strategy_status.setdefault(saved.name, "stopped")
+            event_timestamp = saved.updated_at
+        await broadcast_config_event(
+            "strategy_config_created",
+            saved,
+            timestamp=event_timestamp,
+        )
+        return serialize_strategy_config(saved)
+
+    @router.delete("/configs/{name}", status_code=204)
+    async def delete_strategy_config(name: str) -> Response:
+        async with runtime.lifecycle_lock(name):
+            if get_persisted_strategy_config(name) is None:
+                raise HTTPException(status_code=404, detail="Strategy config not found")
+            ensure_mutation_allowed(name, deleting=True)
+            try:
+                deleted = config_repository.delete_strategy_config(name)
+            except Exception:
+                logger.exception("Failed to delete strategy config %s", name)
+                raise HTTPException(
+                    status_code=500,
+                    detail="Failed to delete strategy config",
+                ) from None
+            if not deleted:
+                raise HTTPException(status_code=404, detail="Strategy config not found")
+            event_timestamp = current_timestamp_ms()
+            runtime.strategy_status.pop(name, None)
+            runtime.strategy_errors.pop(name, None)
+        await broadcast_config_event(
+            "strategy_config_deleted",
+            name,
+            timestamp=event_timestamp,
+        )
+        return Response(status_code=204)
 
     @router.post("/{name}/start")
     async def start_strategy(name: str) -> dict[str, str]:
@@ -503,6 +926,11 @@ def create_router(
         if not strategy_exists(name):
             raise HTTPException(status_code=404, detail="Strategy not found")
         async with runtime.lifecycle_lock(name):
+            if not strategy_exists(name):
+                raise HTTPException(status_code=404, detail="Strategy not found")
+            persisted_config = get_persisted_strategy_config(name)
+            if persisted_config is not None and not persisted_config.enabled:
+                raise HTTPException(status_code=409, detail="Strategy config is disabled")
             if name not in runtime.engines:
                 try:
                     runtime.strategy_errors.pop(name, None)

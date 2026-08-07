@@ -41,7 +41,6 @@ describe('dashboard store', () => {
         },
         '/api/trading/positions': [{ symbol: 'BTC-USDT', amount: 1 }],
         '/api/trading/orders': [{ order_id: 'order-1', symbol: 'BTC-USDT' }],
-        '/api/strategies': [{ name: 'ma_cross', status: 'running' }],
       };
 
       return jsonResponse(responses[url]);
@@ -62,7 +61,7 @@ describe('dashboard store', () => {
     });
     expect(dashboard.positions).toEqual([{ symbol: 'BTC-USDT', amount: 1 }]);
     expect(dashboard.orders).toEqual([{ order_id: 'order-1', symbol: 'BTC-USDT' }]);
-    expect(dashboard.strategies).toEqual([{ name: 'ma_cross', status: 'running' }]);
+    expect(fetchMock).not.toHaveBeenCalledWith('/api/strategies');
     expect(dashboard.tickers).toEqual([]);
     expect(dashboard.error).toBeNull();
     expect(dashboard.tickerError).toBe('Request failed: 503');
@@ -84,7 +83,6 @@ describe('dashboard store', () => {
         },
         '/api/trading/positions': [],
         '/api/trading/orders': [],
-        '/api/strategies': [{ name: 'ma_cross', status: 'stopped' }],
         '/api/market/tickers': [],
       };
 
@@ -114,7 +112,6 @@ describe('dashboard store', () => {
         },
         '/api/trading/positions': [],
         '/api/trading/orders': [],
-        '/api/strategies': [{ name: 'ma_cross', status: 'stopped' }],
         '/api/market/tickers': [],
       };
 
@@ -193,7 +190,6 @@ describe('dashboard store', () => {
         },
         '/api/trading/positions': [],
         '/api/trading/orders': [],
-        '/api/strategies': [{ name: 'ma_cross', status: 'stopped' }],
         '/api/market/tickers': [],
       };
 
@@ -225,7 +221,6 @@ describe('dashboard store', () => {
         },
         '/api/trading/positions': [],
         '/api/trading/orders': [],
-        '/api/strategies': [{ name: 'ma_cross', status: 'stopped' }],
         '/api/market/tickers': [],
       };
 
@@ -261,7 +256,6 @@ describe('dashboard store', () => {
         },
         '/api/trading/positions': [],
         '/api/trading/orders': [{ order_id: 'risk-1', status: 'rejected' }],
-        '/api/strategies': [{ name: 'ma_cross', status: 'stopped' }],
         '/api/market/tickers': [],
       };
 
@@ -290,7 +284,6 @@ describe('dashboard store', () => {
         },
         '/api/trading/positions': [],
         '/api/trading/orders': [],
-        '/api/strategies': [{ name: 'ma_cross', status: 'stopped' }],
         '/api/market/tickers': [
           { symbol: 'BTC-USDT', last: 68000, bidPx: 67999.5, askPx: 68000.5, vol24h: 123.45 },
         ],
@@ -355,59 +348,37 @@ describe('dashboard store', () => {
     expect(dashboard.account).toBeNull();
   });
 
-  it('adds received timestamps to websocket messages', () => {
-    vi.setSystemTime(new Date('2026-06-03T12:00:00Z'));
-
+  it('preserves shared received timestamps on websocket messages', () => {
     const dashboard = useDashboardStore();
 
-    dashboard.addWebSocketMessage({ type: 'connected' });
+    dashboard.addWebSocketMessage({ type: 'connected', received_at: 1700000001000 });
 
     expect(dashboard.websocketMessages).toEqual([
-      { type: 'connected', received_at: new Date('2026-06-03T12:00:00Z').getTime() },
+      { type: 'connected', received_at: 1700000001000 },
     ]);
   });
 
-  it('applies strategy_status websocket messages to known strategies', () => {
-    const dashboard = useDashboardStore();
-    dashboard.strategies = [{ name: 'ma_cross', status: 'stopped' }];
-    dashboard.strategyErrors = { ma_cross: 'previous error' };
-
-    dashboard.addWebSocketMessage({
-      type: 'strategy_status',
-      strategy: 'ma_cross',
-      status: 'running',
-      timestamp: 1700000000000,
-    });
-
-    expect(dashboard.strategies).toEqual([{ name: 'ma_cross', status: 'running' }]);
-    expect(dashboard.strategyErrors).toEqual({});
-  });
-
-  it('adds unknown strategies from strategy_status websocket messages', () => {
+  it('keeps strategy websocket messages only in message history', () => {
     const dashboard = useDashboardStore();
 
     dashboard.addWebSocketMessage({
       type: 'strategy_status',
       strategy: 'ma_cross_btc',
-      status: 'stopped',
+      status: 'running',
       timestamp: 1700000000000,
     });
-
-    expect(dashboard.strategies).toEqual([{ name: 'ma_cross_btc', status: 'stopped' }]);
-  });
-
-  it('records strategy_error websocket messages without fabricating status', () => {
-    const dashboard = useDashboardStore();
-    dashboard.strategies = [{ name: 'ma_cross_btc', status: 'stopped' }];
-
     dashboard.addWebSocketMessage({
       type: 'strategy_error',
       strategy: 'ma_cross_btc',
       error: 'boom',
-      timestamp: 1700000000000,
+      timestamp: 1700000000001,
     });
 
-    expect(dashboard.strategyErrors).toEqual({ ma_cross_btc: 'boom' });
-    expect(dashboard.strategies).toEqual([{ name: 'ma_cross_btc', status: 'stopped' }]);
+    expect(dashboard.websocketMessages.map((message) => message.type)).toEqual([
+      'strategy_error',
+      'strategy_status',
+    ]);
+    expect('strategies' in dashboard).toBe(false);
+    expect('strategyErrors' in dashboard).toBe(false);
   });
 });

@@ -3,8 +3,19 @@ import { fileURLToPath, URL } from 'node:url';
 import vue from '@vitejs/plugin-vue';
 import { defineConfig } from 'vite';
 
+const vuePlugin = vue();
+
+if (process.env.VITEST) {
+  const transform = vuePlugin.transform;
+  if (typeof transform === 'function') {
+    vuePlugin.transform = function clientTransform(code, id, options) {
+      return transform.call(this, code, id, { ...options, ssr: false });
+    };
+  }
+}
+
 export default defineConfig({
-  plugins: [vue()],
+  plugins: [vuePlugin],
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),

@@ -1,4 +1,4 @@
-import type { StrategySummary } from '@/types/strategy';
+import type { StrategyRuntimeSummary } from '@/types/strategy';
 
 export interface StrategyActionState {
   startDisabled: boolean;
@@ -6,11 +6,14 @@ export interface StrategyActionState {
   actionLoading: boolean;
 }
 
-export function getStrategyActionState(strategy: StrategySummary, actionName: string): StrategyActionState {
+export function getStrategyActionState(
+  strategy: StrategyRuntimeSummary,
+  actionLoading: boolean,
+): StrategyActionState {
   return {
     startDisabled: strategy.status === 'running',
     stopDisabled: strategy.status !== 'running',
-    actionLoading: actionName === strategy.name,
+    actionLoading,
   };
 }
 

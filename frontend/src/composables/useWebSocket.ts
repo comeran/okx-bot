@@ -69,8 +69,12 @@ export function useWebSocket(path = '/ws', options: UseWebSocketOptions = {}) {
     };
 
     socket.onmessage = (event) => {
+      const receivedAt = Date.now();
       try {
-        const message = JSON.parse(event.data) as DashboardWebSocketMessage;
+        const message = {
+          ...(JSON.parse(event.data) as DashboardWebSocketMessage),
+          received_at: receivedAt,
+        };
         messages.value.unshift(message);
         messages.value = messages.value.slice(0, LOCAL_MESSAGE_HISTORY_LIMIT);
         options.onMessage?.(message);
@@ -78,6 +82,7 @@ export function useWebSocket(path = '/ws', options: UseWebSocketOptions = {}) {
         const message: DashboardWebSocketMessage = {
           type: 'raw',
           data: event.data,
+          received_at: receivedAt,
         };
         messages.value.unshift(message);
         messages.value = messages.value.slice(0, LOCAL_MESSAGE_HISTORY_LIMIT);

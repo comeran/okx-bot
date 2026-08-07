@@ -7,7 +7,6 @@ import type {
   MarketTicker,
   Order,
   Position,
-  StrategySummary,
 } from '@/types/dashboard';
 
 const WEBSOCKET_MESSAGE_HISTORY_LIMIT = 20;
@@ -16,8 +15,6 @@ interface DashboardState {
   account: AccountSummary | null;
   positions: Position[];
   orders: Order[];
-  strategies: StrategySummary[];
-  strategyErrors: Record<string, string>;
   tickers: MarketTicker[];
   websocketConnected: boolean;
   websocketMessages: DashboardWebSocketMessage[];
@@ -51,14 +48,6 @@ function isPositionArray(value: unknown): value is Position[] {
 
 function isOrderArray(value: unknown): value is Order[] {
   return Array.isArray(value) && value.every(isRecord);
-}
-
-function isStrategySummary(value: unknown): value is StrategySummary {
-  return isRecord(value) && typeof value.name === 'string' && typeof value.status === 'string';
-}
-
-function isStrategyArray(value: unknown): value is StrategySummary[] {
-  return Array.isArray(value) && value.every(isStrategySummary);
 }
 
 function isMarketTicker(value: unknown): value is MarketTicker {
@@ -100,28 +89,11 @@ function payloadFor(message: DashboardWebSocketMessage, key: string): unknown {
   return record[key] ?? record.data;
 }
 
-function upsertStrategyStatus(
-  strategies: StrategySummary[],
-  name: string,
-  status: string,
-): StrategySummary[] {
-  const existingIndex = strategies.findIndex((strategy) => strategy.name === name);
-  if (existingIndex === -1) {
-    return [...strategies, { name, status }];
-  }
-
-  return strategies.map((strategy, index) => (
-    index === existingIndex ? { ...strategy, status } : strategy
-  ));
-}
-
 export const useDashboardStore = defineStore('dashboard', {
   state: (): DashboardState => ({
     account: null,
     positions: [],
     orders: [],
-    strategies: [],
-    strategyErrors: {},
     tickers: [],
     websocketConnected: false,
     websocketMessages: [],
@@ -130,9 +102,6 @@ export const useDashboardStore = defineStore('dashboard', {
     tickerError: null,
     lastUpdatedAt: null,
   }),
-  getters: {
-    activeStrategyCount: (state) => state.strategies.filter((strategy) => strategy.status === 'running').length,
-  },
   actions: {
     async loadInitialData() {
       this.loading = true;
@@ -140,17 +109,15 @@ export const useDashboardStore = defineStore('dashboard', {
       this.tickerError = null;
 
       try {
-        const [account, positions, orders, strategies] = await Promise.all([
+        const [account, positions, orders] = await Promise.all([
           fetchJson<AccountSummary>('/api/trading/account'),
           fetchJson<Position[]>('/api/trading/positions'),
           fetchJson<Order[]>('/api/trading/orders'),
-          fetchJson<StrategySummary[]>('/api/strategies'),
         ]);
 
         this.account = normalizeAccount(account, positions);
         this.positions = positions;
         this.orders = orders;
-        this.strategies = strategies;
 
         try {
           const tickers = await fetchJson<MarketTicker[]>('/api/market/tickers');
@@ -171,13 +138,9 @@ export const useDashboardStore = defineStore('dashboard', {
       this.websocketConnected = connected;
     },
     addWebSocketMessage(message: DashboardWebSocketMessage) {
-      const receivedMessage = {
-        ...message,
-        received_at: message.received_at ?? Date.now(),
-      };
-      this.websocketMessages.unshift(receivedMessage);
+      this.websocketMessages.unshift(message);
       this.websocketMessages = this.websocketMessages.slice(0, WEBSOCKET_MESSAGE_HISTORY_LIMIT);
-      this.applyWebSocketMessage(receivedMessage);
+      this.applyWebSocketMessage(message);
     },
     applyWebSocketMessage(message: DashboardWebSocketMessage) {
       switch (message.type) {
@@ -202,32 +165,6 @@ export const useDashboardStore = defineStore('dashboard', {
           const orders = payloadFor(message, 'orders');
           if (isOrderArray(orders)) {
             this.orders = orders;
-          }
-          break;
-        }
-        case 'strategies': {
-          const strategies = payloadFor(message, 'strategies');
-          if (isStrategyArray(strategies)) {
-            this.strategies = strategies;
-          }
-          break;
-        }
-        case 'strategy_status': {
-          if (typeof message.strategy === 'string' && typeof message.status === 'string') {
-            this.strategies = upsertStrategyStatus(this.strategies, message.strategy, message.status);
-            if (message.status === 'running') {
-              const { [message.strategy]: _cleared, ...remainingErrors } = this.strategyErrors;
-              this.strategyErrors = remainingErrors;
-            }
-          }
-          break;
-        }
-        case 'strategy_error': {
-          if (typeof message.strategy === 'string' && typeof message.error === 'string') {
-            this.strategyErrors = {
-              ...this.strategyErrors,
-              [message.strategy]: message.error,
-            };
           }
           break;
         }
@@ -258,10 +195,6 @@ export const useDashboardStore = defineStore('dashboard', {
         } else if (isAccountSummary(snapshot.account)) {
           this.account = normalizeAccount(snapshot.account, positions);
         }
-      }
-
-      if (isStrategyArray(snapshot.strategies)) {
-        this.strategies = snapshot.strategies;
       }
     },
   },

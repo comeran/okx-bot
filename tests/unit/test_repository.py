@@ -1,4 +1,5 @@
 import pytest
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import SQLModel, create_engine
 
 from src.data.models import (
@@ -662,3 +663,133 @@ def test_upsert_trade_deduplicates_exchange_trade_id(repo: Repository):
 
     assert len(trades) == 1
     assert trades[0].exchange_trade_id == "trade-1"
+
+
+def test_create_strategy_config_inserts_and_duplicate_raises(repo: Repository):
+    config = StrategyConfigRecord(
+        name="ma_cross_btc",
+        strategy_type="ma_cross",
+        symbol="BTC-USDT",
+        timeframe="1h",
+        params={"fast_window": 5, "slow_window": 20},
+        enabled=True,
+        created_at=1700000000000,
+        updated_at=1700000000000,
+    )
+
+    created = repo.create_strategy_config(config)
+
+    assert created.id is not None
+    assert repo.get_strategy_config("ma_cross_btc") is not None
+    with pytest.raises(IntegrityError):
+        repo.create_strategy_config(
+            StrategyConfigRecord(
+                name="ma_cross_btc",
+                strategy_type="ma_cross",
+                symbol="ETH-USDT",
+                timeframe="4h",
+                params={},
+                enabled=False,
+                created_at=1700000001000,
+                updated_at=1700000001000,
+            )
+        )
+
+
+def test_update_strategy_config_preserves_identity_and_replaces_params(repo: Repository):
+    created = repo.create_strategy_config(
+        StrategyConfigRecord(
+            name="ma_cross_btc",
+            strategy_type="ma_cross",
+            symbol="BTC-USDT",
+            timeframe="1h",
+            params={"fast_window": 5, "slow_window": 20, "stale": True},
+            enabled=True,
+            created_at=1700000000000,
+            updated_at=1700000000000,
+        )
+    )
+
+    updated = repo.update_strategy_config(
+        "ma_cross_btc",
+        StrategyConfigRecord(
+            name="ignored_new_name",
+            strategy_type="rsi_mean_reversion",
+            symbol="ETH-USDT",
+            timeframe="15m",
+            params={"period": 14},
+            enabled=False,
+            created_at=1,
+            updated_at=1700000005000,
+        ),
+    )
+
+    assert updated is not None
+    assert updated.id == created.id
+    assert updated.name == "ma_cross_btc"
+    assert updated.created_at == 1700000000000
+    assert updated.updated_at == 1700000005000
+    assert updated.strategy_type == "rsi_mean_reversion"
+    assert updated.symbol == "ETH-USDT"
+    assert updated.timeframe == "15m"
+    assert updated.params == {"period": 14}
+    assert updated.enabled is False
+    assert repo.update_strategy_config("missing", updated) is None
+
+
+def test_delete_strategy_config_removes_only_config_not_history(repo: Repository):
+    repo.create_strategy_config(
+        StrategyConfigRecord(
+            name="ma_cross_btc",
+            strategy_type="ma_cross",
+            symbol="BTC-USDT",
+            timeframe="1h",
+            params={},
+            enabled=True,
+            created_at=1700000000000,
+            updated_at=1700000000000,
+        )
+    )
+    repo.save_trade(
+        TradeRecord(
+            strategy="ma_cross_btc",
+            symbol="BTC-USDT",
+            side="buy",
+            amount=0.1,
+            price=50000.0,
+            fee=1.0,
+            timestamp=1700000000000,
+        )
+    )
+    repo.save_order(
+        OrderRecord(
+            order_id="order-1",
+            strategy="ma_cross_btc",
+            symbol="BTC-USDT",
+            side="buy",
+            type="limit",
+            amount=0.1,
+            price=50000.0,
+            status="filled",
+            fill_price=50000.0,
+            timestamp=1700000000000,
+        )
+    )
+    repo.upsert_position(
+        PositionRecord(
+            strategy="ma_cross_btc",
+            symbol="BTC-USDT",
+            side="long",
+            amount=0.1,
+            entry_price=50000.0,
+            leverage=1,
+            timestamp=1700000000000,
+        )
+    )
+
+    assert repo.delete_strategy_config("ma_cross_btc") is True
+    assert repo.delete_strategy_config("ma_cross_btc") is False
+    assert repo.get_strategy_config("ma_cross_btc") is None
+    assert len(repo.get_trades("ma_cross_btc")) == 1
+    assert len([order for order in repo.get_orders() if order.strategy == "ma_cross_btc"]) == 1
+    assert len(repo.get_positions("ma_cross_btc")) == 1

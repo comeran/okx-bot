@@ -16,7 +16,7 @@ import type {
   BacktestResult,
   BacktestResultDetail,
 } from '@/types/backtest';
-import type { StrategySummary } from '@/types/strategy';
+import type { StrategyRuntimeSummary } from '@/types/strategy';
 import { getBacktestApiErrorMessage, getBacktestValidationError } from '@/utils/backtest';
 
 const { t } = useI18n();
@@ -42,7 +42,7 @@ const form = reactive<{
   initialCapital: 100000,
 });
 
-const strategies = ref<StrategySummary[]>([]);
+const strategies = ref<StrategyRuntimeSummary[]>([]);
 const latestMetrics = ref<BacktestMetrics | null>(null);
 const results = ref<BacktestResult[]>([]);
 const selectedResultId = ref<string | null>(null);
