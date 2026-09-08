@@ -16,6 +16,7 @@ from src.ops.private_sync import sync_private_state
 class FakeRepository:
     def __init__(self, orders=None):
         self.orders = list(orders or [])
+        self.trades = []
         self.accounts = []
         self.upserted_orders = []
         self.upserted_trades = []
@@ -36,12 +37,43 @@ class FakeRepository:
     def upsert_order(self, order):
         self.calls.append(f"upsert_order:{order.order_id}")
         self.upserted_orders.append(order)
-        return order
+        existing = next(
+            (
+                current
+                for current in self.orders
+                if current.order_id == order.order_id
+                or (
+                    order.exchange_order_id
+                    and current.exchange_order_id == order.exchange_order_id
+                )
+            ),
+            None,
+        )
+        if existing is None:
+            self.orders.append(order)
+            return order
+        for field, value in order.model_dump(exclude={"id"}).items():
+            setattr(existing, field, value)
+        return existing
 
     def upsert_trade(self, trade):
         self.calls.append(f"upsert_trade:{trade.exchange_trade_id}")
         self.upserted_trades.append(trade)
-        return trade
+        existing = next(
+            (
+                current
+                for current in self.trades
+                if trade.exchange_trade_id
+                and current.exchange_trade_id == trade.exchange_trade_id
+            ),
+            None,
+        )
+        if existing is None:
+            self.trades.append(trade)
+            return trade
+        for field, value in trade.model_dump(exclude={"id"}).items():
+            setattr(existing, field, value)
+        return existing
 
     def set_kill_switch(self, engaged, reason, updated_at):
         self.calls.append("set_kill_switch")
@@ -192,6 +224,113 @@ async def test_private_sync_upserts_snapshots_and_attributes_orders_and_trades()
     assert repo.upserted_trades[0].order_id == "local-1"
     assert repo.upserted_trades[1].strategy == "__exchange__"
     assert repo.upserted_trades[1].order_id == "okx:ex-unmatched"
+
+
+@pytest.mark.asyncio
+async def test_recent_trades_fill_missing_pending_order_without_engaging_kill_switch():
+    repo = FakeRepository(orders=[local_order()])
+    adapter = FakeAdapter(
+        trades=[
+            exchange_trade(
+                exchange_trade_id="trade-1",
+                amount=0.04,
+                price=49000.0,
+                timestamp=1700000003000,
+            ),
+            exchange_trade(
+                exchange_trade_id="trade-2",
+                amount=0.06,
+                price=51000.0,
+                timestamp=1700000004000,
+            ),
+        ]
+    )
+
+    result = await sync_private_state(
+        repo,
+        adapter,
+        timestamp_ms=lambda: 1700000005000,
+    )
+
+    assert result.orders_upserted == 1
+    assert result.trades_upserted == 2
+    assert result.risk_events_saved == 0
+    assert result.kill_switch_engaged is False
+    assert result.divergences == []
+    assert repo.kill_switch is False
+    assert repo.risk_events == []
+    assert len(repo.orders) == 1
+    assert repo.orders[0].order_id == "local-1"
+    assert repo.orders[0].strategy == "ma_cross"
+    assert repo.orders[0].status == "filled"
+    assert repo.orders[0].fill_price == pytest.approx(50200.0)
+    assert repo.orders[0].updated_at == 1700000004000
+    assert [trade.order_id for trade in repo.trades] == ["local-1", "local-1"]
+    assert [trade.strategy for trade in repo.trades] == ["ma_cross", "ma_cross"]
+
+    repeated = await sync_private_state(
+        repo,
+        adapter,
+        timestamp_ms=lambda: 1700000006000,
+    )
+
+    assert repeated.orders_upserted == 0
+    assert repeated.risk_events_saved == 0
+    assert len(repo.orders) == 1
+    assert len(repo.trades) == 2
+    assert [order.order_id for order in repo.orders] == ["local-1"]
+
+
+@pytest.mark.asyncio
+async def test_recent_trade_matches_pending_order_by_client_id():
+    repo = FakeRepository(
+        orders=[local_order(exchange_order_id="", client_order_id="client-1")]
+    )
+    adapter = FakeAdapter(
+        trades=[exchange_trade(exchange_order_id="ex-discovered")]
+    )
+
+    result = await sync_private_state(
+        repo,
+        adapter,
+        timestamp_ms=lambda: 1700000005000,
+    )
+
+    assert result.orders_upserted == 1
+    assert result.risk_events_saved == 0
+    assert repo.orders[0].order_id == "local-1"
+    assert repo.orders[0].exchange_order_id == "ex-discovered"
+    assert repo.orders[0].client_order_id == "client-1"
+    assert repo.orders[0].strategy == "ma_cross"
+    assert repo.orders[0].status == "filled"
+    assert repo.trades[0].order_id == "local-1"
+
+
+@pytest.mark.asyncio
+async def test_recent_trade_updates_existing_synthetic_order_without_duplicate():
+    repo = FakeRepository(
+        orders=[
+            local_order(
+                order_id="okx:ex-local-1",
+                client_order_id="",
+                strategy="__exchange__",
+            )
+        ]
+    )
+    adapter = FakeAdapter(trades=[exchange_trade(client_order_id="")])
+
+    result = await sync_private_state(
+        repo,
+        adapter,
+        timestamp_ms=lambda: 1700000005000,
+    )
+
+    assert result.orders_upserted == 1
+    assert result.risk_events_saved == 0
+    assert len(repo.orders) == 1
+    assert repo.orders[0].order_id == "okx:ex-local-1"
+    assert repo.orders[0].status == "filled"
+    assert repo.trades[0].order_id == "okx:ex-local-1"
 
 
 @pytest.mark.asyncio

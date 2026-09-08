@@ -3,6 +3,7 @@ import math
 import pytest
 
 from src.core.types import Bar, OrderSide, OrderType
+from src.strategy.base import BaseStrategy
 from src.strategy.builtin.bollinger_mean_reversion import BollingerMeanReversionStrategy
 from src.strategy.builtin.donchian_breakout import DonchianBreakoutStrategy
 from src.strategy.builtin.rsi_mean_reversion import RSIMeanReversionStrategy
@@ -51,6 +52,70 @@ def make_bar(
         close=close,
         volume=1.0,
     )
+
+
+@pytest.mark.parametrize(
+    ("strategy", "expected"),
+    [
+        (RSIMeanReversionStrategy(period=14), 15),
+        (BollingerMeanReversionStrategy(window=20), 20),
+        (DonchianBreakoutStrategy(entry_window=20, exit_window=10), 20),
+    ],
+)
+def test_builtin_required_warmup_bars_match_indicator_lookback(strategy, expected) -> None:
+    assert strategy.required_warmup_bars() == expected
+
+
+@pytest.mark.asyncio
+async def test_warmup_updates_state_without_submitting_orders() -> None:
+    strategy = DonchianBreakoutStrategy(entry_window=2, exit_window=1, amount=0.4)
+    manager = RecordingOrderManager()
+    strategy.set_order_manager(manager)
+
+    bars = [
+        make_bar(9, 1, high=10, low=8),
+        make_bar(7, 2, high=9, low=7),
+        make_bar(12, 3, high=12, low=8),
+    ]
+    await strategy.warmup(bars)
+
+    assert len(strategy._highs) == 2
+    assert manager.submitted == []
+
+
+@pytest.mark.asyncio
+async def test_warmup_restores_order_submission_after_on_bar_raises() -> None:
+    class FailingWarmupStrategy(BaseStrategy):
+        name = "failing_warmup"
+
+        async def on_bar(self, bar: Bar) -> None:
+            if not self._orders_enabled:
+                raise RuntimeError("warmup failed")
+            await self.buy("BTC-USDT", 0.1)
+
+    strategy = FailingWarmupStrategy()
+    manager = RecordingOrderManager()
+    strategy.set_order_manager(manager)
+
+    with pytest.raises(RuntimeError, match="warmup failed"):
+        await strategy.warmup([make_bar(100, 1)])
+    await strategy.on_bar(make_bar(101, 2))
+
+    assert len(manager.submitted) == 1
+
+
+@pytest.mark.asyncio
+async def test_warmup_does_not_leave_order_submission_disabled() -> None:
+    strategy = RSIMeanReversionStrategy(period=2, amount=0.25)
+    manager = RecordingOrderManager()
+    strategy.set_order_manager(manager)
+
+    await strategy.warmup(
+        [make_bar(close, index) for index, close in enumerate([100, 101, 102], 1)]
+    )
+    await strategy.on_bar(make_bar(90, 4))
+
+    assert manager.submitted
 
 
 @pytest.mark.asyncio

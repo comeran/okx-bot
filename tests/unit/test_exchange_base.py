@@ -1,3 +1,5 @@
+from unittest.mock import Mock
+
 import pytest
 
 from src.core.types import AssetBalance, Order, OrderSide, OrderType, PositionSide
@@ -25,6 +27,7 @@ class FakeOKX:
         self.raw_history_candle_response = {"data": []}
         self.closed = False
         self.sandbox_enabled = None
+        self.precisionMode = exchange_base.DECIMAL_PLACES
         self.markets = {}
         self.load_markets_calls = 0
         self.create_order_calls = []
@@ -92,8 +95,23 @@ class FakeOKX:
 @pytest.fixture(autouse=True)
 def fake_okx(monkeypatch):
     FakeOKX.instances = []
-    monkeypatch.setattr(exchange_base.ccxt, "okx", FakeOKX)
-    return FakeOKX
+
+    def create_client(**kwargs):
+        config = {"options": {"defaultType": kwargs["default_type"]}}
+        if kwargs["api_key"].strip():
+            config["apiKey"] = kwargs["api_key"]
+        if kwargs["secret"].strip():
+            config["secret"] = kwargs["secret"]
+        if kwargs["passphrase"].strip():
+            config["password"] = kwargs["passphrase"]
+        fake = FakeOKX(config)
+        if kwargs["demo"]:
+            fake.set_sandbox_mode(True)
+        return fake
+
+    create_client_mock = Mock(side_effect=create_client)
+    monkeypatch.setattr(exchange_base, "create_okx_client", create_client_mock)
+    return create_client_mock
 
 
 @pytest.mark.asyncio
@@ -319,6 +337,128 @@ async def test_okx_base_adapter_rejects_invalid_precision_before_create_order():
 
 
 @pytest.mark.asyncio
+async def test_okx_base_adapter_accepts_tick_size_precision():
+    adapter = OKXBaseAdapter("api-key", "secret", "passphrase", "swap")
+    fake = FakeOKX.instances[0]
+    fake.markets = {
+        "BTC-USDT-SWAP": {
+            "precisionMode": exchange_base.TICK_SIZE,
+            "precision": {"amount": 0.001, "price": 0.1},
+        }
+    }
+
+    await adapter.submit(
+        Order(
+            id="1",
+            symbol="BTC-USDT-SWAP",
+            side=OrderSide.BUY,
+            type=OrderType.LIMIT,
+            amount=0.123,
+            price=50000.1,
+        )
+    )
+
+    assert len(fake.create_order_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_okx_base_adapter_rejects_amount_not_on_tick_size():
+    adapter = OKXBaseAdapter("api-key", "secret", "passphrase", "swap")
+    fake = FakeOKX.instances[0]
+    fake.markets = {
+        "BTC-USDT-SWAP": {
+            "precisionMode": exchange_base.TICK_SIZE,
+            "precision": {"amount": 0.001, "price": 0.1},
+        }
+    }
+
+    with pytest.raises(
+        ValueError,
+        match="amount precision exceeds exchange precision",
+    ):
+        await adapter.submit(
+            Order(
+                id="1",
+                symbol="BTC-USDT-SWAP",
+                side=OrderSide.BUY,
+                type=OrderType.LIMIT,
+                amount=0.1234,
+                price=50000.1,
+            )
+        )
+
+    assert fake.create_order_calls == []
+
+
+@pytest.mark.asyncio
+async def test_okx_base_adapter_rejects_price_not_on_tick_size():
+    adapter = OKXBaseAdapter("api-key", "secret", "passphrase", "swap")
+    fake = FakeOKX.instances[0]
+    fake.markets = {
+        "BTC-USDT-SWAP": {
+            "precisionMode": exchange_base.TICK_SIZE,
+            "precision": {"amount": 0.001, "price": 0.1},
+        }
+    }
+
+    with pytest.raises(
+        ValueError,
+        match="price precision exceeds exchange precision",
+    ):
+        await adapter.submit(
+            Order(
+                id="1",
+                symbol="BTC-USDT-SWAP",
+                side=OrderSide.BUY,
+                type=OrderType.LIMIT,
+                amount=0.123,
+                price=50000.05,
+            )
+        )
+
+    assert fake.create_order_calls == []
+
+
+@pytest.mark.asyncio
+async def test_okx_base_adapter_validates_significant_digit_precision():
+    adapter = OKXBaseAdapter("api-key", "secret", "passphrase", "swap")
+    fake = FakeOKX.instances[0]
+    fake.markets = {
+        "BTC-USDT-SWAP": {
+            "precisionMode": exchange_base.SIGNIFICANT_DIGITS,
+            "precision": {"amount": 3, "price": 5},
+        }
+    }
+
+    await adapter.submit(
+        Order(
+            id="1",
+            symbol="BTC-USDT-SWAP",
+            side=OrderSide.BUY,
+            type=OrderType.LIMIT,
+            amount=0.123,
+            price=50000.0,
+        )
+    )
+    with pytest.raises(
+        ValueError,
+        match="amount precision exceeds exchange precision",
+    ):
+        await adapter.submit(
+            Order(
+                id="2",
+                symbol="BTC-USDT-SWAP",
+                side=OrderSide.BUY,
+                type=OrderType.LIMIT,
+                amount=0.1234,
+                price=50000.0,
+            )
+        )
+
+    assert len(fake.create_order_calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_okx_base_adapter_defaults_derivative_orders_to_cross_td_mode():
     adapter = OKXBaseAdapter("api-key", "secret", "passphrase", "swap")
     fake = FakeOKX.instances[0]
@@ -368,7 +508,8 @@ async def test_okx_base_adapter_passes_reduce_only_params_for_derivatives():
 
     result = await adapter.submit(order)
 
-    assert result.id == "okx-1"
+    assert result.id == "1"
+    assert result.exchange_order_id == "okx-1"
     assert fake.create_order_calls == [
         {
             "symbol": "BTC-USDT-SWAP",
@@ -398,7 +539,8 @@ async def test_okx_base_adapter_maps_stop_order_to_trigger_params():
 
     result = await adapter.submit(order)
 
-    assert result.id == "okx-1"
+    assert result.id == "1"
+    assert result.exchange_order_id == "okx-1"
     assert fake.create_order_calls == [
         {
             "symbol": "BTC-USDT-SWAP",
@@ -434,7 +576,8 @@ async def test_okx_base_adapter_passes_stop_loss_take_profit_params():
 
     result = await adapter.submit(order)
 
-    assert result.id == "okx-1"
+    assert result.id == "1"
+    assert result.exchange_order_id == "okx-1"
     assert fake.create_order_calls == [
         {
             "symbol": "BTC-USDT-SWAP",

@@ -47,6 +47,9 @@ class RSIMeanReversionStrategy(BaseStrategy):
         self._avg_loss: float | None = None
         self._previous_rsi: float | None = None
 
+    def required_warmup_bars(self) -> int:
+        return self.period + 1
+
     async def on_bar(self, bar: Bar) -> None:
         if self._previous_close is None:
             self._previous_close = bar.close

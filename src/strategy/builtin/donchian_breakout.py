@@ -36,6 +36,9 @@ class DonchianBreakoutStrategy(BaseStrategy):
         self._highs: list[float] = []
         self._lows: list[float] = []
 
+    def required_warmup_bars(self) -> int:
+        return max(self.entry_window, self.exit_window)
+
     async def on_bar(self, bar: Bar) -> None:
         order = None
         if len(self._highs) >= self.entry_window:

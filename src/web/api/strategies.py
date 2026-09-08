@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import time
+import weakref
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
@@ -24,6 +25,7 @@ from src.exchange.okx_spot import OKXSpotAdapter
 from src.exchange.okx_swap import OKXSwapAdapter
 from src.market.service import MarketDataService
 from src.notify.telegram import RiskEventTelegramNotifier, TelegramNotifier
+from src.ops.private_sync import sync_private_state
 from src.order.manager import UnifiedOrderManager
 from src.order.mark_to_market import PaperMarkToMarketService
 from src.order.router import OrderHandler, OrderRouter
@@ -54,8 +56,7 @@ _UNSET_ORDER_ROUTER_MODE = object()
 
 
 class RiskEventNotifier(Protocol):
-    async def send_risk_event(self, payload: dict[str, object]) -> None:
-        ...
+    async def send_risk_event(self, payload: dict[str, object]) -> None: ...
 
 
 def current_timestamp_ms() -> int:
@@ -98,7 +99,13 @@ def paper_backtest_config() -> BacktestConfig:
 
 def create_market_data_service() -> MarketDataService:
     exchange = load_runtime_settings().exchange
-    return MarketDataService(exchange.api_key, exchange.secret, exchange.passphrase)
+    return MarketDataService(
+        exchange.api_key,
+        exchange.secret,
+        exchange.passphrase,
+        default_type=exchange.market_type,
+        demo=exchange.demo,
+    )
 
 
 def create_risk_manager(live: bool = False) -> RiskManager:
@@ -194,6 +201,17 @@ def create_order_manager(
             current_timestamp_ms,
         )
 
+    async def post_live_order_sync(strategy_name: str, symbol: str) -> None:
+        if live_handler is None:
+            return
+        await sync_private_state(
+            order_repository,
+            live_handler,
+            symbols=[symbol],
+            timestamp_ms=current_timestamp_ms,
+            risk_event_notifier=on_risk_event,
+        )
+
     return UnifiedOrderManager(
         router=router,
         repository=order_repository,
@@ -208,6 +226,7 @@ def create_order_manager(
         live_safeguards=resolved_mode == "live",
         live_market_type=settings.exchange.market_type if resolved_mode == "live" else "",
         live_state_refresher=live_state_refresher if resolved_mode == "live" else None,
+        post_live_order_sync=post_live_order_sync if resolved_mode == "live" else None,
         allow_live_open_orders=(
             risk_config.allow_live_open_orders if resolved_mode == "live" else False
         ),
@@ -227,6 +246,60 @@ def strategy_exists(name: str) -> bool:
     return name in create_strategy_registry().list_strategies()
 
 
+class _StrategyOwnerEpochTracker:
+    def __init__(self) -> None:
+        self._epochs: dict[str, int] = {}
+        self._last_owner: dict[str, tuple[weakref.ReferenceType[object] | None, int]] = {}
+
+    def record_assignment(self, name: str, owner: BotEngine) -> None:
+        previous_owner_identity = self._last_owner.get(name)
+        if previous_owner_identity is not None and not self._same_owner(
+            previous_owner_identity,
+            owner,
+        ):
+            self._epochs[name] = self.epoch(name) + 1
+        else:
+            self._epochs.setdefault(name, 0)
+        self._last_owner[name] = self._owner_identity(owner)
+
+    def _owner_identity(self, owner: object) -> tuple[weakref.ReferenceType[object] | None, int]:
+        try:
+            return weakref.ref(owner), id(owner)
+        except TypeError:
+            return None, id(owner)
+
+    def _same_owner(
+        self,
+        previous_owner_identity: tuple[weakref.ReferenceType[object] | None, int],
+        owner: object,
+    ) -> bool:
+        previous_owner_ref, previous_owner_id = previous_owner_identity
+        if previous_owner_ref is None:
+            return previous_owner_id == id(owner)
+        previous_owner = previous_owner_ref()
+        return previous_owner is owner
+
+    def epoch(self, name: str) -> int:
+        return self._epochs.get(name, 0)
+
+
+class _StrategyOwnerMap(dict[str, BotEngine]):
+    def __init__(self, tracker: _StrategyOwnerEpochTracker) -> None:
+        super().__init__()
+        self._tracker = tracker
+
+    def __setitem__(self, name: str, owner: BotEngine) -> None:
+        self._tracker.record_assignment(name, owner)
+        super().__setitem__(name, owner)
+
+    def update(self, *args: Any, **kwargs: BotEngine) -> None:
+        for name, owner in dict(*args, **kwargs).items():
+            self[name] = owner
+
+    def owner_epoch(self, name: str) -> int:
+        return self._tracker.epoch(name)
+
+
 class StrategyRuntimeState:
     def __init__(self, registry: StrategyRegistry | None = None) -> None:
         self.registry = registry or create_strategy_registry()
@@ -234,8 +307,9 @@ class StrategyRuntimeState:
             name: "stopped" for name in self.registry.list_implicit_strategies()
         }
         self.strategy_errors: dict[str, str] = {}
-        self.engines: dict[str, BotEngine] = {}
-        self.starting_engines: dict[str, BotEngine] = {}
+        owner_epochs = _StrategyOwnerEpochTracker()
+        self.engines: dict[str, BotEngine] = _StrategyOwnerMap(owner_epochs)
+        self.starting_engines: dict[str, BotEngine] = _StrategyOwnerMap(owner_epochs)
         self.lifecycle_locks: dict[str, asyncio.Lock] = {}
         self.market_data_lifecycle_lock = asyncio.Lock()
 
@@ -247,10 +321,7 @@ class StrategyRuntimeState:
         return lock
 
     def list_strategies(self) -> list[dict[str, str]]:
-        return [
-            {"name": name, "status": status}
-            for name, status in self.strategy_status.items()
-        ]
+        return [{"name": name, "status": status} for name, status in self.strategy_status.items()]
 
     def strategy_exists(self, name: str) -> bool:
         return name in self.strategy_status
@@ -343,19 +414,46 @@ def create_router(
         error: Exception,
         engine: BotEngine | None = None,
     ) -> None:
+        def owner_epoch() -> int:
+            engines_epoch = getattr(runtime.engines, "owner_epoch", None)
+            if engines_epoch is not None:
+                return engines_epoch(name)
+            starting_epoch = getattr(runtime.starting_engines, "owner_epoch", None)
+            if starting_epoch is not None:
+                return starting_epoch(name)
+            return 0
+
+        def engine_superseded(initial_epoch: int) -> bool:
+            if engine is None:
+                return False
+            if owner_epoch() != initial_epoch:
+                return True
+            return any(
+                owner is not None and owner is not engine
+                for owner in (
+                    runtime.engines.get(name),
+                    runtime.starting_engines.get(name),
+                )
+            )
+
         if engine is not None and (
             runtime.engines.get(name) is not engine
             and runtime.starting_engines.get(name) is not engine
         ):
             return
-        runtime.strategy_status[name] = "stopped"
-        runtime.strategy_errors[name] = str(error)
+        initial_owner_epoch = owner_epoch()
         if engine is None or runtime.engines.get(name) is engine:
             runtime.engines.pop(name, None)
-        if engine is None or runtime.starting_engines.get(name) is engine:
+        if engine is None:
             runtime.starting_engines.pop(name, None)
         await release_market_data_service_if_idle()
+        if engine_superseded(initial_owner_epoch):
+            return
+        runtime.strategy_status[name] = "stopped"
+        runtime.strategy_errors[name] = str(error)
         await broadcast_status(name)
+        if engine_superseded(initial_owner_epoch):
+            return
         if broadcast is not None:
             await broadcast(
                 {
@@ -856,7 +954,18 @@ def create_router(
                 ),
             )
         payload.update(overrides)
-        if override_params is not None:
+        strategy_type = payload["strategy_type"]
+        comparable_strategy_type = (
+            strategy_type.strip() if isinstance(strategy_type, str) else strategy_type
+        )
+        comparable_source_strategy_type = (
+            source.strategy_type.strip()
+            if isinstance(source.strategy_type, str)
+            else source.strategy_type
+        )
+        if comparable_strategy_type != comparable_source_strategy_type:
+            payload["params"] = dict(override_params or {})
+        elif override_params is not None:
             params = dict(payload["params"])
             params.update(override_params)
             payload["params"] = params
@@ -931,7 +1040,9 @@ def create_router(
             persisted_config = get_persisted_strategy_config(name)
             if persisted_config is not None and not persisted_config.enabled:
                 raise HTTPException(status_code=409, detail="Strategy config is disabled")
-            if name not in runtime.engines:
+            startup_finalized = False
+            if name not in runtime.engines and name not in runtime.starting_engines:
+                engine: BotEngine | None = None
                 try:
                     runtime.strategy_errors.pop(name, None)
                     repository = Repository()
@@ -964,47 +1075,143 @@ def create_router(
                                 order_router_mode=order_router_mode,
                             )
                         )
-                    engine: BotEngine | None = None
+                    transferred = False
+                    startup_finalized = False
+                    startup_callback_error: str | None = None
 
                     async def handle_current_engine_error(
                         error_name: str,
                         error: Exception,
                     ) -> None:
+                        nonlocal startup_callback_error
+                        if transferred and runtime.engines.get(error_name) is engine:
+                            startup_callback_error = str(error)
                         await handle_strategy_error(error_name, error, engine)
 
-                    async with runtime.market_data_lifecycle_lock:
-                        engine = BotEngine(
-                            strategies=[strategy],
-                            market_data_service=get_market_data_service(),
-                            on_strategy_error=handle_current_engine_error,
-                            before_strategy_bar=lambda strategy, bar: mark_to_market_before_bar(
-                                mark_to_market,
-                                strategy,
-                                bar,
-                            ),
-                            stop_market_data_on_stop=False,
-                        )
-                        runtime.starting_engines[name] = engine
-                    await engine.start()
-                    async with runtime.market_data_lifecycle_lock:
-                        if name in runtime.strategy_errors:
-                            if runtime.starting_engines.get(name) is engine:
+                    try:
+                        try:
+                            async with runtime.market_data_lifecycle_lock:
+                                engine = BotEngine(
+                                    strategies=[strategy],
+                                    market_data_service=get_market_data_service(),
+                                    on_strategy_error=handle_current_engine_error,
+                                    before_live_strategy_bar=(
+                                        lambda strategy, bar: mark_to_market_before_bar(
+                                            mark_to_market,
+                                            strategy,
+                                            bar,
+                                        )
+                                    ),
+                                    stop_market_data_on_stop=False,
+                                )
+                                runtime.starting_engines[name] = engine
+                            await engine.start()
+                            async with runtime.market_data_lifecycle_lock:
+                                if runtime.starting_engines.get(name) is not engine:
+                                    raise HTTPException(
+                                        status_code=409,
+                                        detail="Strategy startup was superseded",
+                                    )
+                                if name in runtime.strategy_errors:
+                                    raise HTTPException(
+                                        status_code=400,
+                                        detail=runtime.strategy_errors[name],
+                                    )
                                 runtime.starting_engines.pop(name, None)
+                                runtime.engines[name] = engine
+                                transferred = True
+                        except HTTPException:
+                            raise
+                        except Exception as exc:
+                            await handle_strategy_error(name, exc, engine)
+                            raise
+
+                        await asyncio.sleep(0)
+                        if startup_callback_error is not None:
                             raise HTTPException(
                                 status_code=400,
-                                detail=runtime.strategy_errors[name],
+                                detail=startup_callback_error,
                             )
-                        if runtime.starting_engines.get(name) is engine:
-                            runtime.starting_engines.pop(name, None)
-                        runtime.engines[name] = engine
+                        if transferred and runtime.engines.get(name) is not engine:
+                            if name in runtime.engines or name in runtime.starting_engines:
+                                raise HTTPException(
+                                    status_code=409,
+                                    detail="Strategy startup was superseded",
+                                )
+                            if startup_callback_error is not None:
+                                raise HTTPException(
+                                    status_code=400,
+                                    detail=startup_callback_error,
+                                )
+                            raise HTTPException(
+                                status_code=409,
+                                detail="Strategy startup was superseded",
+                            )
+                        runtime.strategy_status[name] = "running"
+                        runtime.strategy_errors.pop(name, None)
+                        await broadcast_status(name)
+                        startup_finalized = True
+                    finally:
+                        if engine is not None and not startup_finalized:
+
+                            async def cleanup_startup_engine() -> None:
+                                owner_removed = False
+                                try:
+                                    async with runtime.market_data_lifecycle_lock:
+                                        if runtime.starting_engines.get(name) is engine:
+                                            runtime.starting_engines.pop(name, None)
+                                            owner_removed = True
+                                        if runtime.engines.get(name) is engine:
+                                            runtime.engines.pop(name, None)
+                                            owner_removed = True
+                                        if (
+                                            owner_removed
+                                            and name not in runtime.engines
+                                            and name not in runtime.starting_engines
+                                        ):
+                                            runtime.strategy_status[name] = "stopped"
+                                except BaseException:
+                                    logger.exception(
+                                        "Failed to clear cancelled startup owner %s",
+                                        name,
+                                    )
+                                try:
+                                    await engine.stop()
+                                except BaseException:
+                                    logger.exception(
+                                        "Failed to stop cancelled startup engine %s",
+                                        name,
+                                    )
+                                try:
+                                    await release_market_data_service_if_idle()
+                                except BaseException:
+                                    logger.exception(
+                                        "Failed to release market data after cancelled startup %s",
+                                        name,
+                                    )
+
+                            cleanup_task = asyncio.create_task(cleanup_startup_engine())
+                            while not cleanup_task.done():
+                                try:
+                                    await asyncio.shield(cleanup_task)
+                                except asyncio.CancelledError:
+                                    pass
+                            try:
+                                cleanup_task.result()
+                            except BaseException:
+                                logger.exception(
+                                    "Failed to clean up cancelled startup engine %s",
+                                    name,
+                                )
                 except HTTPException:
                     raise
                 except Exception as exc:
-                    await handle_strategy_error(name, exc)
+                    await handle_strategy_error(name, exc, engine)
                     raise HTTPException(status_code=400, detail=str(exc)) from None
-            runtime.strategy_status[name] = "running"
-            runtime.strategy_errors.pop(name, None)
-            await broadcast_status(name)
+            if not startup_finalized:
+                runtime.strategy_status[name] = "running"
+                runtime.strategy_errors.pop(name, None)
+                await broadcast_status(name)
         return {"status": "started", "strategy": name}
 
     @router.post("/{name}/stop")
@@ -1012,9 +1219,11 @@ def create_router(
         if not strategy_exists(name):
             raise HTTPException(status_code=404, detail="Strategy not found")
         async with runtime.lifecycle_lock(name):
-            engine = runtime.engines.pop(name, None)
+            engine = runtime.engines.get(name)
             if engine is not None:
                 await engine.stop()
+                if runtime.engines.get(name) is engine:
+                    runtime.engines.pop(name, None)
                 await release_market_data_service_if_idle()
             runtime.strategy_status[name] = "stopped"
             await broadcast_status(name)

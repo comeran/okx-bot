@@ -813,7 +813,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "ccxt" },
+    { name = "ccxt", specifier = "==4.5.55" },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "pydantic" },

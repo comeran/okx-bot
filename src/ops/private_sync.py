@@ -78,6 +78,13 @@ async def sync_private_state(
         exchange_trades = []
     local_orders = list(repository.get_orders())
     local_by_exchange_id, local_by_client_id = _local_order_indexes(local_orders)
+    filled_orders = _filled_order_records(
+        local_orders,
+        exchange_orders,
+        exchange_trades,
+        local_by_exchange_id,
+        local_by_client_id,
+    )
     divergences = _find_divergences(
         local_orders,
         exchange_orders,
@@ -111,13 +118,15 @@ async def sync_private_state(
     for snapshot in exchange_orders:
         local = _match_order(snapshot, local_by_exchange_id, local_by_client_id)
         repository.upsert_order(_order_record(snapshot, local))
+    for order in filled_orders:
+        repository.upsert_order(order)
     for snapshot in exchange_trades:
         local = _match_trade(snapshot, local_by_exchange_id, local_by_client_id)
         repository.upsert_trade(_trade_record(snapshot, local))
 
     return PrivateSyncResult(
         account_upserted=1,
-        orders_upserted=len(exchange_orders),
+        orders_upserted=len(exchange_orders) + len(filled_orders),
         trades_upserted=len(exchange_trades),
         risk_events_saved=len(divergences),
         kill_switch_engaged=kill_switch_engaged,
@@ -138,6 +147,111 @@ def _local_order_indexes(
     )
 
 
+def _filled_order_records(
+    local_orders: list[OrderRecord],
+    exchange_orders: list[ExchangeOrderSnapshot],
+    exchange_trades: list[ExchangeTradeSnapshot],
+    local_by_exchange_id: dict[str, OrderRecord],
+    local_by_client_id: dict[str, OrderRecord],
+) -> list[OrderRecord]:
+    open_exchange_order_ids = {
+        snapshot.exchange_order_id
+        for snapshot in exchange_orders
+        if snapshot.exchange_order_id
+    }
+    open_client_order_ids = {
+        snapshot.client_order_id
+        for snapshot in exchange_orders
+        if snapshot.client_order_id
+    }
+    trades_by_local_order: dict[int, list[ExchangeTradeSnapshot]] = {}
+
+    for snapshot in exchange_trades:
+        local = _match_trade(snapshot, local_by_exchange_id, local_by_client_id)
+        if local is None or local.status != OrderStatus.PENDING.value:
+            continue
+        trades_by_local_order.setdefault(id(local), []).append(snapshot)
+
+    filled_orders = []
+    for local in local_orders:
+        matching_trades = trades_by_local_order.get(id(local), [])
+        if not matching_trades:
+            continue
+        if _order_is_open(
+            local,
+            matching_trades,
+            open_exchange_order_ids,
+            open_client_order_ids,
+        ):
+            continue
+        filled_orders.append(_filled_order_record(local, matching_trades))
+
+    return filled_orders
+
+
+def _order_is_open(
+    local: OrderRecord,
+    trades: list[ExchangeTradeSnapshot],
+    open_exchange_order_ids: set[str],
+    open_client_order_ids: set[str],
+) -> bool:
+    exchange_order_ids = {
+        exchange_order_id
+        for exchange_order_id in [
+            local.exchange_order_id,
+            *(trade.exchange_order_id for trade in trades),
+        ]
+        if exchange_order_id
+    }
+    client_order_ids = {
+        client_order_id
+        for client_order_id in [
+            local.client_order_id,
+            *(trade.client_order_id for trade in trades),
+        ]
+        if client_order_id
+    }
+    return bool(
+        exchange_order_ids & open_exchange_order_ids
+        or client_order_ids & open_client_order_ids
+    )
+
+
+def _filled_order_record(
+    local: OrderRecord,
+    trades: list[ExchangeTradeSnapshot],
+) -> OrderRecord:
+    traded_amount = sum(trade.amount for trade in trades)
+    fill_price = (
+        sum(trade.amount * trade.price for trade in trades) / traded_amount
+        if traded_amount
+        else trades[-1].price
+    )
+    return OrderRecord(
+        order_id=local.order_id,
+        exchange_order_id=local.exchange_order_id
+        or next(
+            (trade.exchange_order_id for trade in trades if trade.exchange_order_id),
+            "",
+        ),
+        client_order_id=local.client_order_id
+        or next(
+            (trade.client_order_id for trade in trades if trade.client_order_id),
+            "",
+        ),
+        strategy=local.strategy,
+        symbol=local.symbol,
+        side=local.side,
+        type=local.type,
+        amount=local.amount,
+        price=local.price,
+        status=OrderStatus.FILLED.value,
+        fill_price=fill_price,
+        timestamp=local.timestamp,
+        updated_at=max(trade.timestamp for trade in trades),
+    )
+
+
 def _find_divergences(
     local_orders: list[OrderRecord],
     exchange_orders: list[ExchangeOrderSnapshot],
@@ -154,6 +268,18 @@ def _find_divergences(
     exchange_client_order_ids = {
         order.client_order_id for order in exchange_orders if order.client_order_id
     }
+    traded_local_order_ids = {
+        id(local)
+        for snapshot in exchange_trades
+        if (
+            local := _match_trade(
+                snapshot,
+                local_by_exchange_id,
+                local_by_client_id,
+            )
+        )
+        is not None
+    }
 
     for order in local_orders:
         if order.status != OrderStatus.PENDING.value:
@@ -163,6 +289,8 @@ def _find_divergences(
         if order.exchange_order_id and order.exchange_order_id in exchange_order_ids:
             continue
         if order.client_order_id and order.client_order_id in exchange_client_order_ids:
+            continue
+        if id(order) in traded_local_order_ids:
             continue
         _append_divergence(
             divergences,
@@ -264,10 +392,10 @@ def _match_order(
     local_by_exchange_id: dict[str, OrderRecord],
     local_by_client_id: dict[str, OrderRecord],
 ) -> OrderRecord | None:
-    if snapshot.client_order_id and snapshot.client_order_id in local_by_client_id:
-        return local_by_client_id[snapshot.client_order_id]
     if snapshot.exchange_order_id and snapshot.exchange_order_id in local_by_exchange_id:
         return local_by_exchange_id[snapshot.exchange_order_id]
+    if snapshot.client_order_id and snapshot.client_order_id in local_by_client_id:
+        return local_by_client_id[snapshot.client_order_id]
     return None
 
 
@@ -276,10 +404,10 @@ def _match_trade(
     local_by_exchange_id: dict[str, OrderRecord],
     local_by_client_id: dict[str, OrderRecord],
 ) -> OrderRecord | None:
-    if snapshot.client_order_id and snapshot.client_order_id in local_by_client_id:
-        return local_by_client_id[snapshot.client_order_id]
     if snapshot.exchange_order_id and snapshot.exchange_order_id in local_by_exchange_id:
         return local_by_exchange_id[snapshot.exchange_order_id]
+    if snapshot.client_order_id and snapshot.client_order_id in local_by_client_id:
+        return local_by_client_id[snapshot.client_order_id]
     return None
 
 

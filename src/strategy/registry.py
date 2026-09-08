@@ -4,6 +4,7 @@ import math
 from collections.abc import Mapping
 from typing import Any
 
+from src.exchange.okx_client import OKX_RUNTIME_TIMEFRAME_MILLISECONDS
 from src.strategy.base import BaseStrategy
 from src.strategy.definitions import (
     NormalizedStrategyConfig,
@@ -105,6 +106,23 @@ class StrategyRegistry:
                 )
             )
 
+        normalized_timeframe = self._normalize_required_text(
+            values["timeframe"] if "timeframe" in values else _MISSING,
+            "timeframe",
+            issues,
+        )
+        if (
+            normalized_timeframe
+            and normalized_timeframe not in OKX_RUNTIME_TIMEFRAME_MILLISECONDS
+        ):
+            issues.append(
+                StrategyValidationIssue(
+                    path="timeframe",
+                    code="unsupported_timeframe",
+                    message="Unsupported strategy timeframe",
+                )
+            )
+
         raw_params = values.get("params", {})
         if not isinstance(raw_params, Mapping):
             issues.append(
@@ -148,11 +166,7 @@ class StrategyRegistry:
                 "symbol",
                 issues,
             ),
-            timeframe=self._normalize_required_text(
-                values["timeframe"] if "timeframe" in values else _MISSING,
-                "timeframe",
-                issues,
-            ),
+            timeframe=normalized_timeframe,
             enabled=self._normalize_enabled(values.get("enabled", True), issues),
             params=normalized_params,
         )

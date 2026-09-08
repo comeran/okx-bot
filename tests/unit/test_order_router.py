@@ -31,9 +31,25 @@ class FakeRepository:
         self.accounts = {}
         self.ledger = []
 
-    def save_order(self, order):
-        self.orders.append(order)
-        return order
+    def upsert_order(self, order):
+        existing = next(
+            (
+                current
+                for current in self.orders
+                if current.order_id == order.order_id
+                or (
+                    order.exchange_order_id
+                    and current.exchange_order_id == order.exchange_order_id
+                )
+            ),
+            None,
+        )
+        if existing is None:
+            self.orders.append(order)
+            return order
+        for field, value in order.model_dump(exclude={"id"}).items():
+            setattr(existing, field, value)
+        return existing
 
     def save_trade(self, trade):
         self.trades.append(trade)
@@ -673,7 +689,7 @@ async def test_order_manager_skips_repository_and_price_provider_when_risk_manag
     class ExplodingRiskRepository:
         orders = []
 
-        def save_order(self, order):
+        def upsert_order(self, order):
             self.orders.append(order)
             return order
 
@@ -766,6 +782,182 @@ async def test_order_manager_cancel_forwards_symbol():
     assert await manager.cancel("exchange-order-1", symbol="BTC-USDT") is True
 
     assert handler.cancelled == [("exchange-order-1", "BTC-USDT")]
+
+
+@pytest.mark.asyncio
+async def test_live_order_manager_persists_external_ids_before_private_sync():
+    events = []
+
+    class FilledLiveHandler(OrderHandler):
+        async def submit(self, order: Order) -> Order:
+            events.append("submit")
+            order.status = OrderStatus.FILLED
+            order.fill_price = 50000.0
+            order.fill_time = 1700000000000
+            order.exchange_order_id = "exchange-order-1"
+            order.client_order_id = "client-order-1"
+            order.updated_at = 1700000001000
+            return order
+
+        async def cancel(self, order_id: str, symbol: str | None = None) -> bool:
+            return True
+
+    class RecordingRepository(FakeRepository):
+        def upsert_order(self, order):
+            events.append("persist")
+            return super().upsert_order(order)
+
+    repository = RecordingRepository()
+    repository.accounts["ma_cross"] = AccountRecord(
+        strategy="ma_cross",
+        initial_equity=100000.0,
+        cash_balance=100000.0,
+        equity=100000.0,
+        realized_pnl=0.0,
+        unrealized_pnl=0.0,
+        daily_pnl=0.0,
+        fees_paid=0.0,
+        updated_at=1700000000000,
+    )
+    repository.positions[("ma_cross", "BTC-USDT-SWAP")] = PositionRecord(
+        strategy="ma_cross",
+        symbol="BTC-USDT-SWAP",
+        side="long",
+        amount=1.0,
+        entry_price=50000.0,
+        leverage=1,
+        timestamp=1700000000000,
+    )
+    refresh_count = 0
+
+    async def live_state_refresher(strategy_name: str, symbol: str) -> None:
+        nonlocal refresh_count
+        refresh_count += 1
+        events.append(f"refresh-{refresh_count}")
+
+    async def post_live_order_sync(strategy_name: str, symbol: str) -> None:
+        events.append("private-sync")
+        assert strategy_name == "ma_cross"
+        assert symbol == "BTC-USDT-SWAP"
+        saved = repository.orders[0]
+        assert saved.exchange_order_id == "exchange-order-1"
+        assert saved.client_order_id == "client-order-1"
+        assert saved.updated_at == 1700000001000
+
+    async def on_order_update(strategy_name: str) -> None:
+        events.append("order-update")
+        assert strategy_name == "ma_cross"
+
+    manager = UnifiedOrderManager(
+        router=OrderRouter(backtest=None, live=FilledLiveHandler(), mode="live"),
+        repository=repository,
+        timestamp_ms=lambda: 1700000000000,
+        risk_manager=RiskManager(max_position_pct=0.8),
+        price_provider=lambda symbol: 50000.0,
+        live_safeguards=True,
+        live_market_type="swap",
+        live_state_refresher=live_state_refresher,
+        post_live_order_sync=post_live_order_sync,
+        on_order_update=on_order_update,
+    )
+
+    order = await manager.submit(
+        symbol="BTC-USDT-SWAP",
+        side=OrderSide.SELL,
+        order_type=OrderType.MARKET,
+        amount=0.25,
+        strategy_name="ma_cross",
+    )
+
+    assert order.id == repository.orders[0].order_id
+    assert events == [
+        "refresh-1",
+        "submit",
+        "persist",
+        "refresh-2",
+        "private-sync",
+        "order-update",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_live_order_manager_does_not_sync_risk_rejected_order():
+    class ShouldNotSubmitHandler(OrderHandler):
+        async def submit(self, order: Order) -> Order:
+            raise AssertionError("risk-rejected order should not reach router")
+
+        async def cancel(self, order_id: str, symbol: str | None = None) -> bool:
+            return True
+
+    repository = FakeRepository()
+    sync_calls = []
+
+    async def post_live_order_sync(strategy_name: str, symbol: str) -> None:
+        sync_calls.append((strategy_name, symbol))
+
+    manager = UnifiedOrderManager(
+        router=OrderRouter(backtest=None, live=ShouldNotSubmitHandler(), mode="live"),
+        repository=repository,
+        timestamp_ms=lambda: 1700000000000,
+        risk_manager=RiskManager(max_position_pct=0.8),
+        price_provider=lambda symbol: 50000.0,
+        live_safeguards=True,
+        live_market_type="swap",
+        post_live_order_sync=post_live_order_sync,
+    )
+
+    order = await manager.submit(
+        symbol="BTC-USDT-SWAP",
+        side=OrderSide.BUY,
+        order_type=OrderType.MARKET,
+        amount=0.25,
+        strategy_name="ma_cross",
+    )
+
+    assert order.status == OrderStatus.REJECTED
+    assert repository.orders[0].status == "rejected"
+    assert sync_calls == []
+
+
+@pytest.mark.asyncio
+async def test_live_order_manager_notifies_when_private_sync_fails():
+    class PendingLiveHandler(OrderHandler):
+        async def submit(self, order: Order) -> Order:
+            order.exchange_order_id = "exchange-order-1"
+            return order
+
+        async def cancel(self, order_id: str, symbol: str | None = None) -> bool:
+            return True
+
+    repository = FakeRepository()
+    calls = []
+
+    async def post_live_order_sync(strategy_name: str, symbol: str) -> None:
+        calls.append("private-sync")
+        raise RuntimeError("private sync failed")
+
+    async def on_order_update(strategy_name: str) -> None:
+        calls.append("order-update")
+
+    manager = UnifiedOrderManager(
+        router=OrderRouter(backtest=None, live=PendingLiveHandler(), mode="live"),
+        repository=repository,
+        timestamp_ms=lambda: 1700000000000,
+        post_live_order_sync=post_live_order_sync,
+        on_order_update=on_order_update,
+    )
+
+    with pytest.raises(RuntimeError, match="private sync failed"):
+        await manager.submit(
+            symbol="BTC-USDT-SWAP",
+            side=OrderSide.BUY,
+            order_type=OrderType.MARKET,
+            amount=0.25,
+            strategy_name="ma_cross",
+        )
+
+    assert repository.orders[0].exchange_order_id == "exchange-order-1"
+    assert calls == ["private-sync", "order-update"]
 
 
 @pytest.mark.asyncio

@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue';
-import { ElMessageBox } from 'element-plus';
+import { computed, nextTick, onMounted, onUnmounted, ref, watch, type Directive } from 'vue';
+import { ElMessage, ElMessageBox } from 'element-plus';
 import { useI18n } from 'vue-i18n';
 
 import type {
@@ -9,6 +9,7 @@ import type {
   StrategyParameterDefinition,
   StrategyValidationIssue,
 } from '@/types/strategy';
+import { fetchTickers } from '@/services/market';
 import { fieldIssuesByPath, switchStrategyType } from '@/utils/strategyManagement';
 
 const model = defineModel<StrategyConfigPayload>({ required: true });
@@ -30,17 +31,103 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 const selectedType = ref(model.value.strategy_type);
+let componentActive = false;
 let typeRequestSequence = 0;
 const issueGroups = computed(() => fieldIssuesByPath(props.issues));
 const selectedDefinition = computed(() => props.definitions.find(
   (definition) => definition.strategy_type === model.value.strategy_type,
 ));
 const nameReadonly = computed(() => props.readonly || props.mode === 'edit');
+const fallbackSymbols = ['BTC-USDT', 'ETH-USDT', 'OKB-USDT', 'SOL-USDT', 'BTC-USDT-SWAP', 'ETH-USDT-SWAP', 'SOL-USDT-SWAP'];
+const canonicalTimeframes = ['1m', '5m', '15m', '1h', '4h', '1d'];
+const fetchedSymbols = ref<string[]>([]);
+const symbolsLoading = ref(false);
+const symbolOptions = computed(() => uniqueStrings([
+  ...fallbackSymbols,
+  model.value.symbol,
+  ...fetchedSymbols.value,
+]));
+const timeframeOptions = computed(() => uniqueStrings([
+  ...canonicalTimeframes,
+  canonicalTimeframes.includes(model.value.timeframe) ? '' : model.value.timeframe,
+]));
+const symbolValue = computed({
+  get: () => model.value.symbol,
+  set: (value: string) => updateCommonField('symbol', value),
+});
+const timeframeValue = computed({
+  get: () => model.value.timeframe,
+  set: (value: string) => updateCommonField('timeframe', value),
+});
+interface ComboboxAriaBinding {
+  describedBy?: string;
+  errorMessage?: string;
+}
+const comboboxAriaAttributes = ['aria-describedby', 'aria-errormessage'] as const;
+const vComboboxAria: Directive<HTMLElement, ComboboxAriaBinding> = {
+  mounted: syncComboboxAria,
+  updated: syncComboboxAria,
+};
+
+onMounted(() => {
+  componentActive = true;
+  void loadSymbolOptions();
+});
+
+onUnmounted(() => {
+  componentActive = false;
+});
 
 watch(() => model.value.strategy_type, (value) => {
   typeRequestSequence += 1;
   selectedType.value = value;
 });
+
+function uniqueStrings(values: Array<string | null | undefined>): string[] {
+  return Array.from(new Set(values.filter((value): value is string => Boolean(value))));
+}
+
+function syncComboboxAria(element: HTMLElement, binding: { value: ComboboxAriaBinding }): void {
+  void nextTick(() => {
+    const combobox = typeof element.matches === 'function' && element.matches('[role="combobox"]')
+      ? element
+      : element.querySelector<HTMLElement>('[role="combobox"]');
+    if (!combobox) return;
+
+    const values = {
+      'aria-describedby': binding.value.describedBy,
+      'aria-errormessage': binding.value.errorMessage,
+    };
+    for (const attribute of comboboxAriaAttributes) {
+      const value = values[attribute];
+      if (value) combobox.setAttribute(attribute, value);
+      else combobox.removeAttribute(attribute);
+    }
+  });
+}
+
+async function loadSymbolOptions(): Promise<void> {
+  symbolsLoading.value = true;
+  const results = await Promise.allSettled([
+    fetchTickers('spot'),
+    fetchTickers('swap'),
+  ]);
+  if (!componentActive) return;
+  const symbols = results.flatMap((result) => (
+    result.status === 'fulfilled'
+      ? result.value.map((ticker) => ticker.symbol).filter(Boolean)
+      : []
+  ));
+  fetchedSymbols.value = uniqueStrings(symbols);
+  if (results.some((result) => result.status === 'rejected')) {
+    ElMessage.warning(t('market.unableToLoadSymbols'));
+  }
+  symbolsLoading.value = false;
+}
+
+function updateCommonField<Key extends 'symbol' | 'timeframe'>(key: Key, value: StrategyConfigPayload[Key]): void {
+  model.value = { ...model.value, [key]: value };
+}
 
 function inputId(path: string): string {
   if (path === 'strategy_type') return 'strategy-strategy-type';
@@ -136,6 +223,10 @@ function updateParameter(key: string, value: string | number | boolean | null | 
             :aria-label="t('strategies.form.strategyType')"
             :aria-describedby="describedBy('strategy_type', true)"
             :aria-errormessage="fieldError('strategy_type') ? errorId('strategy_type') : undefined"
+            v-combobox-aria="{
+              describedBy: describedBy('strategy_type', true),
+              errorMessage: fieldError('strategy_type') ? errorId('strategy_type') : undefined,
+            }"
             :disabled="readonly"
             @change="handleTypeChange"
           >
@@ -155,14 +246,31 @@ function updateParameter(key: string, value: string | number | boolean | null | 
 
       <el-col :xs="24" :sm="12">
         <el-form-item :label="t('strategies.form.symbol')" :error="fieldError('symbol')">
-          <el-input
+          <el-select
             id="strategy-symbol"
-            v-model="model.symbol"
+            v-model="symbolValue"
             name="symbol"
+            class="strategy-form__control"
+            :filterable="true"
+            :allow-create="true"
+            :default-first-option="true"
+            :loading="symbolsLoading"
+            :disabled="readonly"
             :aria-label="t('strategies.form.symbol')"
             :aria-describedby="describedBy('symbol', true)"
             :aria-errormessage="fieldError('symbol') ? errorId('symbol') : undefined"
-          />
+            v-combobox-aria="{
+              describedBy: describedBy('symbol', true),
+              errorMessage: fieldError('symbol') ? errorId('symbol') : undefined,
+            }"
+          >
+            <el-option
+              v-for="symbol in symbolOptions"
+              :key="symbol"
+              :label="symbol"
+              :value="symbol"
+            />
+          </el-select>
           <p :id="descriptionId('symbol')" class="strategy-form__description">
             {{ t('strategies.form.symbolDescription') }}
           </p>
@@ -172,14 +280,30 @@ function updateParameter(key: string, value: string | number | boolean | null | 
 
       <el-col :xs="24" :sm="12">
         <el-form-item :label="t('strategies.form.timeframe')" :error="fieldError('timeframe')">
-          <el-input
+          <el-select
             id="strategy-timeframe"
-            v-model="model.timeframe"
+            v-model="timeframeValue"
             name="timeframe"
+            class="strategy-form__control"
+            :filterable="true"
+            :allow-create="true"
+            :default-first-option="true"
+            :disabled="readonly"
             :aria-label="t('strategies.form.timeframe')"
             :aria-describedby="describedBy('timeframe', true)"
             :aria-errormessage="fieldError('timeframe') ? errorId('timeframe') : undefined"
-          />
+            v-combobox-aria="{
+              describedBy: describedBy('timeframe', true),
+              errorMessage: fieldError('timeframe') ? errorId('timeframe') : undefined,
+            }"
+          >
+            <el-option
+              v-for="timeframe in timeframeOptions"
+              :key="timeframe"
+              :label="timeframe"
+              :value="timeframe"
+            />
+          </el-select>
           <p :id="descriptionId('timeframe')" class="strategy-form__description">
             {{ t('strategies.form.timeframeDescription') }}
           </p>
@@ -270,33 +394,33 @@ function updateParameter(key: string, value: string | number | boolean | null | 
 }
 
 .strategy-form__parameters h3 {
-  margin: 4px 0 6px;
-  font-size: 16px;
+  margin: var(--ui-space-4) 0 var(--ui-space-6);
+  font-size: var(--ui-font-size-16);
 }
 
 .strategy-form__definition,
 .strategy-form__description {
   margin: 0;
-  color: #606266;
-  font-size: 13px;
+  color: var(--ui-color-text-secondary);
+  font-size: var(--ui-font-size-13);
   line-height: 1.45;
 }
 
 .strategy-form__definition {
-  margin-bottom: 12px;
+  margin-bottom: var(--ui-space-12);
 }
 
 .strategy-form__description {
   width: 100%;
-  margin-top: 5px;
+  margin-top: var(--ui-space-4);
 }
 
 .sr-only {
   position: absolute;
-  width: 1px;
-  height: 1px;
+  width: var(--ui-a11y-hidden-size);
+  height: var(--ui-a11y-hidden-size);
   padding: 0;
-  margin: -1px;
+  margin: var(--ui-a11y-hidden-offset);
   overflow: hidden;
   clip: rect(0, 0, 0, 0);
   white-space: nowrap;

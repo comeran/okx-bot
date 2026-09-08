@@ -49,6 +49,9 @@ class Order:
     status: OrderStatus = OrderStatus.PENDING
     fill_price: float | None = None
     fill_time: int | None = None
+    exchange_order_id: str = ""
+    client_order_id: str = ""
+    updated_at: int = 0
     reduce_only: bool = False
     params: dict[str, object] = field(default_factory=dict)
 

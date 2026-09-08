@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import time
+from dataclasses import asdict
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
 
+from src.analytics.strategy_performance import build_strategy_performance
 from src.core.runtime_settings import load_runtime_settings
 from src.data.repository import Repository
 from src.exchange.live_sync import refresh_okx_live_state
@@ -132,6 +134,18 @@ async def get_trades(strategy: str | None = None) -> list[dict[str, Any]]:
         reverse=True,
     )
     return serialize_records(trades)
+
+
+@router.get("/strategy-performance")
+async def get_strategy_performance() -> list[dict[str, Any]]:
+    repository = Repository()
+    performances = build_strategy_performance(
+        repository.get_accounts(),
+        repository.get_positions(),
+        repository.get_orders(),
+        repository.get_trades(),
+    )
+    return [asdict(performance) for performance in performances]
 
 
 @router.get("/account")

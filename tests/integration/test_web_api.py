@@ -1,6 +1,7 @@
 import asyncio
 import subprocess
 import sys
+from dataclasses import asdict
 from types import SimpleNamespace
 
 import pytest
@@ -9,6 +10,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from httpx import ASGITransport, AsyncClient
 
+from src.analytics.strategy_performance import build_strategy_performance
 from src.core.config import AppConfig, ExchangeConfig, RiskConfig
 from src.core.engine import BotEngine
 from src.core.types import Bar, Order, OrderSide, OrderStatus, OrderType
@@ -17,9 +19,12 @@ from src.data.models import (
     BacktestResultRecord,
     BacktestTradeRecord,
     KlineCache,
+    OrderRecord,
     PositionRecord,
     StrategyConfigRecord,
+    TradeRecord,
 )
+from src.data.repository import Repository as SqliteRepository
 from src.exchange.live_sync import LiveStateSyncResult
 from src.order.manager import UnifiedOrderManager
 from src.strategy.base import BaseStrategy
@@ -39,7 +44,22 @@ from src.web.app import create_app
 
 
 @pytest.fixture
-def app():
+def app(monkeypatch, tmp_path):
+    db_path = tmp_path / "bot.db"
+
+    def repository_factory(db_path=db_path):
+        return SqliteRepository(db_path=str(db_path))
+
+    for module in (
+        web_app,
+        strategy_api,
+        ops_api,
+        trading_api,
+        market_api,
+        backtest_api,
+    ):
+        monkeypatch.setattr(module, "Repository", repository_factory, raising=False)
+
     return create_app()
 
 
@@ -291,6 +311,9 @@ async def test_legacy_ma_cross_runtime_defaults_to_1m_subscription_and_latest_pr
 
         async def start(self):
             self._running = True
+            for symbol, timeframe, callback in list(self.subscriptions):
+                for bar in self.bars.get((symbol, timeframe), []):
+                    await callback(bar)
 
     class CapturingOrderManager:
         async def submit(self, *args, **kwargs):
@@ -740,10 +763,21 @@ class FakeMarketDataService:
     async def start(self):
         self.start_calls += 1
         self._running = True
+        for _symbol, _timeframe, callback in list(self.subscriptions):
+            await callback(Bar(1, 1, 1, 1, 1, 1))
 
     async def stop(self):
         self.stop_calls += 1
         self._running = False
+
+
+@pytest.fixture(autouse=True)
+def fake_market_data_service_factory(monkeypatch):
+    monkeypatch.setattr(
+        strategy_api,
+        "create_market_data_service",
+        lambda: FakeMarketDataService(),
+    )
 
 
 @pytest.fixture
@@ -767,6 +801,148 @@ def isolated_strategy_config_api(monkeypatch):
         prefix="/api/strategies",
     )
     return app, runtime, messages
+
+
+@pytest.mark.asyncio
+async def test_clone_config_to_different_strategy_type_replaces_source_params(
+    isolated_strategy_config_api,
+):
+    app, _runtime, _messages = isolated_strategy_config_api
+    source_params = {"window": 20, "stddev_multiplier": 2, "amount": 0.1}
+    target_params = {
+        "period": 14,
+        "oversold": 30,
+        "overbought": 70,
+        "amount": 0.25,
+    }
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        create_resp = await client.post(
+            "/api/strategies/configs",
+            json={
+                "name": "test",
+                "strategy_type": "bollinger_mean_reversion",
+                "symbol": "BTC-USDT",
+                "timeframe": "1h",
+                "params": source_params,
+                "enabled": True,
+            },
+        )
+        clone_resp = await client.post(
+            "/api/strategies/configs/test/clone",
+            json={
+                "target_name": "test_rsi_clone",
+                "overrides": {
+                    "strategy_type": "rsi_mean_reversion",
+                    "symbol": "ETH-USDT",
+                    "timeframe": "15m",
+                    "enabled": False,
+                    "params": target_params,
+                },
+            },
+        )
+
+    assert create_resp.status_code == 201
+    assert clone_resp.status_code == 201
+    clone = clone_resp.json()
+    assert clone["enabled"] is False
+    assert clone["strategy_type"] == "rsi_mean_reversion"
+    assert clone["params"] == target_params
+    assert "window" not in clone["params"]
+    assert "stddev_multiplier" not in clone["params"]
+    assert IsolatedStrategyConfigRepository.configs["test_rsi_clone"].params == target_params
+
+
+@pytest.mark.asyncio
+async def test_clone_config_to_different_strategy_type_without_params_uses_target_defaults(
+    isolated_strategy_config_api,
+):
+    app, _runtime, _messages = isolated_strategy_config_api
+    source_params = {"window": 20, "stddev_multiplier": 2, "amount": 0.1}
+    rsi_defaults = {
+        "period": 14,
+        "oversold": 30,
+        "overbought": 70,
+        "amount": 0.1,
+    }
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        create_resp = await client.post(
+            "/api/strategies/configs",
+            json={
+                "name": "test",
+                "strategy_type": "bollinger_mean_reversion",
+                "symbol": "BTC-USDT",
+                "timeframe": "1h",
+                "params": source_params,
+                "enabled": True,
+            },
+        )
+        clone_resp = await client.post(
+            "/api/strategies/configs/test/clone",
+            json={
+                "target_name": "test_rsi_defaults_clone",
+                "overrides": {
+                    "strategy_type": "rsi_mean_reversion",
+                },
+            },
+        )
+
+    assert create_resp.status_code == 201
+    assert clone_resp.status_code == 201
+    clone = clone_resp.json()
+    assert clone["enabled"] is False
+    assert clone["strategy_type"] == "rsi_mean_reversion"
+    assert clone["params"] == rsi_defaults
+    assert "window" not in clone["params"]
+    assert "stddev_multiplier" not in clone["params"]
+    stored_clone = IsolatedStrategyConfigRepository.configs["test_rsi_defaults_clone"]
+    assert stored_clone.params == rsi_defaults
+
+
+@pytest.mark.asyncio
+async def test_clone_config_to_canonically_same_strategy_type_merges_partial_params(
+    isolated_strategy_config_api,
+):
+    app, _runtime, _messages = isolated_strategy_config_api
+    source_params = {"window": 24, "stddev_multiplier": 2.5, "amount": 0.2}
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        create_resp = await client.post(
+            "/api/strategies/configs",
+            json={
+                "name": "test",
+                "strategy_type": "bollinger_mean_reversion",
+                "symbol": "BTC-USDT",
+                "timeframe": "1h",
+                "params": source_params,
+                "enabled": True,
+            },
+        )
+        clone_resp = await client.post(
+            "/api/strategies/configs/test/clone",
+            json={
+                "target_name": "test_bollinger_clone",
+                "overrides": {
+                    "strategy_type": " bollinger_mean_reversion ",
+                    "params": {"amount": 0.35},
+                },
+            },
+        )
+
+    assert create_resp.status_code == 201
+    assert clone_resp.status_code == 201
+    clone = clone_resp.json()
+    assert clone["enabled"] is False
+    assert clone["strategy_type"] == "bollinger_mean_reversion"
+    assert clone["params"]["amount"] == 0.35
+    assert clone["params"]["window"] == 24
+    assert clone["params"]["stddev_multiplier"] == 2.5
+    stored_clone = IsolatedStrategyConfigRepository.configs["test_bollinger_clone"]
+    assert stored_clone.params == clone["params"]
 
 
 @pytest.fixture
@@ -909,15 +1085,936 @@ async def test_strategy_config_api_accepts_all_registered_builtin_types(
     assert any(
         config["name"] == case["name"]
         and all(
-            config[field] == expected_value
-            for field, expected_value in expected_config.items()
+            config[field] == expected_value for field, expected_value in expected_config.items()
         )
         for config in configs
     )
     assert {"name": case["name"], "status": "stopped"} in statuses
-    assert case["strategy_type"] in {
-        definition["strategy_type"] for definition in strategy_types
-    }
+    assert case["strategy_type"] in {definition["strategy_type"] for definition in strategy_types}
+
+
+@pytest.mark.asyncio
+async def test_strategy_start_preserves_preexisting_startup_owner(
+    hermetic_persisted_builtin_strategy_api,
+    monkeypatch,
+):
+    environment = hermetic_persisted_builtin_strategy_api
+    sentinel_owner = SimpleNamespace(stop_calls=0)
+    constructed_engines = []
+
+    async def fail_live_sync(*args, **kwargs):
+        raise AssertionError("External OKX sync must not be attempted")
+
+    class RecordingEngine:
+        def __init__(self, *args, **kwargs):
+            self.start_calls = 0
+            self.stop_calls = 0
+            constructed_engines.append(self)
+
+        async def start(self):
+            self.start_calls += 1
+
+        async def stop(self):
+            self.stop_calls += 1
+
+    monkeypatch.setattr(strategy_api, "refresh_okx_live_state", fail_live_sync, raising=False)
+    monkeypatch.setattr(strategy_api, "BotEngine", RecordingEngine)
+    environment.runtime.starting_engines["ma_cross"] = sentinel_owner
+    transport = ASGITransport(app=environment.app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/api/strategies/ma_cross/start")
+
+    assert response.status_code == 200
+    assert environment.runtime.starting_engines.get("ma_cross") is sentinel_owner
+    assert constructed_engines == []
+    assert sentinel_owner.stop_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_strategy_start_cancellation_during_engine_start_cleans_startup_owner(
+    hermetic_persisted_builtin_strategy_api,
+    monkeypatch,
+):
+    environment = hermetic_persisted_builtin_strategy_api
+    created_engines = []
+    start_entered = asyncio.Event()
+
+    class CancellableStartEngine:
+        def __init__(self, *args, **kwargs):
+            self.stop_calls = 0
+            created_engines.append(self)
+
+        async def start(self):
+            start_entered.set()
+            await asyncio.Future()
+
+        async def stop(self):
+            self.stop_calls += 1
+
+    monkeypatch.setattr(strategy_api, "BotEngine", CancellableStartEngine)
+    transport = ASGITransport(app=environment.app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        start_task = asyncio.create_task(client.post("/api/strategies/ma_cross/start"))
+        await asyncio.wait_for(start_entered.wait(), timeout=1)
+        engine = created_engines[0]
+        assert environment.runtime.starting_engines["ma_cross"] is engine
+
+        start_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await start_task
+
+    assert environment.runtime.starting_engines.get("ma_cross") is not engine
+    assert environment.runtime.engines.get("ma_cross") is not engine
+    assert engine.stop_calls == 1
+    assert environment.market_data.stop_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_strategy_start_cancellation_after_engine_start_cleans_orphaned_engine(
+    hermetic_persisted_builtin_strategy_api,
+    monkeypatch,
+):
+    environment = hermetic_persisted_builtin_strategy_api
+    created_engines = []
+
+    class CancelBeforeOwnershipTransferLock:
+        def __init__(self):
+            self._lock = asyncio.Lock()
+            self.entries = 0
+
+        async def __aenter__(self):
+            await self._lock.acquire()
+            self.entries += 1
+            if self.entries == 2:
+                self._lock.release()
+                asyncio.current_task().cancel()
+                await asyncio.sleep(0)
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            self._lock.release()
+
+    class StartedEngine:
+        def __init__(self, *args, **kwargs):
+            self.stop_calls = 0
+            created_engines.append(self)
+
+        async def start(self):
+            return None
+
+        async def stop(self):
+            self.stop_calls += 1
+
+    environment.runtime.market_data_lifecycle_lock = CancelBeforeOwnershipTransferLock()
+    monkeypatch.setattr(strategy_api, "BotEngine", StartedEngine)
+    transport = ASGITransport(app=environment.app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        start_task = asyncio.create_task(client.post("/api/strategies/ma_cross/start"))
+        with pytest.raises(asyncio.CancelledError):
+            await start_task
+
+    engine = created_engines[0]
+    assert environment.runtime.starting_engines.get("ma_cross") is not engine
+    assert environment.runtime.engines.get("ma_cross") is not engine
+    assert engine.stop_calls == 1
+    assert environment.market_data.stop_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_strategy_start_cancellation_preserves_request_cancel_when_stop_is_cancelled(
+    hermetic_persisted_builtin_strategy_api,
+    monkeypatch,
+):
+    environment = hermetic_persisted_builtin_strategy_api
+    created_engines = []
+    start_entered = asyncio.Event()
+
+    class StopCancelledEngine:
+        def __init__(self, *args, **kwargs):
+            self.stop_calls = 0
+            self.running = False
+            self.market_data_service = kwargs["market_data_service"]
+            created_engines.append(self)
+
+        async def start(self):
+            self.running = True
+            self.market_data_service._running = True
+            start_entered.set()
+            await asyncio.Future()
+
+        async def stop(self):
+            self.stop_calls += 1
+            self.running = False
+            raise asyncio.CancelledError("engine stop cleanup cancelled")
+
+    monkeypatch.setattr(strategy_api, "BotEngine", StopCancelledEngine)
+    transport = ASGITransport(app=environment.app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        start_task = asyncio.create_task(client.post("/api/strategies/ma_cross/start"))
+        await asyncio.wait_for(start_entered.wait(), timeout=1)
+        engine = created_engines[0]
+        assert environment.runtime.starting_engines["ma_cross"] is engine
+
+        start_task.cancel("original request cancellation")
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await start_task
+
+    assert exc_info.value.args == ("original request cancellation",)
+    assert environment.runtime.starting_engines.get("ma_cross") is not engine
+    assert environment.runtime.engines.get("ma_cross") is not engine
+    assert engine.running is False
+    assert engine.stop_calls == 1
+    assert environment.market_data.stop_calls == 1
+    assert environment.market_data._running is False
+
+
+@pytest.mark.asyncio
+async def test_strategy_start_cancellation_cleanup_finishes_despite_second_cancel(
+    hermetic_persisted_builtin_strategy_api,
+    monkeypatch,
+):
+    environment = hermetic_persisted_builtin_strategy_api
+    created_engines = []
+    start_entered = asyncio.Event()
+    stop_entered = asyncio.Event()
+    allow_stop_to_finish = asyncio.Event()
+
+    class SlowStopEngine:
+        def __init__(self, *args, **kwargs):
+            self.stop_calls = 0
+            self.running = False
+            self.market_data_service = kwargs["market_data_service"]
+            created_engines.append(self)
+
+        async def start(self):
+            self.running = True
+            self.market_data_service._running = True
+            start_entered.set()
+            await asyncio.Future()
+
+        async def stop(self):
+            self.stop_calls += 1
+            stop_entered.set()
+            await allow_stop_to_finish.wait()
+            self.running = False
+
+    monkeypatch.setattr(strategy_api, "BotEngine", SlowStopEngine)
+    transport = ASGITransport(app=environment.app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        start_task = asyncio.create_task(client.post("/api/strategies/ma_cross/start"))
+        await asyncio.wait_for(start_entered.wait(), timeout=1)
+        engine = created_engines[0]
+
+        start_task.cancel("first request cancellation")
+        await asyncio.wait_for(stop_entered.wait(), timeout=1)
+        start_task.cancel("second request cancellation")
+        await asyncio.sleep(0)
+        allow_stop_to_finish.set()
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await asyncio.wait_for(start_task, timeout=1)
+
+    assert exc_info.value.args == ("first request cancellation",)
+    assert environment.runtime.starting_engines.get("ma_cross") is not engine
+    assert environment.runtime.engines.get("ma_cross") is not engine
+    assert engine.running is False
+    assert engine.stop_calls == 1
+    assert environment.market_data.stop_calls == 1
+    assert environment.market_data._running is False
+
+
+@pytest.mark.asyncio
+async def test_strategy_start_cancellation_after_ownership_transfer_cleans_engine(
+    hermetic_persisted_builtin_strategy_api,
+    monkeypatch,
+):
+    environment = hermetic_persisted_builtin_strategy_api
+    created_engines = []
+    running_broadcast_entered = asyncio.Event()
+
+    async def broadcast(message):
+        if message["type"] == "strategy_status" and message["status"] == "running":
+            running_broadcast_entered.set()
+            await asyncio.Future()
+        environment.messages.append(message)
+
+    class TransferredEngine:
+        def __init__(self, *args, **kwargs):
+            self.stop_calls = 0
+            self.running = False
+            self.market_data_service = kwargs["market_data_service"]
+            created_engines.append(self)
+
+        async def start(self):
+            self.running = True
+            self.market_data_service._running = True
+
+        async def stop(self):
+            self.stop_calls += 1
+            self.running = False
+
+    app = FastAPI()
+    app.include_router(
+        strategy_api.create_router(broadcast=broadcast, runtime=environment.runtime),
+        prefix="/api/strategies",
+    )
+    monkeypatch.setattr(strategy_api, "BotEngine", TransferredEngine)
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        start_task = asyncio.create_task(client.post("/api/strategies/ma_cross/start"))
+        await asyncio.wait_for(running_broadcast_entered.wait(), timeout=1)
+        engine = created_engines[0]
+        assert environment.runtime.engines["ma_cross"] is engine
+
+        start_task.cancel("post-transfer cancellation")
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await start_task
+
+    assert exc_info.value.args == ("post-transfer cancellation",)
+    assert environment.runtime.engines.get("ma_cross") is not engine
+    assert environment.runtime.starting_engines.get("ma_cross") is not engine
+    assert environment.runtime.strategy_status["ma_cross"] == "stopped"
+    assert engine.running is False
+    assert engine.stop_calls == 1
+    assert environment.market_data.stop_calls == 1
+    assert environment.market_data._running is False
+    assert not any(message.get("status") == "running" for message in environment.messages)
+
+
+@pytest.mark.asyncio
+async def test_strategy_start_post_transfer_cleanup_finishes_despite_second_cancel(
+    hermetic_persisted_builtin_strategy_api,
+    monkeypatch,
+):
+    environment = hermetic_persisted_builtin_strategy_api
+    created_engines = []
+    running_broadcast_entered = asyncio.Event()
+    stop_entered = asyncio.Event()
+    allow_stop_to_finish = asyncio.Event()
+
+    async def broadcast(message):
+        if message["type"] == "strategy_status" and message["status"] == "running":
+            running_broadcast_entered.set()
+            await asyncio.Future()
+        environment.messages.append(message)
+
+    class SlowTransferredEngine:
+        def __init__(self, *args, **kwargs):
+            self.stop_calls = 0
+            self.running = False
+            self.market_data_service = kwargs["market_data_service"]
+            created_engines.append(self)
+
+        async def start(self):
+            self.running = True
+            self.market_data_service._running = True
+
+        async def stop(self):
+            self.stop_calls += 1
+            stop_entered.set()
+            await allow_stop_to_finish.wait()
+            self.running = False
+
+    app = FastAPI()
+    app.include_router(
+        strategy_api.create_router(broadcast=broadcast, runtime=environment.runtime),
+        prefix="/api/strategies",
+    )
+    monkeypatch.setattr(strategy_api, "BotEngine", SlowTransferredEngine)
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        start_task = asyncio.create_task(client.post("/api/strategies/ma_cross/start"))
+        await asyncio.wait_for(running_broadcast_entered.wait(), timeout=1)
+        engine = created_engines[0]
+
+        start_task.cancel("first post-transfer cancellation")
+        await asyncio.wait_for(stop_entered.wait(), timeout=1)
+        start_task.cancel("second post-transfer cancellation")
+        await asyncio.sleep(0)
+        allow_stop_to_finish.set()
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await asyncio.wait_for(start_task, timeout=1)
+
+    assert exc_info.value.args == ("first post-transfer cancellation",)
+    assert environment.runtime.engines.get("ma_cross") is not engine
+    assert environment.runtime.starting_engines.get("ma_cross") is not engine
+    assert engine.running is False
+    assert engine.stop_calls == 1
+    assert environment.market_data.stop_calls == 1
+    assert environment.market_data._running is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replacement_map", ["engines", "starting_engines"])
+async def test_strategy_start_post_transfer_cleanup_keeps_replacement_owner(
+    hermetic_persisted_builtin_strategy_api,
+    monkeypatch,
+    replacement_map,
+):
+    environment = hermetic_persisted_builtin_strategy_api
+    created_engines = []
+    running_broadcast_entered = asyncio.Event()
+    stop_entered = asyncio.Event()
+    allow_stop_to_finish = asyncio.Event()
+    replacement_engine = SimpleNamespace(stop_calls=0)
+
+    async def broadcast(message):
+        if message["type"] == "strategy_status" and message["status"] == "running":
+            running_broadcast_entered.set()
+            await asyncio.Future()
+        environment.messages.append(message)
+
+    class ReplacedTransferredEngine:
+        def __init__(self, *args, **kwargs):
+            self.stop_calls = 0
+            self.running = False
+            self.market_data_service = kwargs["market_data_service"]
+            created_engines.append(self)
+
+        async def start(self):
+            self.running = True
+            self.market_data_service._running = True
+
+        async def stop(self):
+            self.stop_calls += 1
+            stop_entered.set()
+            await allow_stop_to_finish.wait()
+            self.running = False
+
+    app = FastAPI()
+    app.include_router(
+        strategy_api.create_router(broadcast=broadcast, runtime=environment.runtime),
+        prefix="/api/strategies",
+    )
+    monkeypatch.setattr(strategy_api, "BotEngine", ReplacedTransferredEngine)
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        start_task = asyncio.create_task(client.post("/api/strategies/ma_cross/start"))
+        await asyncio.wait_for(running_broadcast_entered.wait(), timeout=1)
+        engine = created_engines[0]
+
+        start_task.cancel("replacement post-transfer cancellation")
+        await asyncio.wait_for(stop_entered.wait(), timeout=1)
+        async with environment.runtime.market_data_lifecycle_lock:
+            if replacement_map == "engines":
+                environment.runtime.engines["ma_cross"] = replacement_engine
+            else:
+                environment.runtime.starting_engines["ma_cross"] = replacement_engine
+        allow_stop_to_finish.set()
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await start_task
+
+    assert exc_info.value.args == ("replacement post-transfer cancellation",)
+    owner_map = getattr(environment.runtime, replacement_map)
+    assert owner_map["ma_cross"] is replacement_engine
+    assert engine.stop_calls == 1
+    assert engine.running is False
+    assert environment.market_data.stop_calls == 0
+    assert environment.market_data._running is True
+
+
+@pytest.mark.asyncio
+async def test_strategy_start_cancellation_keeps_replacement_startup_owner(
+    hermetic_persisted_builtin_strategy_api,
+    monkeypatch,
+):
+    environment = hermetic_persisted_builtin_strategy_api
+    created_engines = []
+    start_entered = asyncio.Event()
+    replacement_engine = object()
+
+    class ReplacedStartupOwnerEngine:
+        def __init__(self, *args, **kwargs):
+            self.stop_calls = 0
+            self.running = False
+            created_engines.append(self)
+
+        async def start(self):
+            self.running = True
+            start_entered.set()
+            await asyncio.Future()
+
+        async def stop(self):
+            self.stop_calls += 1
+            self.running = False
+
+    monkeypatch.setattr(strategy_api, "BotEngine", ReplacedStartupOwnerEngine)
+    transport = ASGITransport(app=environment.app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        start_task = asyncio.create_task(client.post("/api/strategies/ma_cross/start"))
+        await asyncio.wait_for(start_entered.wait(), timeout=1)
+        engine = created_engines[0]
+        assert environment.runtime.starting_engines["ma_cross"] is engine
+        environment.runtime.starting_engines["ma_cross"] = replacement_engine
+
+        start_task.cancel("request cancellation")
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await start_task
+
+    assert exc_info.value.args == ("request cancellation",)
+    assert environment.runtime.starting_engines["ma_cross"] is replacement_engine
+    assert environment.runtime.engines.get("ma_cross") is not engine
+    assert engine.running is False
+    assert engine.stop_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_strategy_start_success_keeps_replacement_startup_owner(
+    hermetic_persisted_builtin_strategy_api,
+    monkeypatch,
+):
+    environment = hermetic_persisted_builtin_strategy_api
+    created_engines = []
+    start_entered = asyncio.Event()
+    finish_start = asyncio.Event()
+    replacement_engine = object()
+
+    class SuccessfulReplacedStartupOwnerEngine:
+        def __init__(self, *args, **kwargs):
+            self.stop_calls = 0
+            self.running = False
+            created_engines.append(self)
+
+        async def start(self):
+            self.running = True
+            start_entered.set()
+            await finish_start.wait()
+
+        async def stop(self):
+            self.stop_calls += 1
+            self.running = False
+
+    monkeypatch.setattr(strategy_api, "BotEngine", SuccessfulReplacedStartupOwnerEngine)
+    transport = ASGITransport(app=environment.app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        start_task = asyncio.create_task(client.post("/api/strategies/ma_cross/start"))
+        await asyncio.wait_for(start_entered.wait(), timeout=1)
+        engine = created_engines[0]
+        assert environment.runtime.starting_engines["ma_cross"] is engine
+        async with environment.runtime.market_data_lifecycle_lock:
+            environment.runtime.starting_engines["ma_cross"] = replacement_engine
+            environment.runtime.strategy_status["ma_cross"] = "replacement-starting"
+            environment.runtime.strategy_errors["ma_cross"] = "replacement startup pending"
+
+        finish_start.set()
+        response = await start_task
+
+    assert environment.runtime.starting_engines["ma_cross"] is replacement_engine
+    assert environment.runtime.engines.get("ma_cross") is not engine
+    assert engine.running is False
+    assert engine.stop_calls == 1
+    assert environment.market_data.stop_calls == 0
+    assert environment.runtime.strategy_status["ma_cross"] == "replacement-starting"
+    assert environment.runtime.strategy_errors["ma_cross"] == "replacement startup pending"
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Strategy startup was superseded"
+
+
+@pytest.mark.asyncio
+async def test_strategy_start_failure_keeps_replacement_startup_owner(
+    hermetic_persisted_builtin_strategy_api,
+    monkeypatch,
+):
+    environment = hermetic_persisted_builtin_strategy_api
+    created_engines = []
+    start_entered = asyncio.Event()
+    fail_start = asyncio.Event()
+    replacement_engine = object()
+
+    class FailingReplacedStartupOwnerEngine:
+        def __init__(self, *args, **kwargs):
+            self.stop_calls = 0
+            self.running = False
+            created_engines.append(self)
+
+        async def start(self):
+            self.running = True
+            start_entered.set()
+            await fail_start.wait()
+            raise RuntimeError("startup boom")
+
+        async def stop(self):
+            self.stop_calls += 1
+            self.running = False
+
+    monkeypatch.setattr(strategy_api, "BotEngine", FailingReplacedStartupOwnerEngine)
+    transport = ASGITransport(app=environment.app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        start_task = asyncio.create_task(client.post("/api/strategies/ma_cross/start"))
+        await asyncio.wait_for(start_entered.wait(), timeout=1)
+        engine = created_engines[0]
+        assert environment.runtime.starting_engines["ma_cross"] is engine
+        environment.runtime.starting_engines["ma_cross"] = replacement_engine
+        environment.runtime.strategy_status["ma_cross"] = "replacement-starting"
+        environment.runtime.strategy_errors["ma_cross"] = "replacement startup pending"
+
+        fail_start.set()
+        response = await start_task
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "startup boom"
+    assert environment.runtime.starting_engines["ma_cross"] is replacement_engine
+    assert environment.runtime.engines.get("ma_cross") is not engine
+    assert engine.running is False
+    assert engine.stop_calls == 1
+    assert environment.market_data.stop_calls == 0
+    assert environment.runtime.strategy_status["ma_cross"] == "replacement-starting"
+    assert environment.runtime.strategy_errors["ma_cross"] == "replacement startup pending"
+
+
+@pytest.mark.asyncio
+async def test_strategy_start_ordinary_failure_records_current_startup_owner_error(
+    hermetic_persisted_builtin_strategy_api,
+    monkeypatch,
+):
+    environment = hermetic_persisted_builtin_strategy_api
+    created_engines = []
+
+    class FailingStartupOwnerEngine:
+        def __init__(self, *args, **kwargs):
+            self.stop_calls = 0
+            self.running = False
+            created_engines.append(self)
+
+        async def start(self):
+            self.running = True
+            raise RuntimeError("startup boom")
+
+        async def stop(self):
+            self.stop_calls += 1
+            self.running = False
+
+    monkeypatch.setattr(strategy_api, "BotEngine", FailingStartupOwnerEngine)
+    transport = ASGITransport(app=environment.app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/api/strategies/ma_cross/start")
+
+    engine = created_engines[0]
+    assert response.status_code == 400
+    assert response.json()["detail"] == "startup boom"
+    assert environment.runtime.starting_engines == {}
+    assert environment.runtime.engines == {}
+    assert engine.running is False
+    assert engine.stop_calls == 1
+    assert environment.market_data.stop_calls == 1
+    assert environment.runtime.strategy_status["ma_cross"] == "stopped"
+    assert environment.runtime.strategy_errors["ma_cross"] == "startup boom"
+    assert {
+        "type": "strategy_status",
+        "strategy": "ma_cross",
+        "status": "stopped",
+        "timestamp": 1700000000000,
+    } in environment.messages
+    assert {
+        "type": "strategy_error",
+        "strategy": "ma_cross",
+        "error": "startup boom",
+        "timestamp": 1700000000000,
+    } in environment.messages
+
+
+@pytest.mark.asyncio
+async def test_strategy_error_after_ownership_loss_does_not_report_against_replacement(
+    hermetic_persisted_builtin_strategy_api,
+    monkeypatch,
+):
+    environment = hermetic_persisted_builtin_strategy_api
+    created_engines = []
+    stop_entered = asyncio.Event()
+    release_stop = asyncio.Event()
+    replacement_installed = asyncio.Event()
+    broadcasts_after_replacement = []
+    messages = []
+
+    class BlockingStopMarketDataService(FakeMarketDataService):
+        async def stop(self):
+            self.stop_calls += 1
+            stop_entered.set()
+            await release_stop.wait()
+            self._running = False
+
+    class CallbackCapturingEngine:
+        def __init__(self, *args, **kwargs):
+            self.stop_calls = 0
+            self.running = False
+            self.on_strategy_error = kwargs["on_strategy_error"]
+            created_engines.append(self)
+
+        async def start(self):
+            self.running = True
+
+        async def stop(self):
+            self.stop_calls += 1
+            self.running = False
+
+    async def broadcast(message):
+        messages.append(message)
+        if replacement_installed.is_set() and message.get("type") in {
+            "strategy_status",
+            "strategy_error",
+        }:
+            broadcasts_after_replacement.append(message)
+
+    blocking_market_data = BlockingStopMarketDataService()
+    monkeypatch.setattr(strategy_api, "create_market_data_service", lambda: blocking_market_data)
+    monkeypatch.setattr(strategy_api, "BotEngine", CallbackCapturingEngine)
+    app = FastAPI()
+    app.include_router(
+        strategy_api.create_router(broadcast=broadcast, runtime=environment.runtime),
+        prefix="/api/strategies",
+    )
+    transport = ASGITransport(app=app)
+    error_task = None
+    replacement_engine = object()
+
+    try:
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            start_response = await client.post("/api/strategies/ma_cross/start")
+            assert start_response.status_code == 200
+
+            engine = created_engines[0]
+            assert environment.runtime.engines["ma_cross"] is engine
+            environment.runtime.strategy_status["ma_cross"] = "running"
+            environment.runtime.strategy_errors["ma_cross"] = "replacement B error"
+            messages.clear()
+
+            error_task = asyncio.create_task(
+                engine.on_strategy_error("ma_cross", RuntimeError("stale A boom"))
+            )
+            await asyncio.wait_for(stop_entered.wait(), timeout=1)
+            assert environment.runtime.engines.get("ma_cross") is not engine
+
+            environment.runtime.engines["ma_cross"] = replacement_engine
+            replacement_installed.set()
+            release_stop.set()
+            await asyncio.wait_for(error_task, timeout=1)
+    finally:
+        release_stop.set()
+        if error_task is not None and not error_task.done():
+            error_task.cancel()
+            await asyncio.gather(error_task, return_exceptions=True)
+
+    assert environment.runtime.engines["ma_cross"] is replacement_engine
+    assert environment.runtime.strategy_status["ma_cross"] == "running"
+    assert environment.runtime.strategy_errors["ma_cross"] == "replacement B error"
+    assert broadcasts_after_replacement == []
+
+
+@pytest.mark.asyncio
+async def test_persisted_strategy_error_suppressed_after_transient_replacement_supersession(
+    hermetic_persisted_builtin_strategy_api,
+    monkeypatch,
+):
+    environment = hermetic_persisted_builtin_strategy_api
+    strategy_name = "persisted_ma_cross"
+    created_engines = []
+    status_broadcast_entered = asyncio.Event()
+    allow_status_broadcast = asyncio.Event()
+    messages = []
+
+    class CallbackCapturingEngine:
+        def __init__(self, *args, **kwargs):
+            self.running = False
+            self.stop_calls = 0
+            self.on_strategy_error = kwargs["on_strategy_error"]
+            created_engines.append(self)
+
+        async def start(self):
+            self.running = True
+
+        async def stop(self):
+            self.stop_calls += 1
+            self.running = False
+
+    async def broadcast(message):
+        messages.append(message)
+        if (
+            message.get("type") == "strategy_status"
+            and message.get("strategy") == strategy_name
+            and message.get("status") == "stopped"
+        ):
+            assert environment.runtime.engines.get(strategy_name) is None
+            assert environment.runtime.starting_engines.get(strategy_name) is None
+            status_broadcast_entered.set()
+            await allow_status_broadcast.wait()
+
+    monkeypatch.setattr(strategy_api, "BotEngine", CallbackCapturingEngine)
+    app = FastAPI()
+    app.include_router(
+        strategy_api.create_router(broadcast=broadcast, runtime=environment.runtime),
+        prefix="/api/strategies",
+    )
+    transport = ASGITransport(app=app)
+    error_task = None
+    replacement_engine = object()
+
+    try:
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            create_response = await client.post(
+                "/api/strategies/configs",
+                json={
+                    "name": strategy_name,
+                    "strategy_type": "ma_cross",
+                    "symbol": "BTC-USDT",
+                    "timeframe": "1h",
+                    "enabled": True,
+                    "params": {"fast_window": 5, "slow_window": 20, "amount": 0.1},
+                },
+            )
+            assert create_response.status_code == 201
+            start_response = await client.post(f"/api/strategies/{strategy_name}/start")
+            assert start_response.status_code == 200
+
+            engine = created_engines[0]
+            assert environment.runtime.engines[strategy_name] is engine
+            messages.clear()
+
+            error_task = asyncio.create_task(
+                engine.on_strategy_error(strategy_name, RuntimeError("stale A boom"))
+            )
+            await asyncio.wait_for(status_broadcast_entered.wait(), timeout=1)
+
+            environment.runtime.engines[strategy_name] = replacement_engine
+            environment.runtime.strategy_status[strategy_name] = "running"
+            environment.runtime.strategy_errors[strategy_name] = "replacement B error"
+            if environment.runtime.engines.get(strategy_name) is replacement_engine:
+                environment.runtime.engines.pop(strategy_name)
+            allow_status_broadcast.set()
+            await asyncio.wait_for(error_task, timeout=1)
+    finally:
+        allow_status_broadcast.set()
+        if error_task is not None and not error_task.done():
+            error_task.cancel()
+            await asyncio.gather(error_task, return_exceptions=True)
+
+    assert environment.runtime.engines.get(strategy_name) is None
+    assert environment.runtime.starting_engines.get(strategy_name) is None
+    assert environment.runtime.strategy_status[strategy_name] == "running"
+    assert environment.runtime.strategy_errors[strategy_name] == "replacement B error"
+    assert not any(
+        message.get("type") == "strategy_error"
+        and message.get("strategy") == strategy_name
+        and message.get("error") == "stale A boom"
+        for message in messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_strategy_start_callback_error_after_transfer_stays_stopped(
+    hermetic_persisted_builtin_strategy_api,
+    monkeypatch,
+):
+    environment = hermetic_persisted_builtin_strategy_api
+    created_engines = []
+    callback_tasks = []
+    engine_transferred = asyncio.Event()
+    stopped_broadcast_entered = asyncio.Event()
+    release_stopped_broadcast = asyncio.Event()
+    messages = []
+
+    class TransferTrackingEngines(dict):
+        def __setitem__(self, key, value):
+            super().__setitem__(key, value)
+            if key == "ma_cross" and value is created_engines[0]:
+                engine_transferred.set()
+
+    async def broadcast(message):
+        messages.append(message)
+        if (
+            message.get("type") == "strategy_status"
+            and message.get("strategy") == "ma_cross"
+            and message.get("status") == "stopped"
+        ):
+            assert environment.runtime.engines.get("ma_cross") is not created_engines[0]
+            assert environment.runtime.strategy_status["ma_cross"] == "stopped"
+            assert environment.runtime.strategy_errors["ma_cross"] == "callback startup boom"
+            stopped_broadcast_entered.set()
+            await release_stopped_broadcast.wait()
+
+    environment.runtime.engines = TransferTrackingEngines()
+    app = FastAPI()
+    app.include_router(
+        strategy_api.create_router(broadcast=broadcast, runtime=environment.runtime),
+        prefix="/api/strategies",
+    )
+
+    class CallbackErrorAfterTransferEngine:
+        def __init__(self, *args, **kwargs):
+            self.stop_calls = 0
+            self.running = False
+            self.on_strategy_error = kwargs["on_strategy_error"]
+            created_engines.append(self)
+
+        async def start(self):
+            self.running = True
+
+            async def fail_after_transfer():
+                await engine_transferred.wait()
+                await self.on_strategy_error(
+                    "ma_cross",
+                    RuntimeError("callback startup boom"),
+                )
+
+            callback_tasks.append(asyncio.create_task(fail_after_transfer()))
+
+        async def stop(self):
+            self.stop_calls += 1
+            self.running = False
+
+    monkeypatch.setattr(strategy_api, "BotEngine", CallbackErrorAfterTransferEngine)
+    transport = ASGITransport(app=app)
+
+    response = None
+    try:
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            start_task = asyncio.create_task(client.post("/api/strategies/ma_cross/start"))
+            await asyncio.wait_for(stopped_broadcast_entered.wait(), timeout=1)
+            response = await asyncio.wait_for(start_task, timeout=1)
+    finally:
+        release_stopped_broadcast.set()
+        if callback_tasks:
+            if engine_transferred.is_set():
+                await asyncio.gather(*callback_tasks)
+            else:
+                for task in callback_tasks:
+                    task.cancel()
+                await asyncio.gather(*callback_tasks, return_exceptions=True)
+
+    engine = created_engines[0]
+    assert response.status_code == 400
+    assert response.json()["detail"] == "callback startup boom"
+    assert environment.runtime.engines.get("ma_cross") is not engine
+    assert environment.runtime.strategy_status["ma_cross"] == "stopped"
+    assert environment.runtime.strategy_errors["ma_cross"] == "callback startup boom"
+    assert {
+        "type": "strategy_status",
+        "strategy": "ma_cross",
+        "status": "stopped",
+        "timestamp": 1700000000000,
+    } in messages
+    assert {
+        "type": "strategy_error",
+        "strategy": "ma_cross",
+        "error": "callback startup boom",
+        "timestamp": 1700000000000,
+    } in messages
+    assert not any(
+        message.get("type") == "strategy_status"
+        and message.get("strategy") == "ma_cross"
+        and message.get("status") == "running"
+        for message in messages
+    )
 
 
 @pytest.mark.asyncio
@@ -970,9 +2067,7 @@ async def test_persisted_builtin_strategy_configs_share_start_stop_lifecycle(
         lifecycle_lock = environment.runtime.lifecycle_locks[case["name"]]
         environment.messages.clear()
 
-        start_response = await client.post(
-            f"/api/strategies/{case['name']}/start"
-        )
+        start_response = await client.post(f"/api/strategies/{case['name']}/start")
 
         assert start_response.status_code == 200
         assert start_response.json() == {
@@ -1021,9 +2116,7 @@ async def test_persisted_builtin_strategy_configs_share_start_stop_lifecycle(
             }
         ]
 
-        stop_response = await client.post(
-            f"/api/strategies/{case['name']}/stop"
-        )
+        stop_response = await client.post(f"/api/strategies/{case['name']}/stop")
 
     assert stop_response.status_code == 200
     assert stop_response.json() == {
@@ -1064,10 +2157,7 @@ async def test_persisted_builtin_strategy_configs_share_start_stop_lifecycle(
             "timestamp": 1700000000000,
         },
     ]
-    assert not any(
-        message["type"] == "strategy_error"
-        for message in environment.messages
-    )
+    assert not any(message["type"] == "strategy_error" for message in environment.messages)
     assert environment.notifier_factory_calls == [True]
 
 
@@ -1123,9 +2213,7 @@ async def test_disabled_persisted_builtin_configs_cannot_start(
         environment.messages.clear()
 
         def fail_runtime_construction(*args, **kwargs):
-            raise AssertionError(
-                "Disabled strategy must not construct runtime dependencies"
-            )
+            raise AssertionError("Disabled strategy must not construct runtime dependencies")
 
         monkeypatch.setattr(
             environment.runtime.registry,
@@ -1140,9 +2228,7 @@ async def test_disabled_persisted_builtin_configs_cannot_start(
         )
         monkeypatch.setattr(strategy_api, "BotEngine", fail_runtime_construction)
 
-        start_response = await client.post(
-            f"/api/strategies/{case['name']}/start"
-        )
+        start_response = await client.post(f"/api/strategies/{case['name']}/start")
 
     assert start_response.status_code == 409
     assert start_response.json()["detail"] == "Strategy config is disabled"
@@ -1166,8 +2252,7 @@ def assert_strategy_validation_envelope(response, *, issue_codes):
     assert detail["message"] == "Strategy configuration is invalid"
     assert {issue["code"] for issue in detail["issues"]} == set(issue_codes)
     assert all(
-        set(issue) == {"path", "code", "message", "line", "column"}
-        for issue in detail["issues"]
+        set(issue) == {"path", "code", "message", "line", "column"} for issue in detail["issues"]
     )
 
 
@@ -1328,6 +2413,134 @@ async def test_strategy_config_yaml_and_json_validation_envelopes_match(
     )
     assert semantic_yaml_resp.status_code == 422
     assert semantic_yaml_resp.json()["detail"] == semantic_json_resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_strategy_config_validation_accepts_supported_two_hour_timeframe(
+    isolated_strategy_config_api,
+):
+    app, _runtime, _messages = isolated_strategy_config_api
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        json_response = await client.post(
+            "/api/strategies/configs/validate",
+            json=strategy_config_payload(timeframe="2h"),
+        )
+        yaml_response = await client.post(
+            "/api/strategies/configs/validate-yaml",
+            content=(
+                "name: ma_cross_btc\nstrategy_type: ma_cross\nsymbol: BTC-USDT\n"
+                "timeframe: 2h\nenabled: true\nparams:\n"
+                "  fast_window: 5\n  slow_window: 20\n"
+            ),
+        )
+
+    for response in (json_response, yaml_response):
+        assert response.status_code == 200
+        assert response.json()["config"]["timeframe"] == "2h"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timeframe", ["7m", "invalid", "1M", "3M"])
+async def test_strategy_config_validation_rejects_unsupported_runtime_timeframes(
+    isolated_strategy_config_api,
+    timeframe,
+):
+    app, _runtime, _messages = isolated_strategy_config_api
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        json_response = await client.post(
+            "/api/strategies/configs/validate",
+            json=strategy_config_payload(timeframe=timeframe),
+        )
+        yaml_response = await client.post(
+            "/api/strategies/configs/validate-yaml",
+            content=(
+                "name: ma_cross_btc\nstrategy_type: ma_cross\nsymbol: BTC-USDT\n"
+                f"timeframe: {timeframe}\nenabled: true\nparams:\n"
+                "  fast_window: 5\n  slow_window: 20\n"
+            ),
+        )
+
+    expected_issue = {
+        "path": "timeframe",
+        "code": "unsupported_timeframe",
+        "message": "Unsupported strategy timeframe",
+        "line": None,
+        "column": None,
+    }
+    for response in (json_response, yaml_response):
+        assert response.status_code == 422
+        assert_strategy_validation_envelope(
+            response,
+            issue_codes={"unsupported_timeframe"},
+        )
+        assert response.json()["detail"]["issues"] == [expected_issue]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timeframe", ["7m", "invalid", "1M", "3M"])
+async def test_strategy_config_mutations_reject_unsupported_timeframe_without_persistence(
+    isolated_strategy_config_api,
+    timeframe,
+):
+    app, runtime, messages = isolated_strategy_config_api
+    initial_strategy_status = dict(runtime.strategy_status)
+    initial_strategy_errors = dict(runtime.strategy_errors)
+    initial_engines = dict(runtime.engines)
+    initial_starting_engines = dict(runtime.starting_engines)
+    initial_lifecycle_locks = dict(runtime.lifecycle_locks)
+    original_params = {"fast_window": 5, "slow_window": 20, "amount": 0.1}
+    source = StrategyConfigRecord(
+        **strategy_config_payload(enabled=False, params=dict(original_params)),
+        created_at=1,
+        updated_at=1,
+    )
+    IsolatedStrategyConfigRepository.configs[source.name] = source
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        create_response = await client.post(
+            "/api/strategies/configs",
+            json=strategy_config_payload(
+                name="unsupported_create",
+                timeframe=timeframe,
+            ),
+        )
+        update_response = await client.put(
+            f"/api/strategies/configs/{source.name}",
+            json=strategy_config_payload(
+                enabled=False,
+                timeframe=timeframe,
+                params={"fast_window": 6, "slow_window": 20, "amount": 0.2},
+            ),
+        )
+        clone_response = await client.post(
+            f"/api/strategies/configs/{source.name}/clone",
+            json={
+                "target_name": "unsupported_clone",
+                "overrides": {"timeframe": timeframe},
+            },
+        )
+
+    for response in (create_response, update_response, clone_response):
+        assert response.status_code == 422
+        assert_strategy_validation_envelope(
+            response,
+            issue_codes={"unsupported_timeframe"},
+        )
+    assert IsolatedStrategyConfigRepository.configs == {source.name: source}
+    assert source.timeframe == "1h"
+    assert source.params == original_params
+    assert source.updated_at == 1
+    assert runtime.strategy_status == initial_strategy_status
+    assert runtime.strategy_errors == initial_strategy_errors
+    assert runtime.engines == initial_engines
+    assert runtime.starting_engines == initial_starting_engines
+    assert runtime.lifecycle_locks == initial_lifecycle_locks
+    assert messages == []
 
 
 @pytest.mark.asyncio
@@ -1674,6 +2887,7 @@ def test_create_order_manager_maps_paper_runtime_to_demo_router(monkeypatch):
     assert manager.router.mode == "demo"
     assert manager.router.demo is not None
     assert manager.router.backtest is None
+    assert manager.post_live_order_sync is None
 
 
 def test_create_order_manager_maps_demo_runtime_to_safe_demo_router(monkeypatch):
@@ -1689,6 +2903,7 @@ def test_create_order_manager_maps_demo_runtime_to_safe_demo_router(monkeypatch)
     assert isinstance(manager.router.demo, strategy_api.LocalPaperOrderHandler)
     assert manager.router.live is None
     assert manager.router.backtest is None
+    assert manager.post_live_order_sync is None
 
 
 def test_create_order_manager_maps_explicit_paper_to_demo_router(monkeypatch):
@@ -1704,6 +2919,7 @@ def test_create_order_manager_maps_explicit_paper_to_demo_router(monkeypatch):
     assert manager.router.demo is not None
     assert manager.router.live is None
     assert manager.router.backtest is None
+    assert manager.post_live_order_sync is None
 
 
 def test_create_order_manager_rejects_live_missing_credentials_before_dependencies(
@@ -1788,9 +3004,63 @@ def test_create_order_manager_live_selects_okx_adapter(
     assert manager.router.live is not None
     assert manager.router.demo is None
     assert manager.router.backtest is None
+    assert manager.post_live_order_sync is not None
     assert manager.allow_live_open_orders is True
     assert manager.live_max_order_notional == 1234.0
     assert constructed == [(adapter_name, "key", "secret", "pass", True)]
+
+
+@pytest.mark.asyncio
+async def test_create_order_manager_live_syncs_with_router_adapter(monkeypatch):
+    class SentinelAdapter(strategy_api.LocalPaperOrderHandler):
+        def __init__(self, api_key, secret, passphrase, demo=True):
+            pass
+
+    monkeypatch.setattr(
+        strategy_api,
+        "load_runtime_settings",
+        lambda: AppConfig(
+            mode="live",
+            exchange=ExchangeConfig(
+                api_key="key",
+                secret="secret",
+                passphrase="pass",
+                market_type="swap",
+                demo=True,
+            ),
+        ),
+    )
+    monkeypatch.setattr(strategy_api, "OKXSwapAdapter", SentinelAdapter)
+    calls = []
+
+    async def fake_sync_private_state(repository, adapter, **kwargs):
+        calls.append((repository, adapter, kwargs))
+
+    monkeypatch.setattr(strategy_api, "sync_private_state", fake_sync_private_state)
+    repository = object()
+
+    async def on_risk_event(payload):
+        pass
+
+    manager = strategy_api.create_order_manager(
+        repository=repository,
+        on_risk_event=on_risk_event,
+        order_router_mode="live",
+    )
+
+    await manager.post_live_order_sync("ma_cross", "BTC-USDT-SWAP")
+
+    assert calls == [
+        (
+            repository,
+            manager.router.live,
+            {
+                "symbols": ["BTC-USDT-SWAP"],
+                "timestamp_ms": strategy_api.current_timestamp_ms,
+                "risk_event_notifier": on_risk_event,
+            },
+        )
+    ]
 
 
 @pytest.mark.parametrize(
@@ -2428,7 +3698,7 @@ async def test_persisted_strategy_loop_fills_market_order_from_latest_bar(monkey
     class FakeMarketDataService:
         def __init__(self):
             self.callbacks = []
-            self.latest_bar = None
+            self.latest_bar = Bar(1, 50000.0, 50000.0, 50000.0, 50000.0, 1.0)
             self._running = False
 
         def subscribe(self, symbol, timeframe, callback):
@@ -2441,6 +3711,8 @@ async def test_persisted_strategy_loop_fills_market_order_from_latest_bar(monkey
 
         async def start(self):
             self._running = True
+            for callback in list(self.callbacks):
+                await callback(self.latest_bar)
 
         async def stop(self):
             self._running = False
@@ -2479,7 +3751,7 @@ async def test_persisted_strategy_loop_fills_market_order_from_latest_bar(monkey
         def get_strategy_configs(self):
             return [config]
 
-        def save_order(self, order):
+        def upsert_order(self, order):
             self.orders.append(order)
             return order
 
@@ -2542,10 +3814,15 @@ async def test_persisted_strategy_loop_fills_market_order_from_latest_bar(monkey
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         start_resp = await client.post("/api/strategies/market_buyer_btc/start")
-        market_data.latest_bar = Bar(1, 50000.0, 50000.0, 50000.0, 50000.0, 1.0)
-        await market_data.callbacks[0](market_data.latest_bar)
+        assert start_resp.status_code == 200
+        assert FakeRepository.orders == []
 
-    assert start_resp.status_code == 200
+        live_bar = Bar(1700003600000, 50000.0, 50000.0, 50000.0, 50000.0, 1.0)
+        market_data.latest_bar = live_bar
+        await market_data.callbacks[0](live_bar)
+
+    assert len(FakeRepository.orders) == 1
+    assert len(FakeRepository.trades) == 1
     assert FakeRepository.orders[0].status == "filled"
     assert FakeRepository.orders[0].fill_price == 50000.0
     assert FakeRepository.trades[0].price == 50000.0
@@ -2556,6 +3833,7 @@ async def test_runtime_risk_rejection_broadcasts_risk_event_before_trading_updat
     class FakeMarketDataService:
         def __init__(self):
             self.callbacks = []
+            self.ready_bars = [Bar(1, 50000.0, 50000.0, 50000.0, 50000.0, 1.0)]
             self.latest_bar = None
             self._running = False
 
@@ -2563,9 +3841,12 @@ async def test_runtime_risk_rejection_broadcasts_risk_event_before_trading_updat
             self.callbacks.append(callback)
 
         def get_recent_bars(self, symbol, timeframe, count=1):
-            if self.latest_bar is None:
-                return []
-            return [self.latest_bar]
+            bars = self.ready_bars + ([] if self.latest_bar is None else [self.latest_bar])
+            return bars[-count:]
+
+        async def wait_until_ready(self, symbol, timeframe, *, min_bars=1):
+            if len(self.get_recent_bars(symbol, timeframe, count=min_bars)) < min_bars:
+                raise TimeoutError
 
         async def start(self):
             self._running = True
@@ -2604,7 +3885,7 @@ async def test_runtime_risk_rejection_broadcasts_risk_event_before_trading_updat
         def get_strategy_configs(self):
             return [config]
 
-        def save_order(self, order):
+        def upsert_order(self, order):
             self.orders.append(order)
             return order
 
@@ -2699,13 +3980,18 @@ async def test_runtime_bar_marks_open_position_and_broadcasts_positions_then_acc
     class FakeMarketDataService:
         def __init__(self):
             self.callbacks = []
+            self.ready_bars = [Bar(1, 50000.0, 50000.0, 50000.0, 50000.0, 1.0)]
             self._running = False
 
         def subscribe(self, symbol, timeframe, callback):
             self.callbacks.append(callback)
 
         def get_recent_bars(self, symbol, timeframe, count=1):
-            return []
+            return self.ready_bars[-count:]
+
+        async def wait_until_ready(self, symbol, timeframe, *, min_bars=1):
+            if len(self.get_recent_bars(symbol, timeframe, count=min_bars)) < min_bars:
+                raise TimeoutError
 
         async def start(self):
             self._running = True
@@ -2878,13 +4164,18 @@ async def test_runtime_bar_without_open_position_does_not_create_account_or_broa
     class FakeMarketDataService:
         def __init__(self):
             self.callbacks = []
+            self.ready_bars = [Bar(1, 50000.0, 50000.0, 50000.0, 50000.0, 1.0)]
             self._running = False
 
         def subscribe(self, symbol, timeframe, callback):
             self.callbacks.append(callback)
 
         def get_recent_bars(self, symbol, timeframe, count=1):
-            return []
+            return self.ready_bars[-count:]
+
+        async def wait_until_ready(self, symbol, timeframe, *, min_bars=1):
+            if len(self.get_recent_bars(symbol, timeframe, count=min_bars)) < min_bars:
+                raise TimeoutError
 
         async def start(self):
             self._running = True
@@ -3076,6 +4367,7 @@ async def test_persisted_strategy_loop_broadcasts_error_and_stops_strategy(monke
         def __init__(self):
             self.callbacks = []
             self.subscription = None
+            self.ready_bars = [Bar(1, 50000.0, 50000.0, 50000.0, 50000.0, 1.0)]
             self._running = False
 
         def subscribe(self, symbol, timeframe, callback):
@@ -3089,6 +4381,13 @@ async def test_persisted_strategy_loop_broadcasts_error_and_stops_strategy(monke
                 ]
                 if not self.callbacks:
                     self.subscription = None
+
+        def get_recent_bars(self, symbol, timeframe, count=1):
+            return self.ready_bars[-count:]
+
+        async def wait_until_ready(self, symbol, timeframe, *, min_bars=1):
+            if len(self.get_recent_bars(symbol, timeframe, count=min_bars)) < min_bars:
+                raise TimeoutError
 
         async def start(self):
             self._running = True
@@ -3180,7 +4479,7 @@ async def test_persisted_strategy_loop_broadcasts_error_and_stops_strategy(monke
 
 
 @pytest.mark.asyncio
-async def test_start_and_stop_strategy(app):
+async def test_start_and_stop_strategy(app, deny_network_requests):
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         start_resp = await client.post("/api/strategies/ma_cross/start")
@@ -3194,6 +4493,101 @@ async def test_start_and_stop_strategy(app):
     assert stop_resp.status_code == 200
     assert stop_resp.json() == {"status": "stopped", "strategy": "ma_cross"}
     assert {"name": "ma_cross", "status": "stopped"} in stopped_resp.json()
+    assert deny_network_requests == []
+
+
+@pytest.mark.asyncio
+async def test_stop_strategy_failure_preserves_running_owner_and_status(
+    hermetic_persisted_builtin_strategy_api,
+    monkeypatch,
+):
+    environment = hermetic_persisted_builtin_strategy_api
+    created_engines = []
+
+    class StopFailureEngine:
+        def __init__(self, *args, **kwargs):
+            self.stop_calls = 0
+            self.running = False
+            self.market_data_service = kwargs["market_data_service"]
+            created_engines.append(self)
+
+        async def start(self):
+            self.running = True
+            self.market_data_service._running = True
+
+        async def stop(self):
+            self.stop_calls += 1
+            if self.stop_calls == 1:
+                raise RuntimeError("stop failed")
+            self.running = False
+
+    monkeypatch.setattr(strategy_api, "BotEngine", StopFailureEngine)
+    transport = ASGITransport(app=environment.app, raise_app_exceptions=False)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        start_response = await client.post("/api/strategies/ma_cross/start")
+        failed_stop_response = await client.post("/api/strategies/ma_cross/stop")
+
+    engine = created_engines[0]
+    assert start_response.status_code == 200
+    assert failed_stop_response.status_code == 500
+    assert environment.runtime.engines["ma_cross"] is engine
+    assert environment.runtime.strategy_status["ma_cross"] == "running"
+    assert engine.running is True
+    assert engine.stop_calls == 1
+    assert environment.market_data.stop_calls == 0
+    assert environment.market_data._running is True
+    assert not any(message.get("status") == "stopped" for message in environment.messages)
+
+
+@pytest.mark.asyncio
+async def test_stop_strategy_retries_same_owner_after_failure(
+    hermetic_persisted_builtin_strategy_api,
+    monkeypatch,
+):
+    environment = hermetic_persisted_builtin_strategy_api
+    created_engines = []
+
+    class RetryStopEngine:
+        def __init__(self, *args, **kwargs):
+            self.stop_calls = 0
+            self.running = False
+            self.market_data_service = kwargs["market_data_service"]
+            created_engines.append(self)
+
+        async def start(self):
+            self.running = True
+            self.market_data_service._running = True
+
+        async def stop(self):
+            self.stop_calls += 1
+            if self.stop_calls == 1:
+                raise RuntimeError("stop failed")
+            self.running = False
+
+    monkeypatch.setattr(strategy_api, "BotEngine", RetryStopEngine)
+    transport = ASGITransport(app=environment.app, raise_app_exceptions=False)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        start_response = await client.post("/api/strategies/ma_cross/start")
+        failed_stop_response = await client.post("/api/strategies/ma_cross/stop")
+        successful_stop_response = await client.post("/api/strategies/ma_cross/stop")
+
+    engine = created_engines[0]
+    assert start_response.status_code == 200
+    assert failed_stop_response.status_code == 500
+    assert successful_stop_response.status_code == 200
+    assert successful_stop_response.json() == {
+        "status": "stopped",
+        "strategy": "ma_cross",
+    }
+    assert environment.runtime.engines.get("ma_cross") is None
+    assert environment.runtime.strategy_status["ma_cross"] == "stopped"
+    assert engine.running is False
+    assert engine.stop_calls == 2
+    assert environment.market_data.stop_calls == 1
+    assert environment.market_data._running is False
+    assert sum(message.get("status") == "stopped" for message in environment.messages) == 1
 
 
 @pytest.mark.asyncio
@@ -3211,6 +4605,8 @@ async def test_start_strategy_clears_stale_error_before_successful_restart(monke
         async def on_bar(self, bar):
             pass
 
+    engine_kwargs = []
+
     class FakeBotEngine:
         async def start(self):
             pass
@@ -3219,7 +4615,7 @@ async def test_start_strategy_clears_stale_error_before_successful_restart(monke
             pass
 
         def __init__(self, *args, **kwargs):
-            pass
+            engine_kwargs.append(kwargs)
 
     registry = StrategyRegistry()
     registry.register("passive", PassiveStrategy)
@@ -3242,6 +4638,8 @@ async def test_start_strategy_clears_stale_error_before_successful_restart(monke
     assert runtime.strategy_errors == {}
     assert list(runtime.engines) == ["passive"]
     assert runtime.strategy_status["passive"] == "running"
+    assert "before_live_strategy_bar" in engine_kwargs[0]
+    assert "before_strategy_bar" not in engine_kwargs[0]
 
 
 @pytest.mark.asyncio
@@ -3486,6 +4884,9 @@ async def test_start_strategy_creates_market_data_service_after_router_creation(
         def subscribe(self, symbol, timeframe, callback):
             pass
 
+        async def wait_until_ready(self, symbol, timeframe, *, timeout=None, min_bars=1):
+            pass
+
         async def start(self):
             self._running = True
             started_api_keys.append(self.api_key)
@@ -3558,6 +4959,9 @@ async def test_start_strategy_refreshes_market_data_service_after_all_strategies
             self.api_key = api_key
 
         def subscribe(self, symbol, timeframe, callback):
+            pass
+
+        async def wait_until_ready(self, symbol, timeframe, *, timeout=None, min_bars=1):
             pass
 
         async def start(self):
@@ -3638,7 +5042,7 @@ async def test_start_strategy_wires_repository_backed_order_manager(monkeypatch)
         accounts = {}
         ledger = []
 
-        def save_order(self, order):
+        def upsert_order(self, order):
             self.orders.append(order)
             return order
 
@@ -3847,6 +5251,98 @@ async def test_start_unknown_strategy_returns_404(app):
         resp = await client.post("/api/strategies/unknown/start")
 
     assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_run_backtest_accepts_persisted_strategy_config(monkeypatch):
+    class FakeRepository:
+        results = []
+        klines = [
+            KlineCache(
+                symbol="BTC-USDT",
+                timeframe="1h",
+                timestamp=1700002800000,
+                open=100.0,
+                high=101.0,
+                low=99.0,
+                close=100.0,
+                volume=10.0,
+            ),
+            KlineCache(
+                symbol="BTC-USDT",
+                timeframe="1h",
+                timestamp=1700006400000,
+                open=110.0,
+                high=111.0,
+                low=109.0,
+                close=110.0,
+                volume=12.0,
+            ),
+        ]
+
+        def get_strategy_config(self, name):
+            if name != "saved_config":
+                return None
+            return StrategyConfigRecord(
+                name="saved_config",
+                strategy_type="configured_type",
+                symbol="ETH-USDT",
+                timeframe="1h",
+                params={"amount": 2.5},
+                enabled=True,
+                created_at=1700000000000,
+                updated_at=1700000000000,
+            )
+
+        def get_klines(self, symbol, timeframe, start, end):
+            return [
+                kline
+                for kline in self.klines
+                if kline.symbol == symbol
+                and kline.timeframe == timeframe
+                and start <= kline.timestamp <= end
+            ]
+
+        def save_backtest_result_with_trades(self, result, trades):
+            self.results.append(result)
+            return result
+
+    class ConfiguredStrategy(BaseStrategy):
+        amount_seen = None
+
+        def __init__(self, symbol, amount):
+            super().__init__()
+            self.symbol = symbol
+            self.__class__.amount_seen = amount
+
+        async def on_bar(self, bar):
+            return None
+
+    FakeRepository.results = []
+    ConfiguredStrategy.amount_seen = None
+    registry = StrategyRegistry()
+    registry.register("configured_type", ConfiguredStrategy)
+    monkeypatch.setattr(backtest_api, "Repository", FakeRepository, raising=False)
+    monkeypatch.setattr(backtest_api, "create_strategy_registry", lambda: registry, raising=False)
+    monkeypatch.setattr(backtest_api, "current_timestamp_ms", lambda: 1700007200000, raising=False)
+
+    transport = ASGITransport(app=create_app())
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/api/backtest/run",
+            json={
+                "strategy": "saved_config",
+                "symbol": "BTC-USDT",
+                "timeframe": "1h",
+                "start_time": 1700002800000,
+                "end_time": 1700006400000,
+                "initial_capital": 100000,
+            },
+        )
+
+    assert resp.status_code == 200
+    assert ConfiguredStrategy.amount_seen == 2.5
+    assert FakeRepository.results[0].strategy == "saved_config"
 
 
 @pytest.mark.asyncio
@@ -4971,6 +6467,224 @@ async def test_get_account_returns_zero_state_with_assets_when_account_absent(mo
         "available_balance": 0.0,
         "assets": [],
     }
+
+
+def test_repository_get_accounts_and_get_account_prefers_exchange_account(tmp_path):
+    repo = SqliteRepository(db_path=str(tmp_path / "bot.db"))
+    repo.upsert_account(
+        AccountRecord(
+            strategy="alpha",
+            initial_equity=100.0,
+            cash_balance=90.0,
+            available_balance=80.0,
+            equity=110.0,
+            realized_pnl=10.0,
+            unrealized_pnl=1.0,
+            daily_pnl=5.0,
+            fees_paid=0.5,
+            updated_at=1,
+        )
+    )
+    repo.upsert_account(
+        AccountRecord(
+            strategy="__exchange__",
+            initial_equity=1000.0,
+            cash_balance=900.0,
+            available_balance=850.0,
+            equity=1010.0,
+            realized_pnl=10.0,
+            unrealized_pnl=20.0,
+            daily_pnl=5.0,
+            fees_paid=1.0,
+            updated_at=3,
+            assets=[{"ccy": "USDT", "avail_bal": 850.0}],
+        )
+    )
+    repo.upsert_account(
+        AccountRecord(
+            strategy="beta",
+            initial_equity=200.0,
+            cash_balance=180.0,
+            available_balance=170.0,
+            equity=210.0,
+            realized_pnl=20.0,
+            unrealized_pnl=2.0,
+            daily_pnl=6.0,
+            fees_paid=0.7,
+            updated_at=2,
+        )
+    )
+
+    accounts = repo.get_accounts()
+
+    assert len(accounts) == 3
+    assert {account.strategy for account in accounts} == {"alpha", "beta", "__exchange__"}
+    assert repo.get_account("alpha").cash_balance == 90.0
+    account = repo.get_account()
+    assert account is not None
+    assert account.strategy == "__exchange__"
+    assert account.cash_balance == 900.0
+    assert account.assets == [{"ccy": "USDT", "avail_bal": 850.0}]
+
+
+@pytest.mark.asyncio
+async def test_get_strategy_performance_returns_aggregated_rows(monkeypatch, app):
+    accounts = [
+        AccountRecord(
+            strategy="alpha",
+            initial_equity=100.0,
+            cash_balance=90.0,
+            available_balance=80.0,
+            equity=110.0,
+            realized_pnl=10.0,
+            unrealized_pnl=1.0,
+            daily_pnl=5.0,
+            fees_paid=0.5,
+            updated_at=1,
+        ),
+        AccountRecord(
+            strategy="__exchange__",
+            initial_equity=1000.0,
+            cash_balance=900.0,
+            available_balance=850.0,
+            equity=1010.0,
+            realized_pnl=10.0,
+            unrealized_pnl=20.0,
+            daily_pnl=5.0,
+            fees_paid=1.0,
+            updated_at=3,
+        ),
+    ]
+    positions = [
+        PositionRecord(
+            strategy="alpha",
+            symbol="BTC-USDT-SWAP",
+            side="long",
+            amount=2.0,
+            entry_price=100.0,
+            leverage=1,
+            timestamp=10,
+            mark_price=120.0,
+        ),
+        PositionRecord(
+            strategy="__exchange__",
+            symbol="BTC-USDT-SWAP",
+            side="long",
+            amount=1.0,
+            entry_price=100.0,
+            leverage=1,
+            timestamp=11,
+            mark_price=101.0,
+        ),
+    ]
+    orders = [
+        OrderRecord(
+            order_id="o-1",
+            exchange_order_id="",
+            client_order_id="",
+            strategy="alpha",
+            symbol="BTC-USDT-SWAP",
+            side="buy",
+            type="market",
+            amount=1.0,
+            price=100.0,
+            status="filled",
+            fill_price=101.0,
+            timestamp=150,
+            updated_at=160,
+        ),
+        OrderRecord(
+            order_id="o-2",
+            exchange_order_id="",
+            client_order_id="",
+            strategy="order_only",
+            symbol="ETH-USDT-SWAP",
+            side="sell",
+            type="limit",
+            amount=1.0,
+            price=200.0,
+            status="open",
+            fill_price=0.0,
+            timestamp=250,
+            updated_at=260,
+        ),
+        OrderRecord(
+            order_id="o-3",
+            exchange_order_id="",
+            client_order_id="",
+            strategy="__exchange__",
+            symbol="BTC-USDT-SWAP",
+            side="buy",
+            type="market",
+            amount=1.0,
+            price=100.0,
+            status="open",
+            fill_price=0.0,
+            timestamp=50,
+            updated_at=50,
+        ),
+    ]
+    trades = [
+        TradeRecord(
+            exchange_trade_id="t-1",
+            order_id="o-1",
+            strategy="alpha",
+            symbol="BTC-USDT-SWAP",
+            side="buy",
+            amount=2.0,
+            price=100.0,
+            fee=1.0,
+            timestamp=101,
+        ),
+        TradeRecord(
+            exchange_trade_id="t-2",
+            order_id="o-3",
+            strategy="__exchange__",
+            symbol="BTC-USDT-SWAP",
+            side="buy",
+            amount=1.0,
+            price=100.0,
+            fee=1.0,
+            timestamp=102,
+        ),
+    ]
+
+    class FakeRepository:
+        def get_accounts(self):
+            return accounts
+
+        def get_positions(self, strategy=None):
+            assert strategy is None
+            return positions
+
+        def get_orders(self):
+            return orders
+
+        def get_trades(self, strategy=None):
+            assert strategy is None
+            return trades
+
+    monkeypatch.setattr(trading_api, "Repository", FakeRepository, raising=False)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/trading/strategy-performance")
+
+    expected = [
+        asdict(performance)
+        for performance in build_strategy_performance(accounts, positions, orders, trades)
+    ]
+    assert resp.status_code == 200
+    assert resp.json() == expected
+    assert [row["strategy"] for row in resp.json()] == ["alpha", "order_only"]
+    order_only = resp.json()[1]
+    assert order_only["initial_equity"] == 0.0
+    assert order_only["return_pct"] is None
+    assert order_only["position_notional"] == 0.0
+    assert order_only["order_count"] == 1
+    assert order_only["filled_order_count"] == 0
+    assert order_only["trade_count"] == 0
+    assert order_only["win_rate"] is None
 
 
 @pytest.mark.asyncio

@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from decimal import Decimal, InvalidOperation
-from inspect import isawaitable
 
-import ccxt.async_support as ccxt
+from ccxt.base.decimal_to_precision import (
+    DECIMAL_PLACES,
+    SIGNIFICANT_DIGITS,
+    TICK_SIZE,
+)
 
 from src.core.types import (
     AccountSnapshot,
@@ -19,6 +22,7 @@ from src.core.types import (
     PositionSide,
     PositionSnapshot,
 )
+from src.exchange.okx_client import create_okx_client
 from src.order.router import OrderHandler
 
 
@@ -86,19 +90,14 @@ class OKXBaseAdapter(ExchangeAdapter):
         default_type: str,
         demo: bool = True,
     ) -> None:
-        config = {"options": {"defaultType": default_type}}
-        if api_key:
-            config["apiKey"] = api_key
-        if secret:
-            config["secret"] = secret
-        if passphrase:
-            config["password"] = passphrase
         self._default_type = default_type
-        self._exchange = ccxt.okx(config)
-        if demo and hasattr(self._exchange, "set_sandbox_mode"):
-            result = self._exchange.set_sandbox_mode(True)
-            if isawaitable(result):
-                result.close()
+        self._exchange = create_okx_client(
+            api_key=api_key,
+            secret=secret,
+            passphrase=passphrase,
+            default_type=default_type,
+            demo=demo,
+        )
 
     def _to_ccxt_symbol(self, symbol: str) -> str:
         if self._default_type != "spot":
@@ -107,6 +106,12 @@ class OKXBaseAdapter(ExchangeAdapter):
         if len(base_quote) != 2:
             return symbol
         return "/".join(base_quote)
+
+    def _from_ccxt_symbol(self, symbol: object) -> str:
+        value = str(symbol or "")
+        if self._default_type != "spot" or "/" not in value:
+            return value
+        return value.replace("/", "-")
 
     def _safe_float(self, value: object, default: float = 0.0) -> float:
         if value is None or value == "":
@@ -331,7 +336,7 @@ class OKXBaseAdapter(ExchangeAdapter):
         orders: list[ExchangeOrderSnapshot] = []
         for symbol in symbols or [None]:
             rows = (
-                await self._exchange.fetch_open_orders(symbol)
+                await self._exchange.fetch_open_orders(self._to_ccxt_symbol(symbol))
                 if symbol is not None
                 else await self._exchange.fetch_open_orders()
             )
@@ -346,7 +351,12 @@ class OKXBaseAdapter(ExchangeAdapter):
     ) -> list[ExchangeTradeSnapshot]:
         trades: list[ExchangeTradeSnapshot] = []
         for symbol in symbols or [None]:
-            rows = await self._exchange.fetch_my_trades(symbol, since=since, limit=limit)
+            ccxt_symbol = self._to_ccxt_symbol(symbol) if symbol is not None else None
+            rows = await self._exchange.fetch_my_trades(
+                ccxt_symbol,
+                since=since,
+                limit=limit,
+            )
             trades.extend(self._map_trade(row) for row in rows)
         return trades
 
@@ -354,14 +364,21 @@ class OKXBaseAdapter(ExchangeAdapter):
         order_type, params = self._okx_order_type_and_params(order)
         await self._validate_order_against_market(order)
         response = await self._exchange.create_order(
-            order.symbol,
+            self._to_ccxt_symbol(order.symbol),
             order_type,
             order.side.value,
             order.amount,
             order.price,
             params,
         )
-        order.id = str(response.get("id", order.id))
+        order.exchange_order_id = str(response.get("id") or "")
+        order.client_order_id = str(
+            response.get("clientOrderId") or response.get("clientOid") or ""
+        )
+        order.updated_at = self._safe_int(
+            response.get("lastTradeTimestamp"),
+            self._safe_int(response.get("updated"), self._safe_int(response.get("timestamp"))),
+        )
         order.status = self._map_status(response.get("status"))
         if order.status == OrderStatus.FILLED:
             fill_price = response.get("average")
@@ -420,29 +437,64 @@ class OKXBaseAdapter(ExchangeAdapter):
                 raise ValueError("cost below exchange minimum")
 
         precision = market.get("precision") or {}
-        self._validate_decimal_precision(order.amount, precision.get("amount"), "amount")
+        precision_mode = market.get("precisionMode")
+        if precision_mode is None:
+            precision_mode = getattr(self._exchange, "precisionMode", DECIMAL_PLACES)
+        self._validate_precision(
+            order.amount,
+            precision.get("amount"),
+            "amount",
+            precision_mode,
+        )
         if order.price is not None:
-            self._validate_decimal_precision(order.price, precision.get("price"), "price")
+            self._validate_precision(
+                order.price,
+                precision.get("price"),
+                "price",
+                precision_mode,
+            )
 
-    def _validate_decimal_precision(
+    def _validate_precision(
         self,
         value: float,
         precision: object,
         field_name: str,
+        precision_mode: object,
     ) -> None:
-        if precision is None or not isinstance(precision, int):
+        if precision is None:
+            return
+        if precision_mode == TICK_SIZE:
+            try:
+                decimal_value = Decimal(str(value))
+                tick_size = Decimal(str(precision))
+            except (InvalidOperation, ValueError) as exc:
+                raise ValueError(f"invalid {field_name}") from exc
+            if not decimal_value.is_finite() or not tick_size.is_finite():
+                raise ValueError(f"invalid {field_name}")
+            if tick_size <= 0:
+                return
+            if decimal_value % tick_size != 0:
+                raise ValueError(f"{field_name} precision exceeds exchange precision")
+            return
+        if not isinstance(precision, int) or precision < 0:
             return
         try:
             decimal_value = Decimal(str(value))
-        except InvalidOperation as exc:
+        except (InvalidOperation, ValueError) as exc:
             raise ValueError(f"invalid {field_name}") from exc
+        if not decimal_value.is_finite():
+            raise ValueError(f"invalid {field_name}")
+        if precision_mode == SIGNIFICANT_DIGITS:
+            if decimal_value != 0 and len(decimal_value.normalize().as_tuple().digits) > precision:
+                raise ValueError(f"{field_name} precision exceeds exchange precision")
+            return
         if decimal_value.as_tuple().exponent < -precision:
             raise ValueError(f"{field_name} precision exceeds exchange precision")
 
     async def cancel(self, order_id: str, symbol: str | None = None) -> bool:
         if symbol is None:
             raise ValueError("OKX cancel requires symbol")
-        await self._exchange.cancel_order(order_id, symbol)
+        await self._exchange.cancel_order(order_id, self._to_ccxt_symbol(symbol))
         return True
 
     async def close(self) -> None:
@@ -453,7 +505,7 @@ class OKXBaseAdapter(ExchangeAdapter):
         return ExchangeOrderSnapshot(
             exchange_order_id=str(row.get("id") or ""),
             client_order_id=str(row.get("clientOrderId") or row.get("clientOid") or ""),
-            symbol=str(row.get("symbol") or ""),
+            symbol=self._from_ccxt_symbol(row.get("symbol")),
             side=OrderSide(str(row.get("side") or "buy").lower()),
             type=OrderType(str(row.get("type") or "limit").lower()),
             amount=self._safe_float(row.get("amount")),
@@ -473,7 +525,7 @@ class OKXBaseAdapter(ExchangeAdapter):
             exchange_trade_id=str(row.get("id") or ""),
             exchange_order_id=str(row.get("order") or row.get("orderId") or ""),
             client_order_id=str(row.get("clientOrderId") or row.get("clientOid") or ""),
-            symbol=str(row.get("symbol") or ""),
+            symbol=self._from_ccxt_symbol(row.get("symbol")),
             side=OrderSide(str(row.get("side") or "buy").lower()),
             amount=self._safe_float(row.get("amount")),
             price=self._safe_float(row.get("price")),

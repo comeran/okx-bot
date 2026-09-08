@@ -10,7 +10,7 @@ class RecordingRepository:
     def __init__(self):
         self.orders = []
 
-    def save_order(self, order):
+    def upsert_order(self, order):
         self.orders.append(order)
         return order
 

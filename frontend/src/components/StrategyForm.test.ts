@@ -1,11 +1,14 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { nextTick } from 'vue';
+import { ElOption, ElSelect, ID_INJECTION_KEY, ZINDEX_INJECTION_KEY } from 'element-plus';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { defineComponent, h, nextTick, type Component, type ComponentInternalInstance, type VNode } from 'vue';
 
 import { defineHostComponent, mount, textContent, type TestHostNode } from '@/test-utils/mount';
 import type { StrategyConfigPayload, StrategyDefinition, StrategyValidationIssue } from '@/types/strategy';
 import StrategyForm from './StrategyForm.vue';
 
 const confirm = vi.hoisted(() => vi.fn());
+const warning = vi.hoisted(() => vi.fn());
+const fetchTickers = vi.hoisted(() => vi.fn());
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -17,8 +20,14 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-vi.mock('element-plus', () => ({
+vi.mock('element-plus', async (importOriginal) => ({
+  ...await importOriginal<typeof import('element-plus')>(),
+  ElMessage: { warning },
   ElMessageBox: { confirm },
+}));
+
+vi.mock('@/services/market', () => ({
+  fetchTickers,
 }));
 
 vi.mock('vue-i18n', () => ({
@@ -67,6 +76,11 @@ const components = Object.fromEntries([
   'ElSwitch',
   'ElInputNumber',
 ].map((name) => [name, defineHostComponent(name.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`).slice(1))]));
+const componentsWithRealSelects = {
+  ...components,
+  ElSelect,
+  ElOption,
+};
 
 function draft(overrides: Partial<StrategyConfigPayload> = {}): StrategyConfigPayload {
   return {
@@ -86,11 +100,14 @@ async function mountForm(options: {
   issues?: StrategyValidationIssue[];
   readonly?: boolean;
   dirty?: boolean;
+  realSelects?: boolean;
+  provide?: Record<string | symbol, unknown>;
 } = {}) {
   let model = options.model ?? draft();
   const updates: StrategyConfigPayload[] = [];
   const wrapper = await mount(StrategyForm, {
-    components,
+    components: options.realSelects ? componentsWithRealSelects : components,
+    provide: options.provide,
     props: {
       modelValue: model,
       definitions,
@@ -112,15 +129,128 @@ function control(wrapper: Awaited<ReturnType<typeof mount>>, id: string): TestHo
   return wrapper.getById(id);
 }
 
+type StrategyFormInstance = ComponentInternalInstance & { setupState: Record<string, unknown> };
+
+async function mountInstrumentedForm(options: Parameters<typeof mountForm>[0] = {}) {
+  const captured: { formInstance: StrategyFormInstance | null } = { formInstance: null };
+  const InstrumentedStrategyForm = defineComponent({
+    inheritAttrs: false,
+    setup(_props, { attrs }) {
+      return () => h(StrategyForm as Component, {
+        ...attrs,
+        onVnodeMounted: (vnode: VNode) => {
+          captured.formInstance = vnode.component as StrategyFormInstance | null;
+        },
+      });
+    },
+  });
+
+  let model = options.model ?? draft();
+  const updates: StrategyConfigPayload[] = [];
+  const wrapper = await mount(InstrumentedStrategyForm, {
+    components: options.realSelects ? componentsWithRealSelects : components,
+    provide: options.provide,
+    props: {
+      modelValue: model,
+      definitions,
+      mode: options.mode ?? 'create',
+      issues: options.issues ?? [],
+      readonly: options.readonly ?? false,
+      dirty: options.dirty ?? false,
+      'onUpdate:modelValue': (next: StrategyConfigPayload) => {
+        model = next;
+        updates.push(next);
+        void wrapper.updateProps({ modelValue: next });
+      },
+    },
+  });
+  if (!captured.formInstance) throw new Error('StrategyForm component instance not captured');
+  return { wrapper, updates, model: () => model, formInstance: captured.formInstance };
+}
+
 function referencedIds(node: TestHostNode, attribute: string): string[] {
   const value = node.props[attribute];
   return typeof value === 'string' ? value.split(/\s+/).filter(Boolean) : [];
+}
+
+function selectOptionValues(wrapper: Awaited<ReturnType<typeof mount>>, selectId: string): string[] {
+  const select = control(wrapper, selectId);
+  return wrapper.findAll((node) => node.type === 'el-option' && node.parent === select)
+    .map((node) => String(node.props.value));
+}
+
+function firstDescendant(node: TestHostNode, predicate: (candidate: TestHostNode) => boolean): TestHostNode | undefined {
+  for (const child of node.children) {
+    if (predicate(child)) return child;
+    const match = firstDescendant(child, predicate);
+    if (match) return match;
+  }
+  return undefined;
+}
+
+function internalCombobox(wrapper: Awaited<ReturnType<typeof mount>>, selectId: string): TestHostNode {
+  const select = control(wrapper, selectId);
+  if (select.props.role === 'combobox') return select;
+  const combobox = firstDescendant(select, (node) => node.props.role === 'combobox');
+  if (!combobox) throw new Error(`Internal combobox for ${selectId} not found`);
+  return combobox;
 }
 
 describe('StrategyForm', () => {
   beforeEach(() => {
     confirm.mockReset();
     confirm.mockResolvedValue(undefined);
+    warning.mockReset();
+    fetchTickers.mockReset();
+    fetchTickers.mockImplementation((marketType: string) => Promise.resolve(
+      marketType === 'spot'
+        ? [{ symbol: 'BTC-USDT' }, { symbol: 'ETH-USDT' }]
+        : [{ symbol: 'BTC-USDT-SWAP' }, { symbol: 'ETH-USDT-SWAP' }],
+    ));
+    const ElementConstructor = class {
+      static [Symbol.hasInstance](value: unknown) {
+        return Boolean(
+          value
+            && typeof value === 'object'
+            && 'nodeName' in value
+            && 'ownerDocument' in value,
+        );
+      }
+    };
+    const documentElement = { nodeName: 'HTML', ownerDocument: null };
+    const body = { nodeName: 'BODY', ownerDocument: null };
+    const document = {
+      activeElement: null,
+      body,
+      documentElement,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    };
+    vi.stubGlobal('document', document);
+    vi.stubGlobal('Element', ElementConstructor);
+    vi.stubGlobal('HTMLElement', ElementConstructor);
+    vi.stubGlobal('window', {
+      document,
+      Element: ElementConstructor,
+      HTMLElement: ElementConstructor,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      getComputedStyle: () => ({
+        transitionDelay: '0s',
+        transitionDuration: '0s',
+        animationDelay: '0s',
+        animationDuration: '0s',
+      }),
+    });
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      callback(0);
+      return 0;
+    });
+    vi.stubGlobal('cancelAnimationFrame', () => {});
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
   it('mounts create-mode common and schema controls with numeric constraints', async () => {
@@ -137,6 +267,207 @@ describe('StrategyForm', () => {
     expect(number.props).toMatchObject({ min: 1, max: 100, step: 1, precision: 0 });
     expect(textContent(wrapper.getById('strategy-params-fast_window-description'))).toBe('Fast period');
     expect(control(wrapper, 'strategy-params-use_ema').type).toBe('el-switch');
+  });
+
+  it('renders symbol and timeframe as selectable controls', async () => {
+    const { wrapper } = await mountForm();
+
+    expect(control(wrapper, 'strategy-symbol').type).toBe('el-select');
+    expect(control(wrapper, 'strategy-timeframe').type).toBe('el-select');
+  });
+
+  it('combines fetched spot and swap symbols with fallbacks and the current value', async () => {
+    fetchTickers.mockImplementation((marketType: string) => Promise.resolve(
+      marketType === 'spot'
+        ? [{ symbol: 'XRP-USDT' }, { symbol: 'BTC-USDT' }]
+        : [{ symbol: 'XRP-USDT-SWAP' }, { symbol: 'BTC-USDT-SWAP' }],
+    ));
+
+    const { wrapper } = await mountForm({ model: draft({ symbol: 'LEGACY-USDT-SWAP' }) });
+    await wrapper.flush();
+
+    expect(fetchTickers).toHaveBeenCalledWith('spot');
+    expect(fetchTickers).toHaveBeenCalledWith('swap');
+    expect(selectOptionValues(wrapper, 'strategy-symbol')).toEqual([
+      'BTC-USDT',
+      'ETH-USDT',
+      'OKB-USDT',
+      'SOL-USDT',
+      'BTC-USDT-SWAP',
+      'ETH-USDT-SWAP',
+      'SOL-USDT-SWAP',
+      'LEGACY-USDT-SWAP',
+      'XRP-USDT',
+      'XRP-USDT-SWAP',
+    ]);
+    expect(control(wrapper, 'strategy-symbol').props).toMatchObject({ filterable: true, 'allow-create': true, loading: false });
+  });
+
+  it('updates the model when symbol and timeframe selections change', async () => {
+    const { wrapper, updates } = await mountForm();
+
+    await wrapper.invoke(control(wrapper, 'strategy-symbol'), 'onUpdate:modelValue', 'ETH-USDT-SWAP');
+    await wrapper.invoke(control(wrapper, 'strategy-timeframe'), 'onUpdate:modelValue', '1h');
+
+    expect(updates.at(-1)).toMatchObject({ symbol: 'ETH-USDT-SWAP', timeframe: '1h' });
+  });
+
+  it('commits a custom exact symbol through the real Element Plus keyboard flow', async () => {
+    const customSymbol = 'DOGE-USDT-SWAP';
+    const { wrapper, model } = await mountForm({
+      realSelects: true,
+      provide: {
+        [ID_INJECTION_KEY]: { prefix: 1024, current: 0 },
+        [ZINDEX_INJECTION_KEY]: { current: 0 },
+      },
+    });
+    await wrapper.flush();
+
+    const symbolCombobox = internalCombobox(wrapper, 'strategy-symbol');
+    await wrapper.trigger(symbolCombobox, 'input', { target: { value: customSymbol } });
+    await wrapper.flush();
+    await wrapper.flush();
+    await wrapper.flush();
+    await wrapper.trigger(symbolCombobox, 'keydown', { key: 'Enter', code: 'Enter' });
+    await wrapper.flush();
+
+    expect(model().symbol).toBe(customSymbol);
+  });
+
+  it('commits a custom exact timeframe through the real Element Plus keyboard flow', async () => {
+    const customTimeframe = '2h';
+    const { wrapper, model } = await mountForm({
+      realSelects: true,
+      provide: {
+        [ID_INJECTION_KEY]: { prefix: 1024, current: 0 },
+        [ZINDEX_INJECTION_KEY]: { current: 0 },
+      },
+    });
+    await wrapper.flush();
+
+    const timeframeCombobox = internalCombobox(wrapper, 'strategy-timeframe');
+    await wrapper.trigger(timeframeCombobox, 'input', { target: { value: customTimeframe } });
+    await wrapper.flush();
+    await wrapper.flush();
+    await wrapper.flush();
+    await wrapper.trigger(timeframeCombobox, 'keydown', { key: 'Enter', code: 'Enter' });
+    await wrapper.flush();
+
+    expect(model().timeframe).toBe(customTimeframe);
+  });
+
+  it('renders the six canonical timeframe values', async () => {
+    const { wrapper } = await mountForm();
+
+    expect(selectOptionValues(wrapper, 'strategy-timeframe')).toEqual(['1m', '5m', '15m', '1h', '4h', '1d']);
+  });
+
+  it('keeps custom existing symbol and timeframe values selectable', async () => {
+    const { wrapper } = await mountForm({ model: draft({ symbol: 'DOGE-USDT-SWAP', timeframe: '30m' }) });
+    await wrapper.flush();
+
+    expect(selectOptionValues(wrapper, 'strategy-symbol')).toContain('DOGE-USDT-SWAP');
+    expect(selectOptionValues(wrapper, 'strategy-timeframe')).toEqual(['1m', '5m', '15m', '1h', '4h', '1d', '30m']);
+    expect(control(wrapper, 'strategy-timeframe').props).toMatchObject({
+      filterable: true,
+      'allow-create': true,
+      'default-first-option': true,
+    });
+  });
+
+  it('retains symbol fallbacks and successful ticker results when one ticker request fails', async () => {
+    fetchTickers.mockImplementation((marketType: string) => (
+      marketType === 'spot'
+        ? Promise.reject(new Error('spot unavailable'))
+        : Promise.resolve([{ symbol: 'LTC-USDT-SWAP' }])
+    ));
+
+    const { wrapper } = await mountForm({ model: draft({ symbol: 'LEGACY-USDT' }) });
+    await wrapper.flush();
+
+    expect(selectOptionValues(wrapper, 'strategy-symbol')).toEqual([
+      'BTC-USDT',
+      'ETH-USDT',
+      'OKB-USDT',
+      'SOL-USDT',
+      'BTC-USDT-SWAP',
+      'ETH-USDT-SWAP',
+      'SOL-USDT-SWAP',
+      'LEGACY-USDT',
+      'LTC-USDT-SWAP',
+    ]);
+    expect(warning).toHaveBeenCalledTimes(1);
+    expect(warning).toHaveBeenCalledWith('market.unableToLoadSymbols');
+  });
+
+  it('ignores pending ticker results after unmount', async () => {
+    const spot = deferred<Array<{ symbol: string }>>();
+    const swap = deferred<Array<{ symbol: string }>>();
+    fetchTickers.mockImplementation((marketType: string) => (
+      marketType === 'spot' ? spot.promise : swap.promise
+    ));
+
+    const { wrapper, formInstance } = await mountInstrumentedForm({ model: draft({ symbol: 'LEGACY-USDT' }) });
+    const setupState = formInstance.setupState as unknown as { fetchedSymbols: string[]; symbolsLoading: boolean };
+
+    expect(fetchTickers).toHaveBeenCalledWith('spot');
+    expect(fetchTickers).toHaveBeenCalledWith('swap');
+    expect(control(wrapper, 'strategy-symbol').props.loading).toBe(true);
+    expect(setupState.symbolsLoading).toBe(true);
+    expect(setupState.fetchedSymbols).toEqual([]);
+
+    wrapper.unmount();
+    spot.reject(new Error('spot unavailable'));
+    swap.resolve([{ symbol: 'LTC-USDT-SWAP' }]);
+    await wrapper.flush();
+    await wrapper.flush();
+
+    expect(setupState.fetchedSymbols).toEqual([]);
+    expect(setupState.symbolsLoading).toBe(true);
+    expect(warning).not.toHaveBeenCalled();
+    expect(wrapper.all()).toEqual([]);
+  });
+
+  it('syncs strategy type, symbol, and timeframe accessibility linkage to real Element Plus comboboxes', async () => {
+    const issues: StrategyValidationIssue[] = [
+      { path: 'strategy_type', code: 'invalid', message: 'Bad type', line: null, column: null },
+      { path: 'symbol', code: 'invalid', message: 'Bad symbol', line: null, column: null },
+      { path: 'timeframe', code: 'invalid', message: 'Bad timeframe', line: null, column: null },
+    ];
+    const { wrapper } = await mountForm({
+      issues,
+      realSelects: true,
+      provide: {
+        [ID_INJECTION_KEY]: { prefix: 1024, current: 0 },
+        [ZINDEX_INJECTION_KEY]: { current: 0 },
+      },
+    });
+    await wrapper.flush();
+
+    expect(fetchTickers).toHaveBeenCalledWith('spot');
+    expect(fetchTickers).toHaveBeenCalledWith('swap');
+    expect(internalCombobox(wrapper, 'strategy-strategy-type').props).toMatchObject({
+      'aria-describedby': 'strategy-strategy-type-description strategy-strategy-type-error',
+      'aria-errormessage': 'strategy-strategy-type-error',
+    });
+    expect(internalCombobox(wrapper, 'strategy-symbol').props).toMatchObject({
+      'aria-describedby': 'strategy-symbol-description strategy-symbol-error',
+      'aria-errormessage': 'strategy-symbol-error',
+    });
+    expect(internalCombobox(wrapper, 'strategy-timeframe').props).toMatchObject({
+      'aria-describedby': 'strategy-timeframe-description strategy-timeframe-error',
+      'aria-errormessage': 'strategy-timeframe-error',
+    });
+
+    await wrapper.updateProps({ issues: [] });
+    await wrapper.flush();
+
+    expect(internalCombobox(wrapper, 'strategy-strategy-type').props['aria-describedby']).toBe('strategy-strategy-type-description');
+    expect(internalCombobox(wrapper, 'strategy-strategy-type').props['aria-errormessage']).toBeUndefined();
+    expect(internalCombobox(wrapper, 'strategy-symbol').props['aria-describedby']).toBe('strategy-symbol-description');
+    expect(internalCombobox(wrapper, 'strategy-symbol').props['aria-errormessage']).toBeUndefined();
+    expect(internalCombobox(wrapper, 'strategy-timeframe').props['aria-describedby']).toBe('strategy-timeframe-description');
+    expect(internalCombobox(wrapper, 'strategy-timeframe').props['aria-errormessage']).toBeUndefined();
   });
 
   it('renders every referenced description and error node for common and dynamic fields', async () => {
@@ -275,5 +606,7 @@ describe('StrategyForm', () => {
     expect(active.wrapper.find((node) => node.type === 'el-form').props.disabled).toBe(true);
     expect(control(active.wrapper, 'strategy-name').props.readonly).toBe(true);
     expect(control(active.wrapper, 'strategy-strategy-type').props.disabled).toBe(true);
+    expect(control(active.wrapper, 'strategy-symbol').props.disabled).toBe(true);
+    expect(control(active.wrapper, 'strategy-timeframe').props.disabled).toBe(true);
   });
 });

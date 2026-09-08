@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from typing import Any
 
 from src.core.types import Bar, Order, OrderSide, OrderType, Position
@@ -10,6 +11,19 @@ class BaseStrategy(ABC):
     def __init__(self) -> None:
         self._order_manager: Any = None
         self._capital_pct = 0.1
+        self._orders_enabled = True
+
+    def required_warmup_bars(self) -> int:
+        return 0
+
+    async def warmup(self, bars: Sequence[Bar]) -> None:
+        previous_orders_enabled = self._orders_enabled
+        self._orders_enabled = False
+        try:
+            for bar in bars:
+                await self.on_bar(bar)
+        finally:
+            self._orders_enabled = previous_orders_enabled
 
     def set_order_manager(self, manager: Any) -> None:
         self._order_manager = manager
@@ -81,6 +95,8 @@ class BaseStrategy(ABC):
         stop_loss: float | None = None,
         take_profit: float | None = None,
     ) -> Any:
+        if not self._orders_enabled:
+            return None
         if self._order_manager is None:
             raise RuntimeError("Order manager not set")
 

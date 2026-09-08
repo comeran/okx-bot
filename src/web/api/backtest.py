@@ -41,10 +41,28 @@ async def run_backtest(req: BacktestRequest) -> dict[str, float | int]:
         raise HTTPException(status_code=422, detail="initial_capital must be greater than 0")
 
     registry = create_strategy_registry()
-    if req.strategy not in registry.list_strategies():
+    repository = Repository()
+    strategy_config = None
+    get_strategy_config = getattr(repository, "get_strategy_config", None)
+    if get_strategy_config is not None:
+        strategy_config = get_strategy_config(req.strategy)
+
+    if req.strategy in registry.list_strategies():
+        strategy = registry.create(req.strategy)
+    elif (
+        strategy_config is not None
+        and strategy_config.strategy_type in registry.list_strategies()
+    ):
+        strategy = registry.create_instance(
+            strategy_config.name,
+            strategy_config.strategy_type,
+            strategy_config.symbol,
+            strategy_config.timeframe,
+            strategy_config.params,
+        )
+    else:
         raise HTTPException(status_code=404, detail="Strategy not found")
 
-    repository = Repository()
     try:
         bars = await ensure_historical_bars(
             repo=repository,
@@ -85,7 +103,6 @@ async def run_backtest(req: BacktestRequest) -> dict[str, float | int]:
             detail="insufficient historical data for requested backtest range",
         )
 
-    strategy = registry.create(req.strategy)
     if hasattr(strategy, "symbol"):
         strategy.symbol = req.symbol
 

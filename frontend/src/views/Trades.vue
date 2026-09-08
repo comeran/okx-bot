@@ -1,31 +1,57 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue';
-import { ElMessage } from 'element-plus';
+import { computed, onMounted, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
 
+import TradeFilters from '@/components/trades/TradeFilters.vue';
+import TradeSummary from '@/components/trades/TradeSummary.vue';
+import TradesTable from '@/components/trades/TradesTable.vue';
+import AppPageHeader from '@/components/ui/AppPageHeader.vue';
+import DataState from '@/components/ui/DataState.vue';
+import SectionCard from '@/components/ui/SectionCard.vue';
 import { fetchTrades } from '@/services/trades';
 import type { TradeRecord } from '@/types/trades';
+import {
+  buildTradeFilterOptions,
+  createTradeFilters,
+  filterTrades,
+  summarizeTrades,
+  type TradeFilters as TradeFiltersState,
+} from '@/utils/trades';
 
 const { t } = useI18n();
 
 const trades = ref<TradeRecord[]>([]);
+const filters = ref<TradeFiltersState>(createTradeFilters());
 const loading = ref(false);
+const loadedOnce = ref(false);
+const errorKey = ref<'trades.loadError' | null>(null);
+let loadSequence = 0;
 
-function formatNumber(value: number): string {
-  return value.toLocaleString(undefined, { maximumFractionDigits: 8 });
-}
-
-function formatTime(timestamp: number): string {
-  return new Date(timestamp).toLocaleString();
-}
+const filterOptions = computed(() => buildTradeFilterOptions(trades.value));
+const filteredTrades = computed(() => filterTrades(trades.value, filters.value));
+const tradeSummary = computed(() => summarizeTrades(filteredTrades.value));
+const hasLoadedRecords = computed(() => trades.value.length > 0);
+const hasSuccessfulLoad = computed(() => loadedOnce.value);
+const blockingLoading = computed(() => loading.value && !hasSuccessfulLoad.value);
+const errorMessage = computed(() => (errorKey.value ? t(errorKey.value) : null));
+const stale = computed(() => Boolean(errorMessage.value && hasSuccessfulLoad.value));
+const empty = computed(() => hasSuccessfulLoad.value && !hasLoadedRecords.value);
 
 async function loadTrades(): Promise<void> {
+  const requestSequence = ++loadSequence;
   loading.value = true;
+
   try {
-    trades.value = await fetchTrades();
+    const nextTrades = await fetchTrades();
+    if (requestSequence !== loadSequence) return;
+    trades.value = nextTrades;
+    loadedOnce.value = true;
+    errorKey.value = null;
   } catch {
-    ElMessage.error(t('trades.loadError'));
+    if (requestSequence !== loadSequence) return;
+    errorKey.value = 'trades.loadError';
   } finally {
+    if (requestSequence !== loadSequence) return;
     loading.value = false;
   }
 }
@@ -36,68 +62,61 @@ onMounted(() => {
 </script>
 
 <template>
-  <section class="trades-page">
-    <div class="trades-page__header">
-      <div>
-        <h2>{{ t('trades.title') }}</h2>
-        <p>{{ t('trades.description') }}</p>
-      </div>
-      <el-button :loading="loading" @click="loadTrades">
-        {{ t('common.refresh') }}
-      </el-button>
-    </div>
+  <section class="trades-view">
+    <AppPageHeader :title="t('trades.title')" :description="t('trades.description')">
+      <template #actions>
+        <el-button :loading="loading" @click="loadTrades">
+          {{ t('common.refresh') }}
+        </el-button>
+      </template>
+    </AppPageHeader>
 
-    <el-card shadow="hover" class="trades-card">
-      <template #header>{{ t('trades.history') }}</template>
-      <el-table v-loading="loading" :data="trades" empty-text=" " stripe>
-        <el-table-column :label="t('trades.timestamp')" min-width="180">
-          <template #default="{ row }">
-            {{ formatTime(row.timestamp) }}
-          </template>
-        </el-table-column>
-        <el-table-column prop="strategy" :label="t('trades.strategy')" min-width="120" />
-        <el-table-column prop="symbol" :label="t('common.symbol')" min-width="120" />
-        <el-table-column prop="side" :label="t('trades.side')" min-width="100" />
-        <el-table-column :label="t('trades.amount')" min-width="120">
-          <template #default="{ row }">
-            {{ formatNumber(row.amount) }}
-          </template>
-        </el-table-column>
-        <el-table-column :label="t('trades.price')" min-width="120">
-          <template #default="{ row }">
-            {{ formatNumber(row.price) }}
-          </template>
-        </el-table-column>
-        <el-table-column :label="t('trades.fee')" min-width="120">
-          <template #default="{ row }">
-            {{ formatNumber(row.fee) }}
-          </template>
-        </el-table-column>
-      </el-table>
-      <el-empty v-if="!loading && trades.length === 0" :description="t('trades.noTrades')" />
-    </el-card>
+    <DataState
+      :loading="blockingLoading"
+      :error="errorMessage"
+      :empty="empty"
+      :empty-description="t('trades.noTrades')"
+      :stale="stale"
+      @retry="loadTrades"
+    >
+      <div class="trades-view__content">
+        <SectionCard :title="t('trades.filters.title')" :description="t('trades.filters.description')">
+          <TradeFilters
+            v-model="filters"
+            :strategy-options="filterOptions.strategies"
+            :symbol-options="filterOptions.symbols"
+            :disabled="loading && !hasSuccessfulLoad"
+          />
+        </SectionCard>
+
+        <SectionCard :title="t('trades.summary.title')" :description="t('trades.summary.description')">
+          <TradeSummary :summary="tradeSummary" />
+        </SectionCard>
+
+        <SectionCard :title="t('trades.history')" :description="t('trades.table.description')">
+          <TradesTable
+            :trades="filteredTrades"
+            :loading="loading && hasSuccessfulLoad"
+            :empty-description="t('trades.table.noMatches')"
+          />
+        </SectionCard>
+      </div>
+    </DataState>
   </section>
 </template>
 
 <style scoped>
-.trades-page h2 {
-  margin: 0 0 8px;
-}
-
-.trades-page p {
-  margin: 0;
-  color: #606266;
-}
-
-.trades-page__header {
+.trades-view {
   display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 20px;
+  flex-direction: column;
+  gap: var(--ui-space-16);
+  min-width: 0;
 }
 
-.trades-card {
-  margin-bottom: 20px;
+.trades-view__content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-16);
+  min-width: 0;
 }
 </style>

@@ -3,37 +3,48 @@ import { computed, onMounted, reactive, ref } from 'vue';
 import { ElMessage } from 'element-plus';
 import { useI18n } from 'vue-i18n';
 
-import Candlestick from '@/components/charts/Candlestick.vue';
+import AppPageHeader from '@/components/ui/AppPageHeader.vue';
+import BacktestForm, { type BacktestFormModel } from '@/components/backtest/BacktestForm.vue';
+import BacktestMetrics from '@/components/backtest/BacktestMetrics.vue';
+import BacktestResultsTable from '@/components/backtest/BacktestResultsTable.vue';
+import BacktestResultDetail from '@/components/backtest/BacktestResultDetail.vue';
 import {
   runBacktest,
   fetchBacktestResultDetail,
   fetchBacktestResults,
 } from '@/services/backtest';
-import { listStrategies } from '@/services/strategies';
+import { listStrategies, listStrategyConfigs, listStrategyTypes } from '@/services/strategies';
 import type {
-  BacktestMetrics,
+  BacktestMetrics as BacktestMetricsData,
   BacktestRequest,
   BacktestResult,
-  BacktestResultDetail,
+  BacktestResultDetail as BacktestResultDetailData,
 } from '@/types/backtest';
-import type { StrategyRuntimeSummary } from '@/types/strategy';
+import type {
+  StrategyConfig,
+  StrategyDefinition,
+  StrategyRuntimeSummary,
+} from '@/types/strategy';
 import { getBacktestApiErrorMessage, getBacktestValidationError } from '@/utils/backtest';
 
-const { t } = useI18n();
+type BacktestStrategyOptionSource = 'builtin' | 'config';
+
+interface BacktestStrategyOption {
+  id: string;
+  value: string;
+  backendValue: string;
+  label: string;
+  disabled?: boolean;
+}
+
+const { t, locale } = useI18n();
 
 const timeframeOptions = ['1m', '5m', '15m', '1h', '4h', '1d'];
 const symbolOptions = ['BTC-USDT', 'ETH-USDT', 'OKB-USDT', 'SOL-USDT'];
 const defaultEndTime = new Date();
 const defaultStartTime = new Date(defaultEndTime.getTime() - 30 * 24 * 60 * 60 * 1000);
 
-const form = reactive<{
-  strategy: string;
-  symbol: string;
-  timeframe: string;
-  startTime: Date | null;
-  endTime: Date | null;
-  initialCapital: number | null | undefined;
-}>({
+const form = reactive<BacktestFormModel>({
   strategy: 'ma_cross',
   symbol: 'BTC-USDT',
   timeframe: '1h',
@@ -42,67 +53,124 @@ const form = reactive<{
   initialCapital: 100000,
 });
 
+const validationError = computed(() => getBacktestValidationError(form.startTime, form.endTime, form.initialCapital));
+
+const strategyTypes = ref<StrategyDefinition[]>([]);
+const strategyTypesState = ref<'loading' | 'loaded' | 'failed'>('loading');
+const strategyConfigs = ref<StrategyConfig[]>([]);
 const strategies = ref<StrategyRuntimeSummary[]>([]);
-const latestMetrics = ref<BacktestMetrics | null>(null);
+
+const latestMetrics = ref<BacktestMetricsData | null>(null);
 const results = ref<BacktestResult[]>([]);
 const selectedResultId = ref<string | null>(null);
-const selectedDetail = ref<BacktestResultDetail | null>(null);
+const selectedDetail = ref<BacktestResultDetailData | null>(null);
 const strategiesLoading = ref(false);
 const running = ref(false);
 const resultsLoading = ref(false);
 const detailLoading = ref(false);
-const detailError = ref(false);
+const detailError = ref<string | null>(null);
 let detailRequestToken = 0;
+let historyRequestToken = 0;
+let strategyCatalogRequestToken = 0;
 
-const strategyOptions = computed(() => {
-  const names = strategies.value.map((strategy) => strategy.name);
-  return Array.from(new Set(['ma_cross', ...names]));
-});
+const runtimeStatusByName = computed(() => new Map(
+  strategies.value.map((strategy) => [strategy.name, strategy.status]),
+));
 
-const metricCards = computed(() => {
-  if (!latestMetrics.value) {
+const strategyTypeCatalog = computed(() => (
+  strategyTypesState.value === 'loaded' ? strategyTypes.value : []
+));
+
+const builtInNames = computed(() => new Set(
+  strategyTypeCatalog.value.map((strategyType) => strategyType.strategy_type),
+));
+
+function strategySourceLabel(source: BacktestStrategyOptionSource): string {
+  if (locale.value.startsWith('zh')) {
+    return source === 'builtin' ? '内置策略' : '保存配置';
+  }
+  return source === 'builtin' ? 'Built-in strategy' : 'Saved config';
+}
+
+function strategyStatusLabel(status: StrategyRuntimeSummary['status']): string {
+  const normalizedStatus = status === 'running' || status === 'stopped' || status === 'starting' || status === 'error'
+    ? status
+    : 'unknown';
+  return t(`common.${normalizedStatus}`);
+}
+
+function strategyOptionLabel(
+  name: string,
+  source: BacktestStrategyOptionSource,
+  status?: StrategyRuntimeSummary['status'],
+  disabled = false,
+): string {
+  const parts = [name, strategySourceLabel(source)];
+  if (status) {
+    parts.push(strategyStatusLabel(status));
+  }
+  if (disabled) {
+    parts.push(locale.value.startsWith('zh') ? '已禁用' : 'Disabled');
+  }
+  return parts.join(' · ');
+}
+
+const strategyConflictNames = computed(() => {
+  if (strategyTypesState.value !== 'loaded') {
     return [];
   }
 
-  return [
-    {
-      label: t('backtest.metrics.totalReturn'),
-      value: formatPercent(latestMetrics.value.total_return),
-    },
-    {
-      label: t('backtest.metrics.sharpeRatio'),
-      value: formatNumber(latestMetrics.value.sharpe_ratio),
-    },
-    {
-      label: t('backtest.metrics.maxDrawdown'),
-      value: formatPercent(latestMetrics.value.max_drawdown),
-    },
-    {
-      label: t('backtest.metrics.winRate'),
-      value: formatPercent(latestMetrics.value.win_rate),
-    },
-    {
-      label: t('backtest.metrics.totalTrades'),
-      value: String(latestMetrics.value.total_trades),
-    },
-  ];
+  return strategyConfigs.value
+    .filter((config) => builtInNames.value.has(config.name))
+    .map((config) => config.name);
 });
 
-function formatNumber(value: number): string {
-  return value.toFixed(2);
-}
+const strategyConflictMessage = computed(() => {
+  if (strategyTypesState.value !== 'loaded' || strategyConflictNames.value.length === 0) {
+    return null;
+  }
 
-function formatPercent(value: number): string {
-  return `${(value * 100).toFixed(2)}%`;
-}
+  const names = strategyConflictNames.value.join(', ');
+  return t('backtest.strategyConflict', { names });
+});
 
-function formatTime(timestamp: number): string {
-  return new Date(timestamp).toLocaleString();
-}
+const strategyOptions = computed<BacktestStrategyOption[]>(() => {
+  const options: BacktestStrategyOption[] = [];
+  const catalogUnavailable = strategyTypesState.value !== 'loaded';
+
+  if (!catalogUnavailable) {
+    for (const strategyType of strategyTypeCatalog.value) {
+      const status = runtimeStatusByName.value.get(strategyType.strategy_type);
+      options.push({
+        id: `builtin:${strategyType.strategy_type}`,
+        value: strategyType.strategy_type,
+        backendValue: strategyType.strategy_type,
+        label: strategyOptionLabel(strategyType.strategy_type, 'builtin', status),
+      });
+    }
+  }
+
+  for (const config of strategyConfigs.value) {
+    const status = runtimeStatusByName.value.get(config.name);
+    const disabled = catalogUnavailable || builtInNames.value.has(config.name);
+    options.push({
+      id: `config:${config.name}`,
+      value: catalogUnavailable ? config.name : (disabled ? `config:${config.name}` : config.name),
+      backendValue: config.name,
+      label: strategyOptionLabel(config.name, 'config', status, disabled),
+      disabled,
+    });
+  }
+
+  return options;
+});
+
+const selectedStrategyOption = computed(() => strategyOptions.value
+  .find((option) => option.value === form.strategy));
 
 function buildRequest(): BacktestRequest {
   return {
-    strategy: form.strategy,
+    strategy: selectedStrategyOption.value?.backendValue ?? form.strategy,
     symbol: form.symbol,
     timeframe: form.timeframe,
     start_time: form.startTime!.getTime(),
@@ -112,9 +180,23 @@ function buildRequest(): BacktestRequest {
 }
 
 function validateForm(): boolean {
-  const error = getBacktestValidationError(form.startTime, form.endTime, form.initialCapital);
-  if (error) {
-    ElMessage.error(t(`backtest.validation.${error}`));
+  if (strategyTypesState.value !== 'loaded') {
+    ElMessage.error(t('backtest.strategyCatalogUnavailable'));
+    return false;
+  }
+
+  if (!selectedStrategyOption.value) {
+    ElMessage.error(t('backtest.strategyUnavailable'));
+    return false;
+  }
+
+  if (selectedStrategyOption.value.disabled) {
+    ElMessage.error(strategyConflictMessage.value ?? t('backtest.strategyUnavailable'));
+    return false;
+  }
+
+  if (validationError.value) {
+    ElMessage.error(t(`backtest.validation.${validationError.value}`));
     return false;
   }
 
@@ -122,31 +204,86 @@ function validateForm(): boolean {
 }
 
 async function loadStrategies(): Promise<void> {
+  const requestToken = ++strategyCatalogRequestToken;
   strategiesLoading.value = true;
   try {
-    strategies.value = await listStrategies();
-  } catch {
-    ElMessage.error(t('backtest.loadStrategiesError'));
+    const [strategyTypesResult, strategyConfigsResult, strategiesResult] = await Promise.allSettled([
+      listStrategyTypes(),
+      listStrategyConfigs(),
+      listStrategies(),
+    ]);
+    if (requestToken !== strategyCatalogRequestToken) {
+      return;
+    }
+
+    if (strategyTypesResult.status === 'fulfilled') {
+      strategyTypes.value = strategyTypesResult.value;
+      strategyTypesState.value = 'loaded';
+    } else {
+      strategyTypes.value = [];
+      strategyTypesState.value = 'failed';
+    }
+    if (strategyConfigsResult.status === 'fulfilled') {
+      strategyConfigs.value = strategyConfigsResult.value;
+    }
+    if (strategiesResult.status === 'fulfilled') {
+      strategies.value = strategiesResult.value;
+    }
+    if (strategyTypesResult.status === 'rejected'
+      || strategyConfigsResult.status === 'rejected'
+      || strategiesResult.status === 'rejected') {
+      ElMessage.error(t('backtest.loadStrategiesError'));
+    }
   } finally {
-    strategiesLoading.value = false;
+    if (requestToken === strategyCatalogRequestToken) {
+      strategiesLoading.value = false;
+    }
   }
 }
 
+function clearSelectionIfMissing(nextResults: BacktestResult[]): void {
+  if (!selectedResultId.value) {
+    return;
+  }
+
+  const stillExists = nextResults.some((result) => result.id === selectedResultId.value);
+  if (stillExists) {
+    return;
+  }
+
+  selectedResultId.value = null;
+  selectedDetail.value = null;
+  detailError.value = null;
+  detailLoading.value = false;
+  detailRequestToken += 1;
+}
+
 async function loadResults(): Promise<void> {
+  const requestToken = ++historyRequestToken;
   resultsLoading.value = true;
   try {
-    results.value = await fetchBacktestResults();
+    const nextResults = await fetchBacktestResults();
+    if (requestToken !== historyRequestToken) {
+      return;
+    }
+
+    results.value = nextResults;
+    clearSelectionIfMissing(nextResults);
   } catch {
-    ElMessage.error(t('backtest.loadResultsError'));
+    if (requestToken === historyRequestToken) {
+      ElMessage.error(t('backtest.loadResultsError'));
+    }
   } finally {
-    resultsLoading.value = false;
+    if (requestToken === historyRequestToken) {
+      resultsLoading.value = false;
+    }
   }
 }
 
 async function loadResultDetail(id: string): Promise<void> {
   const requestToken = ++detailRequestToken;
   detailLoading.value = true;
-  detailError.value = false;
+  detailError.value = null;
   selectedDetail.value = null;
 
   try {
@@ -154,10 +291,10 @@ async function loadResultDetail(id: string): Promise<void> {
     if (requestToken === detailRequestToken && selectedResultId.value === id) {
       selectedDetail.value = detail;
     }
-  } catch {
+  } catch (error) {
     if (requestToken === detailRequestToken && selectedResultId.value === id) {
       selectedDetail.value = null;
-      detailError.value = true;
+      detailError.value = getBacktestApiErrorMessage(error) ?? t('backtest.detailLoadError');
     }
   } finally {
     if (requestToken === detailRequestToken && selectedResultId.value === id) {
@@ -166,9 +303,9 @@ async function loadResultDetail(id: string): Promise<void> {
   }
 }
 
-function handleResultRowClick(row: BacktestResult): void {
-  selectedResultId.value = row.id;
-  void loadResultDetail(row.id);
+function handleSelectResult(id: string): void {
+  selectedResultId.value = id;
+  void loadResultDetail(id);
 }
 
 async function handleRun(): Promise<void> {
@@ -188,6 +325,18 @@ async function handleRun(): Promise<void> {
   }
 }
 
+function handleRefreshResults(): void {
+  void loadResults();
+}
+
+function handleRetryDetail(): void {
+  if (!selectedResultId.value) {
+    return;
+  }
+
+  void loadResultDetail(selectedResultId.value);
+}
+
 onMounted(() => {
   void loadStrategies();
   void loadResults();
@@ -196,223 +345,65 @@ onMounted(() => {
 
 <template>
   <section class="backtest-page">
-    <div class="backtest-page__header">
-      <div>
-        <h2>{{ t('backtest.title') }}</h2>
-        <p>{{ t('backtest.description') }}</p>
-      </div>
-      <el-button :loading="resultsLoading" @click="loadResults">
-        {{ t('common.refresh') }}
-      </el-button>
+    <AppPageHeader
+      :title="t('backtest.title')"
+      :description="t('backtest.description')"
+    />
+
+    <div class="backtest-page__section">
+      <BacktestForm
+        :form="form"
+        :strategy-options="strategyOptions"
+        :strategy-conflict-message="strategyConflictMessage"
+        :strategy-catalog-unavailable="strategyTypesState === 'failed'"
+        :symbol-options="symbolOptions"
+        :timeframe-options="timeframeOptions"
+        :strategies-loading="strategiesLoading"
+        :running="running"
+        :validation-error="validationError"
+        @run="handleRun"
+        @retry-strategies="loadStrategies"
+      />
     </div>
 
-    <el-card shadow="hover" class="backtest-card">
-      <template #header>{{ t('backtest.runBacktest') }}</template>
-      <el-form :model="form" label-position="top" @submit.prevent="handleRun">
-        <el-row :gutter="16">
-          <el-col :xs="24" :md="8">
-            <el-form-item :label="t('backtest.strategy')">
-              <el-select v-model="form.strategy" :loading="strategiesLoading" class="full-width">
-                <el-option
-                  v-for="strategy in strategyOptions"
-                  :key="strategy"
-                  :label="strategy"
-                  :value="strategy"
-                />
-              </el-select>
-            </el-form-item>
-          </el-col>
-          <el-col :xs="24" :md="8">
-            <el-form-item :label="t('common.symbol')">
-              <el-select v-model="form.symbol" filterable class="full-width">
-                <el-option
-                  v-for="symbol in symbolOptions"
-                  :key="symbol"
-                  :label="symbol"
-                  :value="symbol"
-                />
-              </el-select>
-            </el-form-item>
-          </el-col>
-          <el-col :xs="24" :md="8">
-            <el-form-item :label="t('common.timeframe')">
-              <el-select v-model="form.timeframe" class="full-width">
-                <el-option
-                  v-for="timeframe in timeframeOptions"
-                  :key="timeframe"
-                  :label="timeframe"
-                  :value="timeframe"
-                />
-              </el-select>
-            </el-form-item>
-          </el-col>
-          <el-col :xs="24" :md="8">
-            <el-form-item :label="t('backtest.startTime')">
-              <el-date-picker v-model="form.startTime" type="datetime" :placeholder="t('backtest.selectStartTime')" class="full-width" />
-            </el-form-item>
-          </el-col>
-          <el-col :xs="24" :md="8">
-            <el-form-item :label="t('backtest.endTime')">
-              <el-date-picker v-model="form.endTime" type="datetime" :placeholder="t('backtest.selectEndTime')" class="full-width" />
-            </el-form-item>
-          </el-col>
-          <el-col :xs="24" :md="8">
-            <el-form-item :label="t('backtest.initialCapital')">
-              <el-input-number v-model="form.initialCapital" :min="0" :step="1000" class="full-width" />
-            </el-form-item>
-          </el-col>
-        </el-row>
-        <el-button type="primary" :loading="running" native-type="submit">
-          {{ t('backtest.run') }}
-        </el-button>
-      </el-form>
-    </el-card>
+    <div class="backtest-page__section">
+      <BacktestMetrics
+        :metrics="latestMetrics"
+        :loading="running"
+      />
+    </div>
 
-    <el-card shadow="hover" class="backtest-card">
-      <template #header>{{ t('backtest.latestMetrics') }}</template>
-      <el-row v-if="latestMetrics" :gutter="16">
-        <el-col v-for="metric in metricCards" :key="metric.label" :xs="24" :sm="12" :md="4">
-          <div class="metric-card">
-            <div class="metric-card__label">{{ metric.label }}</div>
-            <div class="metric-card__value">{{ metric.value }}</div>
-          </div>
-        </el-col>
-      </el-row>
-      <el-empty v-else :description="t('backtest.noLatestMetrics')" />
-    </el-card>
+    <div class="backtest-page__section">
+      <BacktestResultsTable
+        :results="results"
+        :selected-result-id="selectedResultId"
+        :loading="resultsLoading"
+        @select-result="handleSelectResult"
+        @refresh="handleRefreshResults"
+      />
+    </div>
 
-    <el-card shadow="hover" class="backtest-card">
-      <template #header>{{ t('backtest.history') }}</template>
-      <el-table
-        v-loading="resultsLoading"
-        :data="results"
-        empty-text=" "
-        highlight-current-row
-        row-key="id"
-        stripe
-        @row-click="handleResultRowClick"
-      >
-        <el-table-column prop="strategy" :label="t('backtest.strategy')" min-width="120" />
-        <el-table-column prop="symbol" :label="t('common.symbol')" min-width="120" />
-        <el-table-column prop="timeframe" :label="t('common.timeframe')" min-width="100" />
-        <el-table-column :label="t('backtest.startTime')" min-width="180">
-          <template #default="{ row }">
-            {{ formatTime(row.start_time) }}
-          </template>
-        </el-table-column>
-        <el-table-column :label="t('backtest.endTime')" min-width="180">
-          <template #default="{ row }">
-            {{ formatTime(row.end_time) }}
-          </template>
-        </el-table-column>
-        <el-table-column :label="t('backtest.metrics.totalReturn')" min-width="130">
-          <template #default="{ row }">
-            {{ formatPercent(row.total_return) }}
-          </template>
-        </el-table-column>
-        <el-table-column :label="t('backtest.metrics.sharpeRatio')" min-width="130">
-          <template #default="{ row }">
-            {{ formatNumber(row.sharpe_ratio) }}
-          </template>
-        </el-table-column>
-        <el-table-column :label="t('backtest.metrics.maxDrawdown')" min-width="140">
-          <template #default="{ row }">
-            {{ formatPercent(row.max_drawdown) }}
-          </template>
-        </el-table-column>
-        <el-table-column :label="t('backtest.metrics.winRate')" min-width="120">
-          <template #default="{ row }">
-            {{ formatPercent(row.win_rate) }}
-          </template>
-        </el-table-column>
-        <el-table-column prop="total_trades" :label="t('backtest.metrics.totalTrades')" min-width="120" />
-      </el-table>
-      <el-empty v-if="!resultsLoading && results.length === 0" :description="t('backtest.noResults')" />
-    </el-card>
-
-    <el-card shadow="hover" class="backtest-card">
-      <template #header>{{ t('backtest.historyChart') }}</template>
-      <div v-loading="detailLoading" class="history-chart">
-        <el-alert
-          v-if="detailError"
-          :title="t('backtest.detailLoadError')"
-          type="error"
-          show-icon
-          :closable="false"
-          class="history-chart__error"
-        />
-        <el-empty
-          v-if="!selectedResultId && !detailError"
-          :description="t('backtest.selectHistoryEmpty')"
-        />
-        <Candlestick
-          v-else-if="selectedDetail && selectedDetail.result.id === selectedResultId"
-          :klines="selectedDetail.klines"
-          :markers="selectedDetail.markers"
-          :symbol="selectedDetail.result.symbol"
-          :timeframe="selectedDetail.result.timeframe"
-          :height="460"
-        />
-      </div>
-    </el-card>
+    <div class="backtest-page__section">
+      <BacktestResultDetail
+        :selected-detail="selectedDetail"
+        :selected-result-id="selectedResultId"
+        :loading="detailLoading"
+        :error="detailError"
+        @retry="handleRetryDetail"
+      />
+    </div>
   </section>
 </template>
 
 <style scoped>
-.backtest-page h2 {
-  margin: 0 0 8px;
-}
-
-.backtest-page p {
-  margin: 0;
-  color: #606266;
-}
-
-.backtest-page__header {
+.backtest-page {
   display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 20px;
+  flex-direction: column;
+  gap: var(--ui-space-16);
+  min-width: 0;
 }
 
-.backtest-card {
-  margin-bottom: 20px;
-}
-
-.full-width,
-.backtest-card :deep(.el-select) {
-  width: 100%;
-}
-
-.metric-card {
-  padding: 16px;
-  border: 1px solid #ebeef5;
-  border-radius: 8px;
-  background: #fafafa;
-}
-
-.metric-card__label {
-  margin-bottom: 8px;
-  color: #606266;
-  font-size: 13px;
-}
-
-.metric-card__value {
-  color: #303133;
-  font-size: 24px;
-  font-weight: 600;
-}
-
-.history-chart {
-  min-height: 320px;
-}
-
-.history-chart__error {
-  margin-bottom: 16px;
-}
-
-.backtest-card :deep(.el-table__row) {
-  cursor: pointer;
+.backtest-page__section {
+  min-width: 0;
 }
 </style>

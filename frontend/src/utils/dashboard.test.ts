@@ -27,6 +27,13 @@ describe('dashboard runtime UI helpers', () => {
     expect(formatTickerPrice('68000.12345')).toBe('68,000.1235');
   });
 
+  it('formats runtime timestamps with an explicit locale', () => {
+    const timestamp = 1700000000000;
+
+    expect(formatRuntimeTime(timestamp, 'en-US')).toBe(new Date(timestamp).toLocaleString('en-US'));
+    expect(formatRuntimeTime(timestamp, 'zh-CN')).toBe(new Date(timestamp).toLocaleString('zh-CN'));
+  });
+
   it('builds short payload previews without received metadata', () => {
     expect(formatRuntimePayloadPreview({
       type: 'strategy_error',

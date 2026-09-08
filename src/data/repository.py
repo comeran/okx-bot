@@ -129,6 +129,10 @@ class Repository:
                 updated_at=max(account.updated_at for account in accounts),
             )
 
+    def get_accounts(self) -> list[AccountRecord]:
+        with Session(self.engine) as session:
+            return list(session.exec(select(AccountRecord)).all())
+
     def save_cash_ledger(self, entry: CashLedgerRecord) -> CashLedgerRecord:
         with Session(self.engine) as session:
             session.add(entry)

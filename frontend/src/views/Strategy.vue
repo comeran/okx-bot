@@ -1,11 +1,13 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { onBeforeRouteLeave } from 'vue-router';
 import { useI18n } from 'vue-i18n';
 
-import CodeEditor from '@/components/editor/CodeEditor.vue';
-import StrategyForm from '@/components/StrategyForm.vue';
+import AppPageHeader from '@/components/ui/AppPageHeader.vue';
+import StrategyEditorPanel from '@/components/strategy/StrategyEditorPanel.vue';
+import StrategyList, { type StrategyListRow, type StrategyListStatusTone } from '@/components/strategy/StrategyList.vue';
+import { useDirtyGuard } from '@/composables/useDirtyGuard';
 import {
   validateStrategyConfig,
   validateStrategyConfigYaml,
@@ -17,7 +19,6 @@ import type {
   StrategyStatus,
   StrategyValidationIssue,
 } from '@/types/strategy';
-import { getStrategyStatusTagType } from '@/utils/strategy';
 import {
   buildCloneDraft,
   buildDefaultStrategyDraft,
@@ -53,6 +54,7 @@ const draftDirty = computed(() => draft.value !== null && JSON.stringify(draft.v
 const yamlDirty = computed(() => advanced.value && yaml.value !== yamlBaseline.value);
 const dirty = computed(() => draftDirty.value || yamlDirty.value);
 const editorBusy = computed(() => activeOperation.value !== null);
+const editorOpen = computed(() => draft.value !== null && mode.value !== 'closed');
 const issueGroups = computed(() => fieldIssuesByPath(issues.value));
 const visibleIssueMessages = computed(() => (
   advanced.value
@@ -62,6 +64,9 @@ const visibleIssueMessages = computed(() => (
 const editorUri = computed(() => strategyModelUri(
   mode.value === 'edit' ? `instance:${selectedName.value}` : `${mode.value}:${cloneSourceName.value || 'new'}`,
 ));
+const listTitle = computed(() => t('strategies.list.title'));
+const listDescription = computed(() => t('strategies.list.description'));
+const editorTitle = computed(() => t(`strategies.editor.${mode.value}`));
 
 function statusFor(config: StrategyConfig): StrategyStatus | undefined {
   return store.statuses[config.name]?.status;
@@ -72,6 +77,61 @@ function statusKeyFor(config: StrategyConfig): 'running' | 'stopped' | 'starting
   return status === 'running' || status === 'stopped' || status === 'starting' || status === 'error'
     ? status
     : 'unknown';
+}
+
+function statusToneFor(statusKey: 'running' | 'stopped' | 'starting' | 'error' | 'unknown'): StrategyListStatusTone {
+  switch (statusKey) {
+    case 'running':
+      return 'success';
+    case 'stopped':
+      return 'info';
+    case 'starting':
+      return 'warning';
+    case 'error':
+      return 'danger';
+    default:
+      return 'neutral';
+  }
+}
+
+function configByName(name: string): StrategyConfig | undefined {
+  return configs.value.find((config) => config.name === name);
+}
+
+type StrategyRowTarget = string | { name: string };
+
+function nameForTarget(target: StrategyRowTarget): string {
+  return typeof target === 'string' ? target : target.name;
+}
+
+async function selectRow(target: StrategyRowTarget): Promise<void> {
+  const config = configByName(nameForTarget(target));
+  if (config) await selectInstance(config);
+}
+
+async function editRow(target: StrategyRowTarget): Promise<void> {
+  const config = configByName(nameForTarget(target));
+  if (config) await beginEdit(config);
+}
+
+async function cloneRow(target: StrategyRowTarget): Promise<void> {
+  const config = configByName(nameForTarget(target));
+  if (config) await beginClone(config);
+}
+
+async function deleteRow(target: StrategyRowTarget): Promise<void> {
+  const config = configByName(nameForTarget(target));
+  if (config) await deleteConfig(config);
+}
+
+async function startRow(target: StrategyRowTarget): Promise<void> {
+  const config = configByName(nameForTarget(target));
+  if (config) await runAction(config, 'start');
+}
+
+async function stopRow(target: StrategyRowTarget): Promise<void> {
+  const config = configByName(nameForTarget(target));
+  if (config) await runAction(config, 'stop');
 }
 
 function runtimeError(config: StrategyConfig): string {
@@ -133,8 +193,10 @@ async function confirmDiscard(): Promise<boolean> {
   }
 }
 
+const { confirmIfDirty } = useDirtyGuard(() => dirty.value, confirmDiscard);
+
 async function beginCreate(): Promise<void> {
-  if (!(await confirmDiscard())) return;
+  if (!(await confirmIfDirty())) return;
   const definition = store.definitions[0];
   if (!definition) {
     ElMessage.error(t('strategies.noDefinitions'));
@@ -146,21 +208,21 @@ async function beginCreate(): Promise<void> {
 }
 
 async function beginEdit(config: StrategyConfig): Promise<void> {
-  if (!(await confirmDiscard())) return;
+  if (!(await confirmIfDirty())) return;
   selectedName.value = config.name;
   cloneSourceName.value = '';
   setDraft(config, 'edit');
 }
 
 async function beginClone(config: StrategyConfig): Promise<void> {
-  if (!(await confirmDiscard())) return;
+  if (!(await confirmIfDirty())) return;
   selectedName.value = config.name;
   cloneSourceName.value = config.name;
   setDraft(buildCloneDraft(config), 'clone');
 }
 
 async function closeEditor(): Promise<void> {
-  if (!(await confirmDiscard())) return;
+  if (!(await confirmIfDirty())) return;
   invalidateEditorSession();
   mode.value = 'closed';
   draft.value = null;
@@ -324,7 +386,47 @@ function saveLoading(): boolean {
   return store.isMutationLoading(selectedName.value, 'update');
 }
 
-onBeforeRouteLeave(async () => confirmDiscard());
+const listRows = computed<StrategyListRow[]>(() => configs.value.map((config) => {
+  const statusKey = statusKeyFor(config);
+  const safety = safetyFor(config);
+  return {
+    name: config.name,
+    strategyType: config.strategy_type,
+    symbol: config.symbol,
+    timeframe: config.timeframe,
+    enabled: config.enabled,
+    statusLabel: t(`strategies.status.${statusKey}`),
+    statusTone: statusToneFor(statusKey),
+    runtimeError: runtimeError(config),
+    safetyText: safety.canStop
+      ? t('strategies.list.runningSafety')
+      : safety.canEdit
+        ? t('strategies.list.stoppedSafety')
+        : t('strategies.list.readOnlySafety'),
+    selected: selectedName.value === config.name,
+    canEdit: safety.canEdit,
+    canDelete: safety.canDelete,
+    canStart: safety.canStart,
+    canStop: safety.canStop,
+    isDeleting: store.isMutationLoading(config.name, 'delete'),
+    isStarting: store.isActionLoading(config.name, 'start'),
+    isStopping: store.isActionLoading(config.name, 'stop'),
+    actionLabels: {
+      select: t('strategies.actions.select', { name: config.name }),
+      edit: t('strategies.actions.edit', { name: config.name }),
+      clone: t('strategies.actions.clone', { name: config.name }),
+      delete: t('strategies.actions.delete', { name: config.name }),
+      start: t('strategies.actions.start', { name: config.name }),
+      stop: t('strategies.actions.stop', { name: config.name }),
+    },
+  };
+}));
+
+onBeforeRouteLeave(async () => confirmIfDirty());
+
+onBeforeUnmount(() => {
+  invalidateEditorSession();
+});
 
 onMounted(() => {
   void store.loadInitialData();
@@ -333,18 +435,14 @@ onMounted(() => {
 
 <template>
   <section class="strategy-page">
-    <header class="strategy-page__header">
-      <div>
-        <h2>{{ t('strategies.title') }}</h2>
-        <p>{{ t('strategies.description') }}</p>
-      </div>
-      <div class="strategy-page__header-actions">
+    <AppPageHeader :title="t('strategies.title')" :description="t('strategies.description')">
+      <template #actions>
         <el-button :loading="store.loadingInitial" @click="store.loadInitialData()">{{ t('common.refresh') }}</el-button>
         <el-button type="primary" :disabled="store.definitions.length === 0" @click="beginCreate">
           {{ t('strategies.create') }}
         </el-button>
-      </div>
-    </header>
+      </template>
+    </AppPageHeader>
 
     <el-alert v-if="store.error" :title="t('strategies.loadError')" :description="store.error" type="error" show-icon :closable="false" />
     <el-alert
@@ -357,177 +455,48 @@ onMounted(() => {
       class="strategy-page__alert"
     />
 
-    <el-card v-if="configs.length" shadow="never" class="strategy-list">
-      <div class="strategy-table" data-testid="strategy-desktop-table">
-        <el-table :data="configs" row-key="name" @row-click="selectInstance">
-          <el-table-column prop="name" :label="t('common.name')" min-width="150" />
-          <el-table-column prop="strategy_type" :label="t('strategies.form.strategyType')" min-width="140" />
-          <el-table-column :label="t('strategies.market')" min-width="180">
-            <template #default="{ row }: { row: StrategyConfig }">{{ row.symbol }} / {{ row.timeframe }}</template>
-          </el-table-column>
-          <el-table-column :label="t('strategies.form.enabled')" width="100">
-            <template #default="{ row }: { row: StrategyConfig }">{{ row.enabled ? t('common.yes') : t('common.no') }}</template>
-          </el-table-column>
-          <el-table-column :label="t('common.status')" min-width="150">
-            <template #default="{ row }: { row: StrategyConfig }">
-              <el-tag :type="getStrategyStatusTagType(statusKeyFor(row))" effect="plain">
-                {{ t(`strategies.status.${statusKeyFor(row)}`) }}
-              </el-tag>
-              <div v-if="runtimeError(row)" class="strategy-runtime-error">{{ runtimeError(row) }}</div>
-            </template>
-          </el-table-column>
-          <el-table-column :label="t('common.actions')" min-width="430" fixed="right">
-            <template #default="{ row }: { row: StrategyConfig }">
-              <div class="strategy-actions" @click.stop @keydown.stop>
-                <el-button size="small" :aria-label="t('strategies.actions.edit', { name: row.name })" :disabled="!safetyFor(row).canEdit" @click="beginEdit(row)">{{ t('common.edit') }}</el-button>
-                <el-button size="small" :aria-label="t('strategies.actions.clone', { name: row.name })" @click="beginClone(row)">{{ t('strategies.clone') }}</el-button>
-                <el-button
-                  size="small"
-                  type="danger"
-                  :aria-label="t('strategies.actions.delete', { name: row.name })"
-                  :disabled="!safetyFor(row).canDelete"
-                  :loading="store.isMutationLoading(row.name, 'delete')"
-                  @click="deleteConfig(row)"
-                >{{ t('common.delete') }}</el-button>
-                <el-button
-                  size="small"
-                  type="success"
-                  :aria-label="t('strategies.actions.start', { name: row.name })"
-                  :disabled="!safetyFor(row).canStart"
-                  :loading="store.isActionLoading(row.name, 'start')"
-                  @click="runAction(row, 'start')"
-                >{{ t('strategies.start') }}</el-button>
-                <el-button
-                  size="small"
-                  :aria-label="t('strategies.actions.stop', { name: row.name })"
-                  :disabled="!safetyFor(row).canStop"
-                  :loading="store.isActionLoading(row.name, 'stop')"
-                  @click="runAction(row, 'stop')"
-                >{{ t('strategies.stop') }}</el-button>
-              </div>
-            </template>
-          </el-table-column>
-        </el-table>
-      </div>
-
-      <div class="strategy-cards" data-testid="strategy-mobile-cards">
-        <article
-          v-for="config in configs"
-          :key="config.name"
-          class="strategy-card"
-        >
-          <div class="strategy-card__title">
-            <el-button
-              text
-              :aria-label="t('strategies.actions.select', { name: config.name })"
-              :aria-pressed="selectedName === config.name ? 'true' : 'false'"
-              @click="selectInstance(config)"
-            ><strong>{{ config.name }}</strong></el-button>
-            <el-tag :type="getStrategyStatusTagType(statusKeyFor(config))" effect="plain">
-              {{ t(`strategies.status.${statusKeyFor(config)}`) }}
-            </el-tag>
-          </div>
-          <dl>
-            <dt>{{ t('strategies.form.strategyType') }}</dt><dd>{{ config.strategy_type }}</dd>
-            <dt>{{ t('strategies.market') }}</dt><dd>{{ config.symbol }} / {{ config.timeframe }}</dd>
-            <dt>{{ t('strategies.form.enabled') }}</dt><dd>{{ config.enabled ? t('common.yes') : t('common.no') }}</dd>
-          </dl>
-          <p v-if="runtimeError(config)" class="strategy-runtime-error">{{ runtimeError(config) }}</p>
-          <div class="strategy-actions">
-            <el-button size="small" :aria-label="t('strategies.actions.edit', { name: config.name })" :disabled="!safetyFor(config).canEdit" @click="beginEdit(config)">{{ t('common.edit') }}</el-button>
-            <el-button size="small" :aria-label="t('strategies.actions.clone', { name: config.name })" @click="beginClone(config)">{{ t('strategies.clone') }}</el-button>
-            <el-button
-              size="small"
-              type="danger"
-              :aria-label="t('strategies.actions.delete', { name: config.name })"
-              :disabled="!safetyFor(config).canDelete"
-              :loading="store.isMutationLoading(config.name, 'delete')"
-              @click="deleteConfig(config)"
-            >{{ t('common.delete') }}</el-button>
-            <el-button
-              size="small"
-              type="success"
-              :aria-label="t('strategies.actions.start', { name: config.name })"
-              :disabled="!safetyFor(config).canStart"
-              :loading="store.isActionLoading(config.name, 'start')"
-              @click="runAction(config, 'start')"
-            >{{ t('strategies.start') }}</el-button>
-            <el-button
-              size="small"
-              :aria-label="t('strategies.actions.stop', { name: config.name })"
-              :disabled="!safetyFor(config).canStop"
-              :loading="store.isActionLoading(config.name, 'stop')"
-              @click="runAction(config, 'stop')"
-            >{{ t('strategies.stop') }}</el-button>
-          </div>
-        </article>
-      </div>
-    </el-card>
-
-    <el-card v-else-if="!store.loadingInitial" shadow="never" class="strategy-empty">
-      <el-empty :description="t('strategies.emptyDescription')">
-        <el-button type="primary" :disabled="store.definitions.length === 0" @click="beginCreate">
-          {{ t('strategies.createFirst') }}
-        </el-button>
-      </el-empty>
-    </el-card>
-
-    <el-card v-if="draft && mode !== 'closed'" shadow="never" class="strategy-editor">
-      <template #header>
-        <div class="strategy-editor__header">
-          <strong>{{ t(`strategies.editor.${mode}`) }}</strong>
-          <el-button :aria-label="t('common.close')" @click="closeEditor">{{ t('common.close') }}</el-button>
-        </div>
-      </template>
-
-      <el-alert
-        v-for="message in visibleIssueMessages"
-        :key="message"
-        :title="message"
-        type="error"
-        show-icon
-        :closable="false"
-        class="strategy-page__alert"
+    <div
+      class="strategy-page__content"
+      :class="{ 'strategy-page__content--editor-open': editorOpen }"
+    >
+      <StrategyList
+        :title="listTitle"
+        :description="listDescription"
+        :rows="listRows"
+        :loading="store.loadingInitial"
+        :empty-description="t('strategies.emptyDescription')"
+        :on-select="selectRow"
+        :on-edit="editRow"
+        :on-clone="cloneRow"
+        :on-delete="deleteRow"
+        :on-start="(row) => startRow(row.name)"
+        :on-stop="(row) => stopRow(row.name)"
       />
 
-      <div class="strategy-editor__mode">
-        <span>{{ t('strategies.editor.mode') }}</span>
-        <el-button v-if="!advanced" :loading="editorBusy" :disabled="editorBusy" @click="enterAdvancedMode">{{ t('strategies.editor.advanced') }}</el-button>
-        <el-button v-else :disabled="editorBusy" @click="leaveAdvancedMode">{{ t('strategies.editor.structured') }}</el-button>
-      </div>
-
-      <StrategyForm
-        v-if="!advanced"
+      <StrategyEditorPanel
+        v-if="draft && mode !== 'closed'"
         v-model="draft"
-        :definitions="store.definitions"
+        v-model:yaml="yaml"
+        :title="editorTitle"
         :mode="mode === 'edit' ? 'edit' : mode"
-        :issues="issues"
+        :definitions="store.definitions"
+        :advanced="advanced"
         :readonly="formReadonly"
-        :dirty="draftDirty"
+        :dirty="dirty"
+        :busy="editorBusy"
+        :save-loading="saveLoading()"
+        :model-uri="editorUri"
+        :validation-summary="visibleIssueMessages"
+        :issues="issues"
+        :selected-name="selectedName"
+        :clone-source-name="cloneSourceName"
+        @close="closeEditor"
+        @cancel="closeEditor"
+        @save="saveDraft"
+        @enter-advanced="enterAdvancedMode"
+        @leave-advanced="leaveAdvancedMode"
       />
-      <template v-else>
-        <CodeEditor
-          v-model="yaml"
-          :label="t('strategies.editor.yamlLabel')"
-          :description="t('strategies.editor.yamlDescription')"
-          :model-uri="editorUri"
-          :issues="issues"
-          :readonly="formReadonly"
-        />
-        <div class="strategy-editor__yaml-actions">
-          <el-button type="primary" :loading="editorBusy" :disabled="formReadonly || editorBusy" @click="applyYaml">
-            {{ t('strategies.editor.applyYaml') }}
-          </el-button>
-        </div>
-      </template>
-
-      <div class="strategy-editor__actions">
-        <el-button type="primary" :loading="saveLoading()" :disabled="formReadonly || editorBusy" @click="saveDraft">
-          {{ t('common.save') }}
-        </el-button>
-        <el-button @click="closeEditor">{{ t('common.cancel') }}</el-button>
-      </div>
-    </el-card>
+    </div>
   </section>
 </template>
 
@@ -536,114 +505,29 @@ onMounted(() => {
   min-width: 0;
 }
 
-.strategy-page__header,
-.strategy-editor__header,
-.strategy-card__title {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
+.strategy-page__alert {
+  margin-bottom: var(--ui-space-16);
 }
 
-.strategy-page__header {
-  margin-bottom: 20px;
-}
-
-.strategy-page h2,
-.strategy-page p {
-  margin-top: 0;
-}
-
-.strategy-page__header p {
-  margin-bottom: 0;
-  color: #606266;
-}
-
-.strategy-page__header-actions,
-.strategy-actions,
-.strategy-editor__actions,
-.strategy-editor__yaml-actions,
-.strategy-editor__mode {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.strategy-page__alert,
-.strategy-list,
-.strategy-empty,
-.strategy-editor {
-  margin-bottom: 16px;
-}
-
-.strategy-runtime-error {
-  margin: 6px 0 0;
-  color: #c45656;
-  font-size: 12px;
-  overflow-wrap: anywhere;
-}
-
-.strategy-cards {
-  display: none;
-}
-
-.strategy-card {
-  padding: 14px;
-  border: 1px solid #ebeef5;
-  border-radius: 8px;
-}
-
-.strategy-card + .strategy-card {
-  margin-top: 12px;
-}
-
-.strategy-card dl {
+.strategy-page__content {
   display: grid;
-  grid-template-columns: max-content minmax(0, 1fr);
-  gap: 6px 12px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--ui-space-16);
+  align-items: start;
 }
 
-.strategy-card dt {
-  color: #606266;
+.strategy-page__content > * {
+  min-width: 0;
+  width: 100%;
 }
 
-.strategy-card dd {
-  margin: 0;
-  overflow-wrap: anywhere;
+.strategy-page__content--editor-open {
+  grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
 }
 
-.strategy-editor__mode {
-  justify-content: flex-end;
-  margin-bottom: 16px;
-  color: #606266;
-}
-
-.strategy-editor__actions,
-.strategy-editor__yaml-actions {
-  margin-top: 16px;
-}
-
-@media (max-width: 767px) {
-  .strategy-page__header {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .strategy-page__header-actions > :deep(.el-button) {
-    flex: 1 1 auto;
-  }
-
-  .strategy-table {
-    display: none;
-  }
-
-  .strategy-cards {
-    display: block;
-  }
-
-  .strategy-actions > :deep(.el-button) {
-    margin-left: 0;
+@media (max-width: 1023px) {
+  .strategy-page__content {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 </style>

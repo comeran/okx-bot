@@ -12,6 +12,7 @@ from src.order.router import OrderRouter
 OrderUpdateCallback = Callable[[str], Awaitable[None] | None]
 RiskEventCallback = Callable[[dict[str, object]], Awaitable[None] | None]
 LiveStateRefresher = Callable[[str, str], Awaitable[None]]
+PostLiveOrderSyncCallback = Callable[[str, str], Awaitable[None] | None]
 
 
 @dataclass(frozen=True)
@@ -63,6 +64,7 @@ class UnifiedOrderManager:
         live_safeguards: bool = False,
         live_market_type: str = "",
         live_state_refresher: LiveStateRefresher | None = None,
+        post_live_order_sync: PostLiveOrderSyncCallback | None = None,
         allow_live_open_orders: bool = False,
         live_max_order_notional: float = 0.0,
     ) -> None:
@@ -79,6 +81,7 @@ class UnifiedOrderManager:
         self.live_safeguards = live_safeguards
         self.live_market_type = live_market_type.strip().lower()
         self.live_state_refresher = live_state_refresher
+        self.post_live_order_sync = post_live_order_sync
         self.allow_live_open_orders = allow_live_open_orders
         self.live_max_order_notional = live_max_order_notional
         self._balances: dict[str, float] = {}
@@ -124,14 +127,22 @@ class UnifiedOrderManager:
 
         submitted_order = await self.router.submit(order)
         self._persist_order(submitted_order, strategy_name)
-        if (
-            self.live_safeguards
-            and self.live_state_refresher is not None
-            and submitted_order.status == OrderStatus.FILLED
-        ):
-            await self.live_state_refresher(strategy_name, symbol)
-        if self.on_order_update is not None:
-            await self._run_callback(self.on_order_update, strategy_name)
+        try:
+            if (
+                self.live_safeguards
+                and self.live_state_refresher is not None
+                and submitted_order.status == OrderStatus.FILLED
+            ):
+                await self.live_state_refresher(strategy_name, symbol)
+            if self.router.mode == "live" and self.post_live_order_sync is not None:
+                await self._run_callback(
+                    self.post_live_order_sync,
+                    strategy_name,
+                    symbol,
+                )
+        finally:
+            if self.on_order_update is not None:
+                await self._run_callback(self.on_order_update, strategy_name)
         return submitted_order
 
     async def cancel(self, order_id: str, symbol: str | None = None) -> bool:
@@ -346,9 +357,11 @@ class UnifiedOrderManager:
 
         if timestamp is None:
             timestamp = order.fill_time or self.timestamp_ms()
-        self.repository.save_order(
+        self.repository.upsert_order(
             OrderRecord(
                 order_id=order.id,
+                exchange_order_id=order.exchange_order_id,
+                client_order_id=order.client_order_id,
                 strategy=strategy_name,
                 symbol=order.symbol,
                 side=order.side.value,
@@ -358,6 +371,7 @@ class UnifiedOrderManager:
                 status=order.status.value,
                 fill_price=order.fill_price or 0.0,
                 timestamp=timestamp,
+                updated_at=order.updated_at,
             )
         )
 

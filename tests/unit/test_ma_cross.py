@@ -135,3 +135,7 @@ def test_register_ma_cross_adds_strategy_to_registry() -> None:
     assert strategy.name == "ma_cross"
     assert strategy.symbol == "BTC-USDT"
     assert strategy.timeframe == "1m"
+
+
+def test_ma_cross_required_warmup_matches_slow_window() -> None:
+    assert MACrossStrategy(fast_window=2, slow_window=7).required_warmup_bars() == 7

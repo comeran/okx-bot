@@ -42,6 +42,9 @@ class MACrossStrategy(BaseStrategy):
         self._previous_fast: float | None = None
         self._previous_slow: float | None = None
 
+    def required_warmup_bars(self) -> int:
+        return self.slow_window
+
     async def on_bar(self, bar: Bar) -> None:
         self._closes.append(bar.close)
         self._closes = self._closes[-self.slow_window :]
@@ -69,9 +72,8 @@ class MACrossStrategy(BaseStrategy):
 
 
 def _is_integral_window(value: object) -> bool:
-    return (
-        type(value) is int
-        or (type(value) is float and math.isfinite(value) and value.is_integer())
+    return type(value) is int or (
+        type(value) is float and math.isfinite(value) and value.is_integer()
     )
 
 

@@ -1,5 +1,7 @@
 import { defineStore } from 'pinia';
 
+import { fetchStrategyPerformance } from '@/services/trading';
+import type { StrategyPerformance } from '@/types/strategyPerformance';
 import type {
   AccountSummary,
   DashboardSnapshot,
@@ -10,16 +12,106 @@ import type {
 } from '@/types/dashboard';
 
 const WEBSOCKET_MESSAGE_HISTORY_LIMIT = 20;
+const STRATEGY_PERFORMANCE_REFRESH_DELAY_MS = 100;
+
+const strategyPerformanceRefreshTimers = new WeakMap<
+  object,
+  ReturnType<typeof globalThis.setTimeout>
+>();
+const strategyPerformanceRequestSequences = new WeakMap<object, number>();
+const strategyPerformanceRequestGenerations = new WeakMap<object, number>();
+const dashboardLoadRequestSequences = new WeakMap<object, number>();
+const dashboardLoadGenerations = new WeakMap<object, number>();
+const dashboardLoadPendingRequests = new WeakMap<object, number>();
+const accountOverviewRequestSequences = new WeakMap<object, number>();
+const accountOverviewRequestGenerations = new WeakMap<object, number>();
+const accountOverviewPendingRequests = new WeakMap<object, number>();
+
+function nextDashboardLoadRequestId(store: object): number {
+  const requestId = (dashboardLoadRequestSequences.get(store) ?? 0) + 1;
+  dashboardLoadRequestSequences.set(store, requestId);
+  return requestId;
+}
+
+function nextDashboardLoadGeneration(store: object): number {
+  const generation = (dashboardLoadGenerations.get(store) ?? 0) + 1;
+  dashboardLoadGenerations.set(store, generation);
+  return generation;
+}
+
+function currentDashboardLoadGeneration(store: object): number {
+  return dashboardLoadGenerations.get(store) ?? 0;
+}
+
+function invalidateDashboardLoads(store: object) {
+  nextDashboardLoadRequestId(store);
+  dashboardLoadPendingRequests.delete(store);
+}
+
+function nextAccountOverviewRequestId(store: object): number {
+  const requestId = (accountOverviewRequestSequences.get(store) ?? 0) + 1;
+  accountOverviewRequestSequences.set(store, requestId);
+  return requestId;
+}
+
+function invalidateAccountOverviewRequests(store: object) {
+  nextAccountOverviewRequestId(store);
+  accountOverviewPendingRequests.delete(store);
+}
+
+function hasPendingAccountRequest(store: object, loadGeneration: number): boolean {
+  return (
+    accountOverviewPendingRequests.has(store)
+    && (accountOverviewRequestGenerations.get(store) ?? 0) === loadGeneration
+  );
+}
+
+function nextStrategyPerformanceRequestId(store: object): number {
+  const requestId = (strategyPerformanceRequestSequences.get(store) ?? 0) + 1;
+  strategyPerformanceRequestSequences.set(store, requestId);
+  return requestId;
+}
+
+function nextStrategyPerformanceRequestGeneration(store: object): number {
+  const generation = (strategyPerformanceRequestGenerations.get(store) ?? 0) + 1;
+  strategyPerformanceRequestGenerations.set(store, generation);
+  return generation;
+}
+
+function currentStrategyPerformanceRequestGeneration(store: object): number {
+  return strategyPerformanceRequestGenerations.get(store) ?? 0;
+}
+
+function isCurrentStrategyPerformanceRequest(
+  store: object,
+  requestId: number,
+  requestGeneration: number,
+): boolean {
+  return (
+    strategyPerformanceRequestSequences.get(store) === requestId
+    && currentStrategyPerformanceRequestGeneration(store) === requestGeneration
+  );
+}
+
+function invalidateStrategyPerformanceRequests(store: object) {
+  nextStrategyPerformanceRequestId(store);
+  nextStrategyPerformanceRequestGeneration(store);
+}
 
 interface DashboardState {
   account: AccountSummary | null;
   positions: Position[];
   orders: Order[];
   tickers: MarketTicker[];
+  strategyPerformance: StrategyPerformance[];
+  strategyPerformanceError: string | null;
+  strategyPerformanceLoading: boolean;
   websocketConnected: boolean;
   websocketMessages: DashboardWebSocketMessage[];
   loading: boolean;
+  accountLoading: boolean;
   error: string | null;
+  accountError: string | null;
   tickerError: string | null;
   lastUpdatedAt: number | null;
 }
@@ -89,49 +181,149 @@ function payloadFor(message: DashboardWebSocketMessage, key: string): unknown {
   return record[key] ?? record.data;
 }
 
-export const useDashboardStore = defineStore('dashboard', {
+function snapshotTouchesTradingState(snapshot: DashboardSnapshot | Record<string, unknown>): boolean {
+  return 'account' in snapshot || 'positions' in snapshot || 'orders' in snapshot;
+}
+
+function errorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error ? error.message : fallback;
+}
+
+function clearStrategyPerformanceRefreshTimer(store: object) {
+  const timer = strategyPerformanceRefreshTimers.get(store);
+  if (timer !== undefined) {
+    globalThis.clearTimeout(timer);
+    strategyPerformanceRefreshTimers.delete(store);
+  }
+}
+
+const useDashboardStoreBase = defineStore('dashboard', {
   state: (): DashboardState => ({
     account: null,
     positions: [],
     orders: [],
     tickers: [],
+    strategyPerformance: [],
+    strategyPerformanceError: null,
+    strategyPerformanceLoading: false,
     websocketConnected: false,
     websocketMessages: [],
     loading: false,
+    accountLoading: false,
     error: null,
+    accountError: null,
     tickerError: null,
     lastUpdatedAt: null,
   }),
   actions: {
     async loadInitialData() {
+      const loadGeneration = nextDashboardLoadGeneration(this);
+      const loadRequestId = nextDashboardLoadRequestId(this);
+      const isCurrentLoad = () => (
+        dashboardLoadRequestSequences.get(this) === loadRequestId
+        && currentDashboardLoadGeneration(this) === loadGeneration
+      );
+      dashboardLoadPendingRequests.set(this, loadRequestId);
+
       this.loading = true;
+      this.accountLoading = true;
       this.error = null;
+      this.accountError = null;
       this.tickerError = null;
+      this.strategyPerformanceError = null;
+      clearStrategyPerformanceRefreshTimer(this);
+
+      void this.refreshStrategyPerformance();
 
       try {
-        const [account, positions, orders] = await Promise.all([
+        const [accountResult, positionsResult, ordersResult] = await Promise.allSettled([
           fetchJson<AccountSummary>('/api/trading/account'),
           fetchJson<Position[]>('/api/trading/positions'),
           fetchJson<Order[]>('/api/trading/orders'),
         ]);
 
-        this.account = normalizeAccount(account, positions);
-        this.positions = positions;
-        this.orders = orders;
+        if (accountResult.status !== 'fulfilled') {
+          throw accountResult.reason;
+        }
+
+        if (positionsResult.status !== 'fulfilled') {
+          throw positionsResult.reason;
+        }
+
+        if (ordersResult.status !== 'fulfilled') {
+          throw ordersResult.reason;
+        }
+
+        if (!isCurrentLoad()) {
+          return;
+        }
+
+        this.account = normalizeAccount(accountResult.value, positionsResult.value);
+        this.positions = positionsResult.value;
+        this.orders = ordersResult.value;
 
         try {
           const tickers = await fetchJson<MarketTicker[]>('/api/market/tickers');
-          this.tickers = isMarketTickerArray(tickers) ? tickers : [];
+          if (isCurrentLoad()) {
+            this.tickers = isMarketTickerArray(tickers) ? tickers : [];
+          }
         } catch (error) {
-          this.tickerError = error instanceof Error ? error.message : 'Failed to load market tickers';
-          this.tickers = [];
+          if (isCurrentLoad()) {
+            this.tickerError = error instanceof Error ? error.message : 'Failed to load market tickers';
+            this.tickers = [];
+          }
         }
 
-        this.lastUpdatedAt = Date.now();
+        if (isCurrentLoad()) {
+          this.lastUpdatedAt = Date.now();
+        }
       } catch (error) {
-        this.error = error instanceof Error ? error.message : 'Failed to load dashboard data';
+        if (isCurrentLoad()) {
+          this.error = errorMessage(error, 'Failed to load dashboard data');
+        }
       } finally {
-        this.loading = false;
+        if (dashboardLoadPendingRequests.get(this) === loadRequestId) {
+          dashboardLoadPendingRequests.delete(this);
+        }
+        if (isCurrentLoad()) {
+          this.loading = false;
+          this.accountLoading = hasPendingAccountRequest(this, loadGeneration);
+        }
+      }
+    },
+    async refreshAccountOverview() {
+      const accountRequestGeneration = currentDashboardLoadGeneration(this);
+      const accountRequestId = nextAccountOverviewRequestId(this);
+      const isCurrentAccountRequest = () => (
+        accountOverviewRequestSequences.get(this) === accountRequestId
+        && (accountOverviewRequestGenerations.get(this) ?? 0) === accountRequestGeneration
+        && currentDashboardLoadGeneration(this) === accountRequestGeneration
+      );
+      accountOverviewRequestGenerations.set(this, accountRequestGeneration);
+      accountOverviewPendingRequests.set(this, accountRequestId);
+
+      this.accountLoading = true;
+      this.accountError = null;
+
+      try {
+        const account = await fetchJson<AccountSummary>('/api/trading/account');
+        if (!isCurrentAccountRequest()) {
+          return;
+        }
+
+        this.account = normalizeAccount(account, this.positions);
+        this.accountError = null;
+      } catch (error) {
+        if (isCurrentAccountRequest()) {
+          this.accountError = errorMessage(error, 'Failed to load dashboard data');
+        }
+      } finally {
+        if (accountOverviewPendingRequests.get(this) === accountRequestId) {
+          accountOverviewPendingRequests.delete(this);
+        }
+        if (isCurrentAccountRequest()) {
+          this.accountLoading = hasPendingAccountRequest(this, accountRequestGeneration);
+        }
       }
     },
     setWebSocketConnected(connected: boolean) {
@@ -149,6 +341,7 @@ export const useDashboardStore = defineStore('dashboard', {
           if (isAccountSummary(account)) {
             this.account = normalizeAccount(account, this.positions);
           }
+          this.scheduleStrategyPerformanceRefresh();
           break;
         }
         case 'positions': {
@@ -159,6 +352,7 @@ export const useDashboardStore = defineStore('dashboard', {
               this.account = normalizeAccount(this.account, this.positions);
             }
           }
+          this.scheduleStrategyPerformanceRefresh();
           break;
         }
         case 'orders': {
@@ -166,6 +360,7 @@ export const useDashboardStore = defineStore('dashboard', {
           if (isOrderArray(orders)) {
             this.orders = orders;
           }
+          this.scheduleStrategyPerformanceRefresh();
           break;
         }
         case 'snapshot': {
@@ -196,6 +391,67 @@ export const useDashboardStore = defineStore('dashboard', {
           this.account = normalizeAccount(snapshot.account, positions);
         }
       }
+
+      if (snapshotTouchesTradingState(snapshot)) {
+        this.scheduleStrategyPerformanceRefresh();
+      }
+    },
+    scheduleStrategyPerformanceRefresh() {
+      clearStrategyPerformanceRefreshTimer(this);
+      const timer = globalThis.setTimeout(() => {
+        strategyPerformanceRefreshTimers.delete(this);
+        void this.refreshStrategyPerformance();
+      }, STRATEGY_PERFORMANCE_REFRESH_DELAY_MS);
+      strategyPerformanceRefreshTimers.set(this, timer);
+    },
+    async refreshStrategyPerformance() {
+      const requestGeneration = nextStrategyPerformanceRequestGeneration(this);
+      const requestId = nextStrategyPerformanceRequestId(this);
+      this.strategyPerformanceLoading = true;
+
+      try {
+        const performance = await fetchStrategyPerformance();
+        if (!isCurrentStrategyPerformanceRequest(this, requestId, requestGeneration)) {
+          return;
+        }
+        this.strategyPerformance = performance;
+        this.strategyPerformanceError = null;
+      } catch (error) {
+        if (!isCurrentStrategyPerformanceRequest(this, requestId, requestGeneration)) {
+          return;
+        }
+        this.strategyPerformanceError = errorMessage(
+          error,
+          'Failed to load strategy performance',
+        );
+      } finally {
+        if (isCurrentStrategyPerformanceRequest(this, requestId, requestGeneration)) {
+          this.strategyPerformanceLoading = false;
+        }
+      }
     },
   },
 });
+
+type DashboardStore = ReturnType<typeof useDashboardStoreBase>;
+
+const patchedDashboardStores = new WeakSet<DashboardStore>();
+
+export const useDashboardStore = (): DashboardStore => {
+  const store = useDashboardStoreBase();
+
+  if (!patchedDashboardStores.has(store)) {
+    const originalDispose = store.$dispose.bind(store);
+    store.$dispose = () => {
+      clearStrategyPerformanceRefreshTimer(store);
+      invalidateDashboardLoads(store);
+      invalidateAccountOverviewRequests(store);
+      invalidateStrategyPerformanceRequests(store);
+      store.strategyPerformanceLoading = false;
+      originalDispose();
+    };
+    patchedDashboardStores.add(store);
+  }
+
+  return store;
+};

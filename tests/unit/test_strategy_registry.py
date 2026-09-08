@@ -255,6 +255,101 @@ def test_normalize_config_trims_fields_applies_defaults_and_coerces_numbers() ->
     assert normalized.params == {"fast_window": 5, "slow_window": 30, "amount": 1.0}
 
 
+def test_normalize_config_accepts_runtime_two_hour_timeframe() -> None:
+    normalized = make_registry().normalize_config(
+        name="two-hour",
+        strategy_type="ma_cross",
+        symbol="BTC-USDT-SWAP",
+        timeframe="  2h  ",
+        params={},
+    )
+
+    assert normalized.timeframe == "2h"
+
+
+@pytest.mark.parametrize("timeframe", ["7m", "invalid", "1M", "3M"])
+def test_normalize_config_rejects_unsupported_runtime_timeframes(timeframe: str) -> None:
+    with pytest.raises(StrategyConfigValidationError) as error:
+        make_registry().normalize_config(
+            name="unsupported-timeframe",
+            strategy_type="ma_cross",
+            symbol="BTC-USDT-SWAP",
+            timeframe=timeframe,
+            params={},
+        )
+
+    assert [
+        (issue.path, issue.code, issue.message)
+        for issue in error.value.issues
+        if issue.path == "timeframe"
+    ] == [
+        ("timeframe", "unsupported_timeframe", "Unsupported strategy timeframe")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("config", "expected_code"),
+    [
+        (
+            {
+                "name": "missing-timeframe",
+                "strategy_type": "ma_cross",
+                "symbol": "BTC-USDT-SWAP",
+                "params": {},
+            },
+            "missing_required",
+        ),
+        (
+            {
+                "name": "empty-timeframe",
+                "strategy_type": "ma_cross",
+                "symbol": "BTC-USDT-SWAP",
+                "timeframe": " ",
+                "params": {},
+            },
+            "empty",
+        ),
+        (
+            {
+                "name": "invalid-timeframe-type",
+                "strategy_type": "ma_cross",
+                "symbol": "BTC-USDT-SWAP",
+                "timeframe": 2,
+                "params": {},
+            },
+            "invalid_type",
+        ),
+    ],
+)
+def test_normalize_config_does_not_duplicate_required_timeframe_issues(
+    config: dict[str, object], expected_code: str
+) -> None:
+    with pytest.raises(StrategyConfigValidationError) as error:
+        make_registry().normalize_config(config)
+
+    assert [
+        (issue.path, issue.code)
+        for issue in error.value.issues
+        if issue.path == "timeframe"
+    ] == [("timeframe", expected_code)]
+
+
+@pytest.mark.parametrize("timeframe", ["7m", "invalid", "1M", "3M"])
+def test_create_instance_rejects_unsupported_runtime_timeframe(timeframe: str) -> None:
+    with pytest.raises(StrategyConfigValidationError) as error:
+        make_registry().create_instance(
+            name="unsupported-timeframe",
+            strategy_type="ma_cross",
+            symbol="BTC-USDT-SWAP",
+            timeframe=timeframe,
+            params={},
+        )
+
+    assert {(issue.path, issue.code) for issue in error.value.issues} == {
+        ("timeframe", "unsupported_timeframe")
+    }
+
+
 @pytest.mark.parametrize("value", [True, 3.5, math.nan, math.inf, -math.inf, "3"])
 def test_normalize_config_rejects_non_integral_or_non_finite_integer_values(value) -> None:
     with pytest.raises(StrategyConfigValidationError) as error:
