@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from typing import Any
 
 from src.core.types import Order
 
@@ -9,8 +10,8 @@ class OrderHandler(ABC):
         """Submit an order."""
 
     @abstractmethod
-    async def cancel(self, order_id: str, symbol: str | None = None) -> bool:
-        """Cancel an order by ID."""
+    async def cancel(self, order_id: str, symbol: str | None = None) -> Any:
+        """Cancel an order by ID and return the provider response."""
 
 
 class OrderRouter:
@@ -39,5 +40,5 @@ class OrderRouter:
     async def submit(self, order: Order) -> Order:
         return await self._get_handler().submit(order)
 
-    async def cancel(self, order_id: str, symbol: str | None = None) -> bool:
+    async def cancel(self, order_id: str, symbol: str | None = None) -> Any:
         return await self._get_handler().cancel(order_id, symbol)

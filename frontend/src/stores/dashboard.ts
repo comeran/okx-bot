@@ -181,6 +181,12 @@ function payloadFor(message: DashboardWebSocketMessage, key: string): unknown {
   return record[key] ?? record.data;
 }
 
+function appliesToExchangeState(message: DashboardWebSocketMessage | Record<string, unknown>): boolean {
+  // Global state is trusted only from an explicit exchange scope. Legacy
+  // strategy/unscoped messages stay in history and cannot overwrite the global view.
+  return message.scope === 'exchange';
+}
+
 function snapshotTouchesTradingState(snapshot: DashboardSnapshot | Record<string, unknown>): boolean {
   return 'account' in snapshot || 'positions' in snapshot || 'orders' in snapshot;
 }
@@ -237,9 +243,9 @@ const useDashboardStoreBase = defineStore('dashboard', {
 
       try {
         const [accountResult, positionsResult, ordersResult] = await Promise.allSettled([
-          fetchJson<AccountSummary>('/api/trading/account'),
-          fetchJson<Position[]>('/api/trading/positions'),
-          fetchJson<Order[]>('/api/trading/orders'),
+          fetchJson<AccountSummary>('/api/trading/account?scope=exchange'),
+          fetchJson<Position[]>('/api/trading/positions?scope=exchange'),
+          fetchJson<Order[]>('/api/trading/orders?scope=exchange'),
         ]);
 
         if (accountResult.status !== 'fulfilled') {
@@ -306,7 +312,7 @@ const useDashboardStoreBase = defineStore('dashboard', {
       this.accountError = null;
 
       try {
-        const account = await fetchJson<AccountSummary>('/api/trading/account');
+        const account = await fetchJson<AccountSummary>('/api/trading/account?scope=exchange');
         if (!isCurrentAccountRequest()) {
           return;
         }
@@ -338,7 +344,7 @@ const useDashboardStoreBase = defineStore('dashboard', {
       switch (message.type) {
         case 'account': {
           const account = payloadFor(message, 'account');
-          if (isAccountSummary(account)) {
+          if (appliesToExchangeState(message) && isAccountSummary(account)) {
             this.account = normalizeAccount(account, this.positions);
           }
           this.scheduleStrategyPerformanceRefresh();
@@ -346,7 +352,7 @@ const useDashboardStoreBase = defineStore('dashboard', {
         }
         case 'positions': {
           const positions = payloadFor(message, 'positions');
-          if (isPositionArray(positions)) {
+          if (appliesToExchangeState(message) && isPositionArray(positions)) {
             this.positions = positions;
             if (this.account !== null) {
               this.account = normalizeAccount(this.account, this.positions);
@@ -357,7 +363,7 @@ const useDashboardStoreBase = defineStore('dashboard', {
         }
         case 'orders': {
           const orders = payloadFor(message, 'orders');
-          if (isOrderArray(orders)) {
+          if (appliesToExchangeState(message) && isOrderArray(orders)) {
             this.orders = orders;
           }
           this.scheduleStrategyPerformanceRefresh();
@@ -365,7 +371,9 @@ const useDashboardStoreBase = defineStore('dashboard', {
         }
         case 'snapshot': {
           const snapshot = isRecord(message.data) ? message.data : message;
-          this.applySnapshot(snapshot);
+          if (appliesToExchangeState(message)) {
+            this.applySnapshot(snapshot);
+          }
           break;
         }
         default:

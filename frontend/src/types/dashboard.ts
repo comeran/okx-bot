@@ -8,6 +8,8 @@ export interface AssetBalance {
 }
 
 export interface AccountSummary {
+  scope?: 'exchange' | 'strategy' | 'aggregate';
+  strategy?: string;
   equity: number;
   daily_pnl: number;
   cash_balance?: number;
@@ -34,6 +36,12 @@ export interface Position {
   liquidation_price?: number;
   unrealized_pnl?: number;
   realized_pnl?: number;
+  contracts?: number | null;
+  quantity?: number | null;
+  quantity_unit?: 'base' | 'contracts' | string;
+  notional_value?: number | null;
+  is_inverse?: boolean;
+  contract_size?: number | null;
   margin?: number;
   margin_mode?: string;
 }
@@ -72,6 +80,8 @@ export interface DashboardSnapshot {
 
 interface DashboardMessageBase {
   received_at?: number;
+  scope?: 'exchange' | 'strategy';
+  strategy?: string;
 }
 
 export interface ConnectedDashboardWebSocketMessage extends DashboardMessageBase {

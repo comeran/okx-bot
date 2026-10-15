@@ -76,10 +76,31 @@ class BaseStrategy(ABC):
             raise RuntimeError("Order manager not set")
         return await self._order_manager.cancel(order_id, symbol)
 
-    def get_position(self, symbol: str) -> Any:
+    def get_position(self, symbol: str, side: str | None = None) -> Any:
         if self._order_manager is None:
             return None
-        return self._order_manager.get_position(self.name, symbol)
+        if side is None:
+            return self._order_manager.get_position(self.name, symbol)
+        try:
+            return self._order_manager.get_position(self.name, symbol, side=side)
+        except TypeError:
+            return next(
+                (
+                    position
+                    for position in self.get_positions(symbol)
+                    if str(getattr(position, "side", "")).lower() == side.lower()
+                ),
+                None,
+            )
+
+    def get_positions(self, symbol: str) -> list[Any]:
+        if self._order_manager is None:
+            return []
+        get_positions = getattr(self._order_manager, "get_positions", None)
+        if callable(get_positions):
+            return list(get_positions(self.name, symbol))
+        position = self._order_manager.get_position(self.name, symbol)
+        return [] if position is None else [position]
 
     def get_balance(self) -> float:
         if self._order_manager is None:

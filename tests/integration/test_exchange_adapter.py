@@ -215,7 +215,7 @@ async def test_fetch_spot_tickers_preserves_requested_okx_symbols():
 
 
 @pytest.mark.asyncio
-async def test_fetch_non_spot_tickers_uses_ccxt_symbols_unchanged():
+async def test_fetch_non_spot_tickers_uses_unified_ccxt_symbols():
     with patch("src.exchange.base.create_okx_client") as ccxt:
         exchange = AsyncMock()
         exchange.set_sandbox_mode = Mock()
@@ -233,7 +233,7 @@ async def test_fetch_non_spot_tickers_uses_ccxt_symbols_unchanged():
 
     tickers = await adapter.fetch_tickers(["BTC-USDT-SWAP"])
 
-    exchange.fetch_tickers.assert_awaited_once_with(["BTC-USDT-SWAP"])
+    exchange.fetch_tickers.assert_awaited_once_with(["BTC/USDT:USDT"])
     exchange.public_get_market_tickers.assert_not_awaited()
     assert tickers == [
         {
@@ -382,7 +382,7 @@ async def test_submit_validates_okx_raw_symbol_with_exchange_market_lookup():
     await adapter.submit(order)
 
     exchange.create_order.assert_awaited_once_with(
-        "SOL-USDT-SWAP",
+        "SOL/USDT:USDT",
         "market",
         "buy",
         0.01,
@@ -467,8 +467,15 @@ async def test_cancel_delegates_to_exchange_with_symbol():
         exchange.set_sandbox_mode = Mock()
         ccxt.return_value = exchange
         adapter = OKXSpotAdapter("api-key", "secret", "passphrase")
+        exchange.cancel_order.return_value = {
+            "id": "exchange-order-1",
+            "status": "canceled",
+        }
 
-    assert await adapter.cancel("exchange-order-1", symbol="BTC-USDT") is True
+    assert await adapter.cancel("exchange-order-1", symbol="BTC-USDT") == {
+        "id": "exchange-order-1",
+        "status": "canceled",
+    }
 
     exchange.cancel_order.assert_awaited_once_with("exchange-order-1", "BTC/USDT")
 
@@ -518,8 +525,21 @@ async def test_fetch_open_order_snapshots_maps_status_and_identifiers():
     with patch("src.exchange.base.create_okx_client") as ccxt:
         exchange = AsyncMock()
         exchange.set_sandbox_mode = Mock()
-        exchange.fetch_open_orders.return_value = [
-            {
+        async def fetch_open_orders(symbol, since=None, limit=None, params=None):
+            if params == {"trigger": True}:
+                return [{
+                    "id": "algo-1",
+                    "clientOrderId": "stop-client",
+                    "symbol": "BTC/USDT",
+                    "side": "sell",
+                    "type": "trigger",
+                    "amount": 0.1,
+                    "status": "open",
+                    "average": None,
+                    "timestamp": 1700000000000,
+                    "lastTradeTimestamp": 1700000001000,
+                }]
+            return [{
                 "id": "ex-1",
                 "clientOrderId": "client-1",
                 "symbol": "BTC/USDT",
@@ -531,15 +551,18 @@ async def test_fetch_open_order_snapshots_maps_status_and_identifiers():
                 "average": None,
                 "timestamp": 1700000000000,
                 "lastTradeTimestamp": 1700000001000,
-            }
-        ]
+            }]
+
+        exchange.fetch_open_orders.side_effect = fetch_open_orders
         ccxt.return_value = exchange
         adapter = OKXSpotAdapter("api-key", "secret", "passphrase")
 
     snapshots = await adapter.fetch_open_order_snapshots(["BTC-USDT"])
 
-    exchange.fetch_open_orders.assert_awaited_once_with("BTC/USDT")
-    assert snapshots[0].exchange_order_id == "ex-1"
+    assert exchange.fetch_open_orders.await_args_list[0].args == ("BTC/USDT",)
+    assert exchange.fetch_open_orders.await_args_list[1].args == ("BTC/USDT",)
+    assert exchange.fetch_open_orders.await_args_list[1].kwargs == {"params": {"trigger": True}}
+    assert [snapshot.exchange_order_id for snapshot in snapshots] == ["ex-1", "algo-1"]
     assert snapshots[0].symbol == "BTC-USDT"
     assert snapshots[0].client_order_id == "client-1"
     assert snapshots[0].status == OrderStatus.PENDING
@@ -593,6 +616,8 @@ async def test_fetch_recent_trade_snapshots_maps_fee_cost_and_order_ids():
             price=50000.0,
             fee=2.5,
             timestamp=1700000000000,
+            quantity=0.1,
+            quantity_unit="base",
         ),
         ExchangeTradeSnapshot(
             exchange_trade_id="trade-2",
@@ -604,6 +629,8 @@ async def test_fetch_recent_trade_snapshots_maps_fee_cost_and_order_ids():
             price=51000.0,
             fee=0.0,
             timestamp=1700000001000,
+            quantity=0.2,
+            quantity_unit="base",
         ),
     ]
 

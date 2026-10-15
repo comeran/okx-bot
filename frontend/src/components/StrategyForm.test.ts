@@ -96,6 +96,7 @@ function draft(overrides: Partial<StrategyConfigPayload> = {}): StrategyConfigPa
 
 async function mountForm(options: {
   model?: StrategyConfigPayload;
+  definitions?: StrategyDefinition[];
   mode?: 'create' | 'edit' | 'clone';
   issues?: StrategyValidationIssue[];
   readonly?: boolean;
@@ -110,7 +111,7 @@ async function mountForm(options: {
     provide: options.provide,
     props: {
       modelValue: model,
-      definitions,
+      definitions: options.definitions ?? definitions,
       mode: options.mode ?? 'create',
       issues: options.issues ?? [],
       readonly: options.readonly ?? false,
@@ -152,7 +153,7 @@ async function mountInstrumentedForm(options: Parameters<typeof mountForm>[0] = 
     provide: options.provide,
     props: {
       modelValue: model,
-      definitions,
+      definitions: options.definitions ?? definitions,
       mode: options.mode ?? 'create',
       issues: options.issues ?? [],
       readonly: options.readonly ?? false,
@@ -267,6 +268,22 @@ describe('StrategyForm', () => {
     expect(number.props).toMatchObject({ min: 1, max: 100, step: 1, precision: 0 });
     expect(textContent(wrapper.getById('strategy-params-fast_window-description'))).toBe('Fast period');
     expect(control(wrapper, 'strategy-params-use_ema').type).toBe('el-switch');
+  });
+
+  it('excludes strict numeric endpoints from strategy parameter controls', async () => {
+    const strictDefinitions: StrategyDefinition[] = [{
+      strategy_type: 'ma_cross',
+      label: 'MA Cross',
+      description: 'Strict numeric bounds',
+      params: [{
+        key: 'fast_window', label: 'Fast window', description: 'Fast period',
+        value_type: 'integer', required: true, default: 10,
+        minimum: 1, maximum: 100, step: 1, exclusive_min: true, exclusive_max: true,
+      }],
+    }];
+    const { wrapper } = await mountForm({ definitions: strictDefinitions });
+
+    expect(control(wrapper, 'strategy-params-fast_window').props).toMatchObject({ min: 2, max: 99 });
   });
 
   it('renders symbol and timeframe as selectable controls', async () => {

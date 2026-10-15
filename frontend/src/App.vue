@@ -39,7 +39,12 @@ const dashboard = useDashboardStore();
 const strategies = useStrategiesStore();
 const mobileNavigationOpen = ref(false);
 const appHeaderRef = ref<InstanceType<typeof AppHeader> | null>(null);
-const websocket = useWebSocket('/ws', {
+const exchangeWebSocket = useWebSocket('/ws?scope=exchange', {
+  onMessage: (message) => {
+    dashboard.addWebSocketMessage(message);
+  },
+});
+const strategyWebSocket = useWebSocket('/ws?scope=strategy&strategy=*', {
   onMessage: (message) => {
     dashboard.addWebSocketMessage(message);
     strategies.applyWebSocketMessage(message as StrategyWebSocketMessage);
@@ -66,7 +71,7 @@ const websocketStatusTone = computed(() => (
   dashboard.websocketConnected ? 'success' : 'neutral'
 ));
 
-watch(websocket.connected, (connected) => {
+watch(exchangeWebSocket.connected, (connected) => {
   dashboard.setWebSocketConnected(connected);
 });
 
@@ -88,7 +93,8 @@ async function restoreMenuFocus(): Promise<void> {
 }
 
 onMounted(() => {
-  websocket.connect();
+  exchangeWebSocket.connect();
+  strategyWebSocket.connect();
 });
 </script>
 

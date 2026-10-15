@@ -189,6 +189,15 @@ function parameterPath(parameter: StrategyParameterDefinition): string {
   return `params.${parameter.key}`;
 }
 
+function parameterBound(parameter: StrategyParameterDefinition, side: 'min' | 'max'): number | undefined {
+  const boundary = side === 'min' ? parameter.minimum : parameter.maximum;
+  if (boundary === null) return undefined;
+  const exclusive = side === 'min' ? parameter.exclusive_min : parameter.exclusive_max;
+  if (!exclusive) return boundary;
+  const step = parameter.step ?? (parameter.value_type === 'integer' ? 1 : 0.1);
+  return side === 'min' ? boundary + step : boundary - step;
+}
+
 function updateParameter(key: string, value: string | number | boolean | null | undefined): void {
   model.value.params[key] = value ?? null;
 }
@@ -342,8 +351,8 @@ function updateParameter(key: string, value: string | number | boolean | null | 
               @update:model-value="updateParameter(parameter.key, $event)"
               :name="parameterPath(parameter)"
               class="strategy-form__control"
-              :min="parameter.minimum ?? undefined"
-              :max="parameter.maximum ?? undefined"
+              :min="parameterBound(parameter, 'min')"
+              :max="parameterBound(parameter, 'max')"
               :step="parameter.step ?? (parameter.value_type === 'integer' ? 1 : 0.1)"
               :precision="parameter.value_type === 'integer' ? 0 : undefined"
               :aria-label="parameter.label"

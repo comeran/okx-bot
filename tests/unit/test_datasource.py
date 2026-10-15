@@ -28,6 +28,8 @@ def test_get_bars_from_cache(repo: Repository) -> None:
                 low=49_000 + index,
                 close=50_500 + index,
                 volume=100 + index,
+                source="backtest",
+                runtime_mode="backtest",
             )
         )
 
@@ -37,6 +39,29 @@ def test_get_bars_from_cache(repo: Repository) -> None:
     assert len(bars) == 5
     assert isinstance(bars[0], Bar)
     assert bars[0].open == 50_000
+
+
+def test_legacy_repository_cannot_supply_unscoped_rows_to_backtest() -> None:
+    class LegacyRepository:
+        def get_klines(self, symbol, timeframe, start, end):
+            return [
+                KlineCache(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    timestamp=start,
+                    open=1.0,
+                    high=2.0,
+                    low=0.5,
+                    close=1.5,
+                    volume=10.0,
+                    source="unknown",
+                    runtime_mode="unknown",
+                )
+            ]
+
+    datasource = BacktestDataSource(LegacyRepository(), "BTC-USDT", "1h")
+
+    assert datasource.get_cached_bars(1, 2) == []
 
 
 def test_save_bars_to_cache(repo: Repository) -> None:
@@ -63,5 +88,8 @@ def test_save_bars_to_cache(repo: Repository) -> None:
 
     datasource.save_bars_to_cache(bars)
 
-    cached = repo.get_klines("BTC-USDT", "1h", start, start + 3_600)
+    cached = repo.get_klines(
+        "BTC-USDT", "1h", start, start + 3_600,
+        source="backtest", runtime_mode="backtest",
+    )
     assert len(cached) == 2

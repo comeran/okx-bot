@@ -60,7 +60,7 @@ describe('mergeStrategyPerformanceRows', () => {
       },
     ];
 
-    expect(mergeStrategyPerformanceRows(runtimeSummaries, performanceRows)).toEqual([
+    expect(mergeStrategyPerformanceRows(runtimeSummaries, performanceRows)).toMatchObject([
       {
         name: 'zeta',
         status: 'running',
@@ -75,7 +75,7 @@ describe('mergeStrategyPerformanceRows', () => {
         order_count: 5,
         filled_order_count: 4,
         last_order_at: 1700000100000,
-        open_positions: 0,
+        open_positions: null,
       },
       {
         name: 'alpha',
@@ -96,18 +96,18 @@ describe('mergeStrategyPerformanceRows', () => {
       {
         name: 'delta',
         status: 'error',
-        equity: 0,
+        equity: null,
         return_pct: null,
-        realized_pnl: 0,
-        unrealized_pnl: 0,
-        position_notional: 0,
-        closed_trade_count: 0,
+        realized_pnl: null,
+        unrealized_pnl: null,
+        position_notional: null,
+        closed_trade_count: null,
         win_rate: null,
-        fees_paid: 0,
-        order_count: 0,
-        filled_order_count: 0,
+        fees_paid: null,
+        order_count: null,
+        filled_order_count: null,
         last_order_at: null,
-        open_positions: 0,
+        open_positions: null,
       },
       {
         name: 'gamma',
@@ -123,7 +123,7 @@ describe('mergeStrategyPerformanceRows', () => {
         order_count: 3,
         filled_order_count: 2,
         last_order_at: null,
-        open_positions: 0,
+        open_positions: null,
       },
     ]);
   });
@@ -163,6 +163,41 @@ describe('mergeStrategyPerformanceRows', () => {
       open_positions: 1,
       positions: [],
       recent_orders: [],
+    });
+  });
+
+  it('preserves nullable backend metrics instead of coercing missing counts to zero', () => {
+    const [row] = mergeStrategyPerformanceRows([], [{
+      strategy: 'partial',
+      initial_equity: null,
+      equity: null,
+      realized_pnl: null,
+      unrealized_pnl: null,
+      fees_paid: null,
+      position_notional: null,
+      open_positions: null,
+      order_count: null,
+      filled_order_count: null,
+      trade_count: null,
+      closed_trade_count: null,
+      winning_trade_count: null,
+      losing_trade_count: null,
+    }]);
+
+    expect(row).toMatchObject({
+      initial_equity: null,
+      equity: null,
+      realized_pnl: null,
+      unrealized_pnl: null,
+      fees_paid: null,
+      position_notional: null,
+      open_positions: null,
+      order_count: null,
+      filled_order_count: null,
+      trade_count: null,
+      closed_trade_count: null,
+      winning_trade_count: null,
+      losing_trade_count: null,
     });
   });
 

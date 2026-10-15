@@ -68,6 +68,7 @@ def test_builtin_definition_metadata_is_canonical_and_stably_ordered() -> None:
                     "default": 0.1,
                     "minimum": 0,
                     "maximum": None,
+                    "exclusive_min": True,
                     "step": 0.01,
                 },
             ],
@@ -97,6 +98,8 @@ def test_builtin_definition_metadata_is_canonical_and_stably_ordered() -> None:
                     "default": 30,
                     "minimum": 0,
                     "maximum": 100,
+                    "exclusive_min": True,
+                    "exclusive_max": True,
                     "step": 0.1,
                 },
                 {
@@ -108,6 +111,8 @@ def test_builtin_definition_metadata_is_canonical_and_stably_ordered() -> None:
                     "default": 70,
                     "minimum": 0,
                     "maximum": 100,
+                    "exclusive_min": True,
+                    "exclusive_max": True,
                     "step": 0.1,
                 },
                 {
@@ -119,6 +124,7 @@ def test_builtin_definition_metadata_is_canonical_and_stably_ordered() -> None:
                     "default": 0.1,
                     "minimum": 0,
                     "maximum": None,
+                    "exclusive_min": True,
                     "step": 0.01,
                 },
             ],
@@ -148,6 +154,7 @@ def test_builtin_definition_metadata_is_canonical_and_stably_ordered() -> None:
                     "default": 2.0,
                     "minimum": 0,
                     "maximum": None,
+                    "exclusive_min": True,
                     "step": 0.1,
                 },
                 {
@@ -159,6 +166,7 @@ def test_builtin_definition_metadata_is_canonical_and_stably_ordered() -> None:
                     "default": 0.1,
                     "minimum": 0,
                     "maximum": None,
+                    "exclusive_min": True,
                     "step": 0.01,
                 },
             ],
@@ -199,6 +207,7 @@ def test_builtin_definition_metadata_is_canonical_and_stably_ordered() -> None:
                     "default": 0.1,
                     "minimum": 0,
                     "maximum": None,
+                    "exclusive_min": True,
                     "step": 0.01,
                 },
             ],
@@ -496,6 +505,23 @@ def test_normalize_config_rejects_unsupported_strategy_type() -> None:
     assert issue_codes(unsupported.value) == {"unsupported_strategy_type"}
 
 
+def test_normalize_config_rejects_exchange_system_actor_as_strategy_name() -> None:
+    with pytest.raises(StrategyConfigValidationError) as error:
+        make_registry().normalize_config(
+            name="__exchange__",
+            strategy_type="ma_cross",
+            symbol="BTC-USDT",
+            timeframe="1h",
+            params={},
+        )
+
+    assert {
+        (issue.path, issue.code)
+        for issue in error.value.issues
+        if issue.path == "name"
+    } == {("name", "reserved_name")}
+
+
 @pytest.mark.parametrize(
     ("strategy_type", "params", "expected_params", "expected_types", "expected_class"),
     [
@@ -551,3 +577,37 @@ def test_create_instance_supports_all_builtin_strategy_types_with_normalized_ide
         assert actual == expected_value
         assert type(actual) is expected_types[key]
     assert registry.list_implicit_strategies() == ["ma_cross"]
+
+
+def test_normalize_config_rejects_builtin_strategy_name() -> None:
+    with pytest.raises(StrategyConfigValidationError) as error:
+        make_registry().normalize_config(
+            name="ma_cross",
+            strategy_type="ma_cross",
+            symbol="BTC-USDT",
+            timeframe="1h",
+            params={},
+        )
+
+    assert issue_codes(error.value) == {"reserved_name"}
+
+
+def test_strategy_definition_exposes_exclusive_parameter_bounds() -> None:
+    definition = make_registry().get_definition("rsi_mean_reversion")
+    parameters = {param["key"]: param for param in definition.to_dict()["params"]}
+
+    assert parameters["oversold"]["exclusive_min"] is True
+    assert parameters["oversold"]["exclusive_max"] is True
+
+
+def test_normalize_config_rejects_all_system_prefixed_strategy_names() -> None:
+    with pytest.raises(StrategyConfigValidationError) as error:
+        make_registry().normalize_config(
+            name="__risk_actor",
+            strategy_type="ma_cross",
+            symbol="BTC-USDT",
+            timeframe="1h",
+            params={},
+        )
+
+    assert issue_codes(error.value) == {"reserved_name"}

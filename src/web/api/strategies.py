@@ -55,6 +55,38 @@ KillSwitchChecker = Callable[[], bool]
 _UNSET_ORDER_ROUTER_MODE = object()
 
 
+def has_real_strategy_owned_data(positions, account, orders) -> bool:
+    return bool(positions or account is not None or orders)
+
+
+def filter_strategy_ws_fallback_rows(
+    rows, *, strategy: str, source: str, runtime_mode: str
+):
+    """Keep only explicitly proven rows when a legacy repository cannot scope queries."""
+    return [
+        row
+        for row in rows
+        if getattr(row, "strategy", None) == strategy
+        and getattr(row, "source", None) == source
+        and getattr(row, "runtime_mode", None) == runtime_mode
+    ]
+
+
+def filter_strategy_ws_fallback_account(
+    account, *, strategy: str, source: str, runtime_mode: str
+):
+    """Reject an unscoped legacy account rather than exposing it to a strategy WS."""
+    if account is None:
+        return None
+    if (
+        getattr(account, "strategy", None) == strategy
+        and getattr(account, "source", None) == source
+        and getattr(account, "runtime_mode", None) == runtime_mode
+    ):
+        return account
+    return None
+
+
 class RiskEventNotifier(Protocol):
     async def send_risk_event(self, payload: dict[str, object]) -> None: ...
 
@@ -196,7 +228,7 @@ def create_order_manager(
         await refresh_okx_live_state(
             settings.exchange,
             order_repository,
-            strategy_name,
+            "__exchange__",
             [symbol],
             current_timestamp_ms,
         )
@@ -244,6 +276,41 @@ def create_strategy_registry() -> StrategyRegistry:
 
 def strategy_exists(name: str) -> bool:
     return name in create_strategy_registry().list_strategies()
+
+
+def has_live_strategy_ownership_mapping(repository: Repository, strategy: str, symbol: str) -> bool:
+    """Require an explicit strategy-to-exchange ownership mapping before live start."""
+    if strategy == "__exchange__":
+        return True
+    for method_name in ("is_strategy_ownership_configured", "has_strategy_allocation"):
+        checker = getattr(repository, method_name, None)
+        if callable(checker):
+            try:
+                return bool(checker(strategy, symbol))
+            except TypeError:
+                return bool(checker(strategy))
+    checker = getattr(repository, "is_position_owned", None)
+    if not callable(checker):
+        return False
+    try:
+        positions = repository.get_open_positions(
+            "__exchange__", source="live_exchange", runtime_mode="live"
+        )
+    except (AttributeError, TypeError):
+        try:
+            positions = repository.get_open_positions("__exchange__")
+        except AttributeError:
+            positions = []
+    for position in positions:
+        if getattr(position, "symbol", None) != symbol:
+            continue
+        try:
+            if checker(strategy, position):
+                return True
+        except TypeError:
+            if checker(strategy, symbol):
+                return True
+    return False
 
 
 class _StrategyOwnerEpochTracker:
@@ -403,6 +470,7 @@ def create_router(
         await broadcast(
             {
                 "type": "strategy_status",
+                "scope": "strategy",
                 "strategy": name,
                 "status": runtime.strategy_status[name],
                 "timestamp": current_timestamp_ms(),
@@ -458,32 +526,120 @@ def create_router(
             await broadcast(
                 {
                     "type": "strategy_error",
+                    "scope": "strategy",
                     "strategy": name,
                     "error": str(error),
                     "timestamp": current_timestamp_ms(),
                 }
             )
 
+    def scoped_provenance(runtime_mode: str) -> tuple[str, str]:
+        normalized = "paper" if runtime_mode == "demo" else runtime_mode
+        return (
+            ("live_exchange", "live")
+            if normalized == "live"
+            else (normalized, normalized)
+        )
+
+    def scoped_rows(repository: Repository, method_name: str, strategy: str, runtime_mode: str):
+        source, normalized_runtime = scoped_provenance(runtime_mode)
+        method = getattr(repository, method_name)
+        try:
+            rows = method(
+                strategy,
+                source=source,
+                runtime_mode=normalized_runtime,
+            ) if method_name in {"get_open_positions", "get_positions"} else method(
+                source=source,
+                runtime_mode=normalized_runtime,
+            )
+        except TypeError:
+            rows = (
+                method(strategy)
+                if method_name in {"get_open_positions", "get_positions"}
+                else method()
+            )
+            # Compatibility is limited to repositories that predate provenance
+            # arguments; without exact markers, strategy-scoped WS data is unsafe.
+            return filter_strategy_ws_fallback_rows(
+                rows,
+                strategy=strategy,
+                source=source,
+                runtime_mode=normalized_runtime,
+            )
+        return [
+            row for row in rows
+            if getattr(row, "strategy", None) == strategy
+            and getattr(row, "source", None) == source
+            and getattr(row, "runtime_mode", None) == normalized_runtime
+        ]
+
+    def scoped_account(repository: Repository, strategy: str, runtime_mode: str):
+        source, normalized_runtime = scoped_provenance(runtime_mode)
+        legacy_repository = False
+        try:
+            account = repository.get_account(
+                strategy,
+                source=source,
+                runtime_mode=normalized_runtime,
+            )
+        except TypeError:
+            # Legacy test/double repositories do not expose provenance-aware
+            # parameters. Real Repository instances always use the strict path.
+            legacy_repository = True
+            account = repository.get_account(strategy)
+        if account is None:
+            return None
+        if legacy_repository:
+            return filter_strategy_ws_fallback_account(
+                account,
+                strategy=strategy,
+                source=source,
+                runtime_mode=normalized_runtime,
+            )
+        if (
+            getattr(account, "source", None) == source
+            and getattr(account, "runtime_mode", None) == normalized_runtime
+        ):
+            return account
+        return None
+
     async def broadcast_trading_updates(
         repository: Repository,
         strategy: str,
         include_orders: bool = True,
+        runtime_mode: str = "unknown",
     ) -> None:
         if broadcast is None:
             return
         positions = (
-            repository.get_open_positions(strategy)
+            scoped_rows(repository, "get_open_positions", strategy, runtime_mode)
             if hasattr(repository, "get_open_positions")
-            else repository.get_positions(strategy)
+            else scoped_rows(repository, "get_positions", strategy, runtime_mode)
         )
+        strategy_orders = scoped_rows(repository, "get_orders", strategy, runtime_mode)
         if include_orders:
             await broadcast(
-                {"type": "orders", "orders": trading.serialize_records(repository.get_orders())}
+                {
+                    "type": "orders",
+                    "scope": "strategy",
+                    "strategy": strategy,
+                    "orders": trading.serialize_records(strategy_orders),
+                }
             )
-        account = repository.get_account(strategy)
+        account = scoped_account(repository, strategy, runtime_mode)
+        if runtime_mode == "live" and not has_real_strategy_owned_data(
+            positions, account, strategy_orders
+        ):
+            return
         if account is None:
             await broadcast(
-                {"type": "positions", "positions": trading.serialize_records(positions)}
+                {
+                    "type": "positions",
+                    "scope": "strategy",
+                    "strategy": strategy,
+                    "positions": trading.serialize_records(positions),
+                }
             )
         else:
             await broadcast_position_account_updates(positions, account)
@@ -491,19 +647,42 @@ def create_router(
     async def broadcast_position_account_updates(positions, account) -> None:
         if broadcast is None:
             return
-        await broadcast({"type": "positions", "positions": trading.serialize_records(positions)})
+        await broadcast({
+            "type": "positions",
+            "scope": "strategy",
+            "strategy": getattr(account, "strategy", None),
+            "positions": trading.serialize_records(positions),
+        })
         await broadcast(
             {
                 "type": "account",
-                "account": trading.serialize_account(account),
+                "scope": "strategy",
+                "strategy": getattr(account, "strategy", None),
+                "account": trading.serialize_account(
+                    account,
+                    scope="strategy",
+                    strategy=getattr(account, "strategy", None),
+                ),
             }
         )
 
     async def persist_broadcast_and_notify_risk_event(
         repository: Repository,
         payload: dict[str, object],
+        runtime_mode: str = "unknown",
     ) -> None:
-        repository.save_risk_event(payload)
+        runtime_mode = "paper" if runtime_mode == "demo" else runtime_mode
+        source = "live_exchange" if runtime_mode == "live" else runtime_mode
+        save_risk_event = getattr(repository, "save_risk_event", None)
+        if callable(save_risk_event):
+            try:
+                save_risk_event(
+                    payload,
+                    source=source,
+                    runtime_mode=runtime_mode,
+                )
+            except TypeError:
+                save_risk_event(payload)
         if broadcast is not None:
             await broadcast(payload)
         if risk_event_notifier is None:
@@ -517,7 +696,10 @@ def create_router(
         get_kill_switch = getattr(repository, "get_kill_switch", None)
         return get_kill_switch is not None and get_kill_switch().engaged
 
-    def create_mark_to_market_service(repository: Repository) -> PaperMarkToMarketService | None:
+    def create_mark_to_market_service(
+        repository: Repository,
+        runtime_mode: str = "paper",
+    ) -> PaperMarkToMarketService | None:
         required_repository_methods = (
             "get_position",
             "upsert_position",
@@ -530,6 +712,7 @@ def create_router(
         return PaperMarkToMarketService(
             repository,
             initial_equity=paper_backtest_config().initial_capital,
+            runtime_mode=runtime_mode,
         )
 
     async def mark_to_market_before_bar(
@@ -550,7 +733,10 @@ def create_router(
             await broadcast_position_account_updates(update.positions, update.account)
 
     def serialize_strategy_config(config: StrategyConfigRecord) -> dict[str, Any]:
-        return config.model_dump()
+        result = config.model_dump()
+        if config.name.startswith("__") or config.name in runtime.registry.list_strategies():
+            result["legacy_conflict"] = True
+        return result
 
     def is_active(name: str) -> bool:
         return name in runtime.engines or name in runtime.starting_engines
@@ -708,6 +894,7 @@ def create_router(
         name = config if isinstance(config, str) else config.name
         payload: dict[str, object] = {
             "type": event_type,
+            "scope": "strategy",
             "strategy": name,
             "timestamp": timestamp,
         }
@@ -1017,7 +1204,10 @@ def create_router(
             if not deleted:
                 raise HTTPException(status_code=404, detail="Strategy config not found")
             event_timestamp = current_timestamp_ms()
-            runtime.strategy_status.pop(name, None)
+            if name in runtime.registry.list_implicit_strategies():
+                runtime.strategy_status[name] = "stopped"
+            else:
+                runtime.strategy_status.pop(name, None)
             runtime.strategy_errors.pop(name, None)
         await broadcast_config_event(
             "strategy_config_deleted",
@@ -1048,13 +1238,40 @@ def create_router(
                     repository = Repository()
                     if kill_switch_engaged(repository):
                         raise HTTPException(status_code=423, detail="Kill switch engaged")
-                    mark_to_market = create_mark_to_market_service(repository)
+                    strategy = create_strategy(name)
+                    if order_router_mode == "live" and not has_live_strategy_ownership_mapping(
+                        repository, name, strategy.symbol
+                    ):
+                        ownership_detail = {
+                            "code": "live_position_ownership_unavailable",
+                            "message": "Live position ownership is unavailable",
+                            "reason_code": "live_position_ownership_unavailable",
+                        }
+                        await persist_broadcast_and_notify_risk_event(
+                            repository,
+                            {
+                                "type": "risk_event",
+                                "scope": "strategy",
+                                "strategy": name,
+                                "reason": ownership_detail["message"],
+                                "reason_code": ownership_detail["reason_code"],
+                                "severity": "high",
+                                "timestamp": current_timestamp_ms(),
+                            },
+                            order_router_mode,
+                        )
+                        raise HTTPException(status_code=409, detail=ownership_detail)
+                    mark_to_market = (
+                        create_mark_to_market_service(repository, order_router_mode)
+                        if order_router_mode != "live"
+                        else None
+                    )
                     strategy = create_strategy(name)
                     if order_router_mode == "live":
                         await refresh_okx_live_state(
                             load_runtime_settings().exchange,
                             repository,
-                            strategy.name,
+                            "__exchange__",
                             [strategy.symbol],
                             current_timestamp_ms,
                         )
@@ -1067,9 +1284,12 @@ def create_router(
                                 on_order_update=lambda strategy_name: broadcast_trading_updates(
                                     repository,
                                     strategy_name,
+                                    runtime_mode=order_router_mode,
                                 ),
                                 on_risk_event=lambda payload: (
-                                    persist_broadcast_and_notify_risk_event(repository, payload)
+                                    persist_broadcast_and_notify_risk_event(
+                                        repository, payload, order_router_mode
+                                    )
                                 ),
                                 kill_switch_checker=lambda: kill_switch_engaged(repository),
                                 order_router_mode=order_router_mode,
@@ -1096,11 +1316,15 @@ def create_router(
                                     market_data_service=get_market_data_service(),
                                     on_strategy_error=handle_current_engine_error,
                                     before_live_strategy_bar=(
-                                        lambda strategy, bar: mark_to_market_before_bar(
-                                            mark_to_market,
-                                            strategy,
-                                            bar,
+                                        (
+                                            lambda strategy, bar: mark_to_market_before_bar(
+                                                mark_to_market,
+                                                strategy,
+                                                bar,
+                                            )
                                         )
+                                        if order_router_mode != "live"
+                                        else None
                                     ),
                                     stop_market_data_on_stop=False,
                                 )

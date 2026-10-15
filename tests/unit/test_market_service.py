@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import threading
 from collections import deque
+from math import inf
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -10,6 +11,28 @@ from ccxt.base.errors import NotSupported
 from src.core.types import Bar
 from src.market.health import MARKET_FEED_PUBLIC_MESSAGE
 from src.market.service import MarketDataService, _CallbackDispatchError
+
+
+@pytest.mark.parametrize("column_count", [7, 9])
+async def test_poll_once_accepts_provider_ohlcv_rows_with_extra_columns(column_count):
+    with patch("src.market.service.create_okx_client") as ccxt:
+        exchange = AsyncMock()
+        exchange.watch_ohlcv.return_value = [
+            [1700000000000, 50000, 51000, 49000, 50500, 100.5]
+            + ["provider-extra"] * (column_count - 6)
+        ]
+        ccxt.return_value = exchange
+        callback = AsyncMock()
+        service = MarketDataService("api-key", "secret", "passphrase")
+        service._current_time = lambda: 1700000060
+        service.subscribe("BTC-USDT-SWAP", "1m", callback)
+
+        await service._poll_once("BTC-USDT-SWAP", "1m")
+
+    assert [bar.timestamp for bar in service.get_recent_bars("BTC-USDT-SWAP", "1m")] == [
+        1700000000000
+    ]
+    callback.assert_awaited_once()
 
 
 async def test_poll_once_builds_bars_and_notifies_subscriber():
@@ -33,6 +56,106 @@ async def test_poll_once_builds_bars_and_notifies_subscriber():
         assert callback.await_count == 2
 
 
+async def test_poll_once_sorts_newest_first_rows_before_watermark_filtering():
+    class FetchExchange:
+        async def fetch_ohlcv(self, symbol: str, timeframe: str):
+            return [
+                [120, 50000, 51000, 49000, 50500, 100.5],
+                [60, 49000, 50000, 48000, 49500, 80.25],
+            ]
+
+        async def close(self) -> None:
+            pass
+
+    with patch("src.market.service.create_okx_client") as ccxt:
+        ccxt.return_value = FetchExchange()
+        callback = AsyncMock()
+        service = MarketDataService("api-key", "secret", "passphrase")
+        service._current_time = lambda: 1000
+        service.subscribe("BTC-USDT-SWAP", "1m", callback)
+
+        await service._poll_once("BTC-USDT-SWAP", "1m")
+
+    assert [bar.timestamp for bar in service.get_recent_bars("BTC-USDT-SWAP", "1m")] == [60, 120]
+    assert [call.args[0].timestamp for call in callback.await_args_list] == [60, 120]
+    assert service._last_bar_timestamps["BTC-USDT-SWAP:1m"] == 120
+
+
+async def test_poll_once_rejects_mixed_malformed_batch_atomically(caplog):
+    with patch("src.market.service.create_okx_client") as ccxt:
+        exchange = AsyncMock()
+        exchange.watch_ohlcv.side_effect = NotSupported("watch unavailable")
+        exchange.fetch_ohlcv.return_value = [
+            ["not-a-timestamp", 50000, 51000, 49000, 50500, 100.5],
+            [1700000000000, 50000, 51000, 49000, 50500, 100.5],
+        ]
+        ccxt.return_value = exchange
+        callback = AsyncMock()
+        service = MarketDataService("api-key", "secret", "passphrase")
+        service._current_time = lambda: 1700000060
+        service.subscribe("BTC-USDT-SWAP", "1m", callback)
+
+        with pytest.raises(ValueError, match="Malformed OHLCV batch"):
+            await service._poll_once("BTC-USDT-SWAP", "1m")
+
+    assert service.get_recent_bars("BTC-USDT-SWAP", "1m") == []
+    callback.assert_not_awaited()
+    assert service._last_bar_timestamps == {}
+    assert any("invalid OHLCV row" in record.message for record in caplog.records)
+
+
+@pytest.mark.parametrize(
+    "invalid_row",
+    [
+        [-1, 50000, 51000, 49000, 50500, 100.5],
+        [1700000000000, -1, 51000, 49000, 50500, 100.5],
+        [1700000000000, 50000, 51000, 49000, 50500, -1],
+        [1700000000000, 50000, 48000, 49000, 48500, 100.5],
+        [1700000000000, 50000, 51000, 49000, 52000, 100.5],
+        [1700000000000, 50000, 51000, 49000, 50500, inf],
+        [2**63, 50000, 51000, 49000, 50500, 100.5],
+    ],
+    ids=["negative-timestamp", "negative-price", "negative-volume", "high-below-low",
+         "close-outside-range", "infinite-volume", "timestamp-overflow"],
+)
+async def test_poll_once_skips_invalid_rows_without_advancing_cursor_or_publishing(
+    invalid_row, caplog
+):
+    class Exchange:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def fetch_ohlcv(self, symbol: str, timeframe: str):
+            self.calls += 1
+            if self.calls == 1:
+                return [invalid_row]
+            return [[1700000000000, 50000, 51000, 49000, 50500, 100.5]]
+
+        async def close(self) -> None:
+            pass
+
+    with patch("src.market.service.create_okx_client") as ccxt:
+        ccxt.return_value = Exchange()
+        callback = AsyncMock()
+        service = MarketDataService("api-key", "secret", "passphrase")
+        service._current_time = lambda: 1700000060
+        service.subscribe("BTC-USDT-SWAP", "1m", callback)
+
+        with pytest.raises(ValueError, match="Malformed OHLCV batch"):
+            await service._poll_once("BTC-USDT-SWAP", "1m")
+        assert service.get_recent_bars("BTC-USDT-SWAP", "1m") == []
+        assert service._last_bar_timestamps == {}
+        assert service.get_feed_health("BTC-USDT-SWAP", "1m").consecutive_failures == 1
+
+        await service._poll_once("BTC-USDT-SWAP", "1m")
+
+    assert [bar.timestamp for bar in service.get_recent_bars("BTC-USDT-SWAP", "1m")] == [
+        1700000000000
+    ]
+    callback.assert_awaited_once()
+    assert any("invalid OHLCV row" in record.message for record in caplog.records)
+
+
 async def test_poll_once_rejects_malformed_batch_without_committing_partial_state():
     with patch("src.market.service.create_okx_client") as ccxt:
         exchange = AsyncMock()
@@ -46,7 +169,7 @@ async def test_poll_once_rejects_malformed_batch_without_committing_partial_stat
         service = MarketDataService("api-key", "secret", "passphrase")
         service.subscribe("BTC-USDT-SWAP", "1m", callback)
 
-        with pytest.raises(ValueError, match="exactly 6 values"):
+        with pytest.raises(ValueError, match="Malformed OHLCV batch"):
             await service._poll_once("BTC-USDT-SWAP", "1m")
 
         assert service.get_recent_bars("BTC-USDT-SWAP", "1m") == []
@@ -303,9 +426,11 @@ async def test_subscriber_exception_does_not_mark_feed_failure_and_other_callbac
 
     good_callback.assert_awaited_once()
     health = service.get_feed_health("BTC-USDT-SWAP", "1m")
-    assert health.status == "ready"
+    assert health.status == "pending"
+    assert health.buffered_bars == 0
+    assert health.last_bar_timestamp is None
     assert health.consecutive_failures == 0
-    assert health.error_code is None
+    assert health.error_code == "market_feed_subscriber_delivery_failed"
 
 
 async def test_poll_once_preserves_all_callback_exceptions_and_dispatches_every_callback():
@@ -343,19 +468,16 @@ async def test_poll_once_preserves_all_callback_exceptions_and_dispatches_every_
         with pytest.raises(_CallbackDispatchError) as raised:
             await service._poll_once("BTC-USDT-SWAP", "1m")
 
-    assert [bar.timestamp for bar in delivered] == [1700000000000, 1700000060000]
+    assert [bar.timestamp for bar in delivered] == [1700000000000]
     assert isinstance(raised.value.__cause__, ExceptionGroup)
-    assert raised.value.__cause__.exceptions == (
-        first_error,
-        second_error,
-        first_error,
-        second_error,
-    )
+    assert raised.value.__cause__.exceptions == (first_error, second_error)
     assert raised.value.original is first_error
     health = service.get_feed_health("BTC-USDT-SWAP", "1m")
-    assert health.status == "ready"
+    assert health.status == "pending"
+    assert health.buffered_bars == 0
+    assert health.last_bar_timestamp is None
     assert health.consecutive_failures == 0
-    assert health.error_code is None
+    assert health.error_code == "market_feed_subscriber_delivery_failed"
 
 
 async def test_feed_worker_uses_initial_retrieval_backoff_after_callback_only_failure(
@@ -444,9 +566,11 @@ async def test_feed_worker_keeps_ordinary_interval_after_callback_only_failures(
     ]
     assert sleep_durations == [1, 1, 1]
     health = service.get_feed_health("BTC-USDT-SWAP", "1m")
-    assert health.status == "ready"
+    assert health.status == "pending"
+    assert health.buffered_bars == 0
+    assert health.last_bar_timestamp is None
     assert health.consecutive_failures == 0
-    assert health.error_code is None
+    assert health.error_code == "market_feed_subscriber_delivery_failed"
     assert any(
         record.exc_info is not None
         and record.exc_info[1] is not None
@@ -836,7 +960,7 @@ async def test_ohlcv_iteration_failure_records_sanitized_poll_failure():
     assert health.public_message == MARKET_FEED_PUBLIC_MESSAGE
 
 
-async def test_malformed_ohlcv_row_records_sanitized_poll_failure():
+async def test_all_malformed_nonempty_ohlcv_batch_records_sanitized_poll_failure():
     class Exchange:
         async def fetch_ohlcv(self, symbol: str, timeframe: str):
             return [[1700000000000, 50000, 51000, 49000, "not-a-number", 100.5]]
@@ -850,7 +974,7 @@ async def test_malformed_ohlcv_row_records_sanitized_poll_failure():
         service._current_time = lambda: 1700000060
         service.subscribe("BTC-USDT-SWAP", "1m", AsyncMock())
 
-        with pytest.raises(ValueError, match="not-a-number"):
+        with pytest.raises(ValueError, match="Malformed OHLCV batch"):
             await service._poll_once("BTC-USDT-SWAP", "1m")
 
     bars = service.get_recent_bars("BTC-USDT-SWAP", "1m")
@@ -862,6 +986,60 @@ async def test_malformed_ohlcv_row_records_sanitized_poll_failure():
     assert health.generation == 1
     assert health.error_code == "market_feed_poll_failed"
     assert health.public_message == MARKET_FEED_PUBLIC_MESSAGE
+
+
+async def test_mixed_malformed_and_valid_ohlcv_batch_is_rejected_atomically():
+    class Exchange:
+        async def fetch_ohlcv(self, symbol: str, timeframe: str):
+            return [
+                [1700000000000, 50000, 51000, 49000, "not-a-number", 100.5],
+                [1700000060000, 50500, 51500, 50000, 51200, 80.25],
+            ]
+
+        async def close(self) -> None:
+            pass
+
+    with patch("src.market.service.create_okx_client") as ccxt:
+        ccxt.return_value = Exchange()
+        service = MarketDataService("api-key", "secret", "passphrase")
+        service._current_time = lambda: 1700000120
+        callback = AsyncMock()
+        service.subscribe("BTC-USDT-SWAP", "1m", callback)
+
+        with pytest.raises(ValueError, match="Malformed OHLCV batch"):
+            await service._poll_once("BTC-USDT-SWAP", "1m")
+
+    assert service.get_recent_bars("BTC-USDT-SWAP", "1m") == []
+    callback.assert_not_awaited()
+    health = service.get_feed_health("BTC-USDT-SWAP", "1m")
+    assert health.status == "pending"
+    assert health.consecutive_failures == 1
+    assert health.total_failures == 1
+    assert health.error_code == "market_feed_poll_failed"
+
+
+async def test_empty_ohlcv_batch_is_a_successful_empty_poll():
+    class Exchange:
+        async def fetch_ohlcv(self, symbol: str, timeframe: str):
+            return []
+
+        async def close(self) -> None:
+            pass
+
+    with patch("src.market.service.create_okx_client") as ccxt:
+        ccxt.return_value = Exchange()
+        service = MarketDataService("api-key", "secret", "passphrase")
+        service.subscribe("BTC-USDT-SWAP", "1m", AsyncMock())
+
+        await service._poll_once("BTC-USDT-SWAP", "1m")
+
+    health = service.get_feed_health("BTC-USDT-SWAP", "1m")
+    assert health.status == "pending"
+    assert health.consecutive_failures == 0
+    assert health.total_failures == 0
+    assert health.generation == 1
+    assert health.success_generation == 1
+    assert health.error_code is None
 
 
 @pytest.mark.parametrize(
@@ -897,44 +1075,9 @@ async def test_malformed_ohlcv_row_records_sanitized_poll_failure():
         pytest.param(
             [[1700000000000, 50000, 51000, 49000, 50500, 100.5, "extra"]],
             ValueError,
-            0,
-            "pending",
+            1,
+            "ready",
             id="overlong-row",
-        ),
-        pytest.param(
-            [[1700000000000, "nan", 51000, 49000, 50500, 100.5]],
-            ValueError,
-            0,
-            "pending",
-            id="non-finite-open",
-        ),
-        pytest.param(
-            [[1700000000000, 50000, "inf", 49000, 50500, 100.5]],
-            ValueError,
-            0,
-            "pending",
-            id="non-finite-high",
-        ),
-        pytest.param(
-            [[1700000000000, 50000, 51000, "-inf", 50500, 100.5]],
-            ValueError,
-            0,
-            "pending",
-            id="non-finite-low",
-        ),
-        pytest.param(
-            [[1700000000000, 50000, 51000, 49000, "NaN", 100.5]],
-            ValueError,
-            0,
-            "pending",
-            id="non-finite-close",
-        ),
-        pytest.param(
-            [[1700000000000, 50000, 51000, 49000, 50500, "inf"]],
-            ValueError,
-            0,
-            "pending",
-            id="non-finite-volume",
         ),
         pytest.param(
             [[1700000000000, 50000]],
@@ -952,7 +1095,7 @@ async def test_malformed_ohlcv_row_records_sanitized_poll_failure():
         ),
     ],
 )
-async def test_malformed_ohlcv_rows_are_not_silently_skipped(
+async def test_malformed_ohlcv_batches_follow_parse_health_semantics(
     rows, expected_exception, expected_bars, expected_status
 ):
     class Exchange:
@@ -968,17 +1111,20 @@ async def test_malformed_ohlcv_rows_are_not_silently_skipped(
         service._current_time = lambda: 1700000060
         service.subscribe("BTC-USDT-SWAP", "1m", AsyncMock())
 
-        with pytest.raises(expected_exception):
+        if expected_bars == 0:
+            with pytest.raises(expected_exception, match="Malformed OHLCV batch"):
+                await service._poll_once("BTC-USDT-SWAP", "1m")
+        else:
             await service._poll_once("BTC-USDT-SWAP", "1m")
 
     assert len(service.get_recent_bars("BTC-USDT-SWAP", "1m")) == expected_bars
     health = service.get_feed_health("BTC-USDT-SWAP", "1m")
     assert health.status == expected_status
-    assert health.consecutive_failures == 1
-    assert health.total_failures == 1
+    assert health.consecutive_failures == (1 if expected_bars == 0 else 0)
+    assert health.total_failures == (1 if expected_bars == 0 else 0)
     assert health.generation == 1
-    assert health.error_code == "market_feed_poll_failed"
-    assert health.public_message == MARKET_FEED_PUBLIC_MESSAGE
+    assert health.error_code == ("market_feed_poll_failed" if expected_bars == 0 else None)
+    assert health.public_message == (MARKET_FEED_PUBLIC_MESSAGE if expected_bars == 0 else None)
 
 
 async def test_public_health_snapshots_do_not_leak_raw_exception_details():
@@ -1455,13 +1601,16 @@ async def test_callback_failure_publishes_current_sanitized_metadata_and_wakes_w
             await service._poll_once("BTC-USDT-SWAP", "1m")
 
         health = service.get_feed_health("BTC-USDT-SWAP", "1m")
-        assert health.status == "ready"
-        assert health.buffered_bars == 1
-        assert health.last_bar_timestamp == 1700000000000
-        assert health.error_code is None
-        assert health.public_message is None
+        assert health.status == "pending"
+        assert health.buffered_bars == 0
+        assert health.last_bar_timestamp is None
+        assert health.error_code == "market_feed_subscriber_delivery_failed"
+        assert health.public_message == MARKET_FEED_PUBLIC_MESSAGE
         assert "callback leaked secret" not in repr(health)
-        assert await waiter == health
+        assert not waiter.done()
+        waiter.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await waiter
 
 
 async def test_cancelling_stop_caller_during_owner_cleanup_is_propagated_and_retryable():
@@ -2315,6 +2464,53 @@ async def test_start_setup_failure_clears_owner_and_retries_with_fresh_exchange(
     assert replacement.close_calls == 1
 
 
+async def test_poll_once_retries_failed_bar_without_advancing_cursor_until_dispatch_succeeds():
+    class Exchange:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def fetch_ohlcv(self, symbol: str, timeframe: str):
+            self.calls += 1
+            return [
+                [1700000000000, 50000, 51000, 49000, 50500, 100.5],
+                [1700000060000, 50500, 51500, 50000, 51200, 80.25],
+            ]
+
+        async def close(self) -> None:
+            pass
+
+    attempts = 0
+    delivered: list[int] = []
+
+    async def callback(bar: Bar) -> None:
+        nonlocal attempts
+        attempts += 1
+        delivered.append(bar.timestamp)
+        if attempts == 1:
+            raise RuntimeError("callback failed once")
+
+    with patch("src.market.service.create_okx_client") as ccxt:
+        ccxt.return_value = Exchange()
+        service = MarketDataService("api-key", "secret", "passphrase")
+        service._current_time = lambda: 1700000120
+        service.subscribe("BTC-USDT-SWAP", "1m", callback)
+
+        with pytest.raises(RuntimeError, match="callback failed once"):
+            await service._poll_once("BTC-USDT-SWAP", "1m")
+
+        assert service.get_recent_bars("BTC-USDT-SWAP", "1m") == []
+        assert service._last_bar_timestamps == {}
+
+        await service._poll_once("BTC-USDT-SWAP", "1m")
+
+    assert delivered == [1700000000000, 1700000000000, 1700000060000]
+    assert [bar.timestamp for bar in service.get_recent_bars("BTC-USDT-SWAP", "1m")] == [
+        1700000000000,
+        1700000060000,
+    ]
+    assert service._last_bar_timestamps["BTC-USDT-SWAP:1m"] == 1700000060000
+
+
 async def test_poll_once_continues_dispatch_after_one_callback_fails():
     class Exchange:
         async def fetch_ohlcv(self, symbol: str, timeframe: str):
@@ -2343,8 +2539,97 @@ async def test_poll_once_continues_dispatch_after_one_callback_fails():
 
     assert len(received) == 1
     health = service.get_feed_health("BTC-USDT-SWAP", "1m")
-    assert health.error_code is None
-    assert health.buffered_bars == 1
+    assert health.error_code == "market_feed_subscriber_delivery_failed"
+    assert health.buffered_bars == 0
+    assert health.last_bar_timestamp is None
+
+
+async def test_poll_once_retries_only_failed_subscriber_for_same_bar():
+    class Exchange:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def fetch_ohlcv(self, symbol: str, timeframe: str):
+            self.calls += 1
+            return [[1700000000000, 50000, 51000, 49000, 50500, 100.5]]
+
+        async def close(self) -> None:
+            pass
+
+    first_received: list[int] = []
+    second_attempts = 0
+
+    async def first_callback(bar: Bar) -> None:
+        first_received.append(bar.timestamp)
+
+    async def second_callback(bar: Bar) -> None:
+        nonlocal second_attempts
+        second_attempts += 1
+        if second_attempts == 1:
+            raise RuntimeError("second callback failed")
+
+    with patch("src.market.service.create_okx_client") as ccxt:
+        ccxt.return_value = Exchange()
+        service = MarketDataService("api-key", "secret", "passphrase")
+        service._current_time = lambda: 1700000060
+        service.subscribe("BTC-USDT-SWAP", "1m", first_callback)
+        service.subscribe("BTC-USDT-SWAP", "1m", second_callback)
+
+        with pytest.raises(RuntimeError, match="second callback failed"):
+            await service._poll_once("BTC-USDT-SWAP", "1m")
+        await service._poll_once("BTC-USDT-SWAP", "1m")
+
+    assert first_received == [1700000000000]
+    assert second_attempts == 2
+    assert service._last_bar_timestamps["BTC-USDT-SWAP:1m"] == 1700000000000
+    assert len(service.get_recent_bars("BTC-USDT-SWAP", "1m")) == 1
+
+
+async def test_poll_once_advances_cursor_after_all_subscribers_succeed():
+    class Exchange:
+        async def fetch_ohlcv(self, symbol: str, timeframe: str):
+            return [[1700000000000, 50000, 51000, 49000, 50500, 100.5]]
+
+        async def close(self) -> None:
+            pass
+
+    callbacks = [AsyncMock(), AsyncMock()]
+    with patch("src.market.service.create_okx_client") as ccxt:
+        ccxt.return_value = Exchange()
+        service = MarketDataService("api-key", "secret", "passphrase")
+        service._current_time = lambda: 1700000060
+        for callback in callbacks:
+            service.subscribe("BTC-USDT-SWAP", "1m", callback)
+
+        await service._poll_once("BTC-USDT-SWAP", "1m")
+        await service._poll_once("BTC-USDT-SWAP", "1m")
+
+    for callback in callbacks:
+        callback.assert_awaited_once()
+    assert service._last_bar_timestamps["BTC-USDT-SWAP:1m"] == 1700000000000
+
+
+async def test_subscriber_added_after_bar_does_not_receive_past_bar():
+    class Exchange:
+        async def fetch_ohlcv(self, symbol: str, timeframe: str):
+            return [[1700000000000, 50000, 51000, 49000, 50500, 100.5]]
+
+        async def close(self) -> None:
+            pass
+
+    first_callback = AsyncMock()
+    second_callback = AsyncMock()
+    with patch("src.market.service.create_okx_client") as ccxt:
+        ccxt.return_value = Exchange()
+        service = MarketDataService("api-key", "secret", "passphrase")
+        service._current_time = lambda: 1700000060
+        service.subscribe("BTC-USDT-SWAP", "1m", first_callback)
+        await service._poll_once("BTC-USDT-SWAP", "1m")
+        service.subscribe("BTC-USDT-SWAP", "1m", second_callback)
+        await service._poll_once("BTC-USDT-SWAP", "1m")
+
+    first_callback.assert_awaited_once()
+    second_callback.assert_not_awaited()
 
 
 async def test_blocked_feed_does_not_prevent_other_feed_readiness_and_stop_drains_it():
@@ -2551,3 +2836,45 @@ def test_async_operations_reject_a_second_event_loop_with_service_error():
                 await service.wait_until_ready("BTC-USDT-SWAP", "1m", timeout=0.001)
 
         asyncio.run(use_second_loop())
+
+
+@pytest.mark.asyncio
+async def test_callback_delivery_failure_is_not_reported_as_ready():
+    with patch("src.market.service.create_okx_client") as ccxt:
+        exchange = AsyncMock()
+        exchange.fetch_ohlcv.return_value = [[1700000000000, 50000, 51000, 49000, 50500, 100.5]]
+        exchange.watch_ohlcv.return_value = exchange.fetch_ohlcv.return_value
+        ccxt.return_value = exchange
+        callback = AsyncMock(side_effect=RuntimeError("subscriber failed"))
+        service = MarketDataService("api-key", "secret", "passphrase")
+        service._current_time = lambda: 1700000060
+        service.subscribe("BTC-USDT-SWAP", "1m", callback)
+
+        with pytest.raises(_CallbackDispatchError):
+            await service._poll_once("BTC-USDT-SWAP", "1m")
+
+    health = service.get_feed_health("BTC-USDT-SWAP", "1m")
+    assert health.status != "ready"
+    assert health.error_code is not None
+    assert health.success_generation in (None, 0)
+    assert service.get_recent_bars("BTC-USDT-SWAP", "1m") == []
+
+
+@pytest.mark.asyncio
+async def test_wait_until_ready_can_require_successful_subscriber_delivery():
+    with patch("src.market.service.create_okx_client") as ccxt:
+        exchange = AsyncMock()
+        exchange.fetch_ohlcv.return_value = [[1700000000000, 50000, 51000, 49000, 50500, 100.5]]
+        exchange.watch_ohlcv.return_value = exchange.fetch_ohlcv.return_value
+        ccxt.return_value = exchange
+        callback = AsyncMock(side_effect=RuntimeError("subscriber failed"))
+        service = MarketDataService("api-key", "secret", "passphrase")
+        service._current_time = lambda: 1700000060
+        service.subscribe("BTC-USDT-SWAP", "1m", callback)
+        with pytest.raises(_CallbackDispatchError):
+            await service._poll_once("BTC-USDT-SWAP", "1m")
+
+        with pytest.raises(TimeoutError):
+            await service.wait_until_ready(
+                "BTC-USDT-SWAP", "1m", timeout=0.001, require_subscribers=True
+            )

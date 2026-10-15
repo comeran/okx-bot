@@ -8,8 +8,8 @@ const mocks = vi.hoisted(() => ({
   useWebSocket: vi.fn(),
   connect: vi.fn(),
   disconnect: vi.fn(),
-  websocketOptions: null as null | { onMessage?: (message: object) => void },
-  websocketPath: '',
+  websocketOptions: [] as Array<{ onMessage?: (message: object) => void }>,
+  websocketPaths: [] as string[],
   addWebSocketMessage: vi.fn(),
   applyWebSocketMessage: vi.fn(),
   setWebSocketConnected: vi.fn(),
@@ -71,11 +71,11 @@ describe('App shell', () => {
     mocks.addWebSocketMessage.mockReset();
     mocks.applyWebSocketMessage.mockReset();
     mocks.setWebSocketConnected.mockReset();
-    mocks.websocketOptions = null;
-    mocks.websocketPath = '';
+    mocks.websocketOptions = [];
+    mocks.websocketPaths = [];
     mocks.useWebSocket.mockImplementation((path: string, options: { onMessage?: (message: object) => void }) => {
-      mocks.websocketPath = path;
-      mocks.websocketOptions = options;
+      mocks.websocketPaths.push(path);
+      mocks.websocketOptions.push(options);
       const socket = {
         connected: ref(false),
         messages: ref([]),
@@ -102,30 +102,40 @@ describe('App shell', () => {
     wrapper.unmount();
   });
 
-  it('owns one websocket connection and forwards each message to both stores', async () => {
+  it('owns separate exchange and wildcard strategy connections with scoped message routing', async () => {
     const wrapper = await mountApp();
 
-    expect(mocks.useWebSocket).toHaveBeenCalledTimes(1);
-    expect(mocks.websocketPath).toBe('/ws');
-    expect(mocks.connect).toHaveBeenCalledTimes(1);
+    expect(mocks.useWebSocket).toHaveBeenCalledTimes(2);
+    expect(mocks.websocketPaths).toEqual([
+      '/ws?scope=exchange',
+      '/ws?scope=strategy&strategy=*',
+    ]);
+    expect(mocks.connect).toHaveBeenCalledTimes(2);
     expect(wrapper.find((node) => node.type === 'router-view')).toBeTruthy();
 
-    const message = { type: 'strategy_status', strategy: 'desk:btc', status: 'running' };
-    mocks.websocketOptions?.onMessage?.(message);
-    expect(mocks.addWebSocketMessage).toHaveBeenCalledWith(message);
-    expect(mocks.applyWebSocketMessage).toHaveBeenCalledWith(message);
-    expect(mocks.addWebSocketMessage.mock.calls[0][0]).toBe(message);
-    expect(mocks.applyWebSocketMessage.mock.calls[0][0]).toBe(message);
+    const exchangeMessage = { type: 'account', scope: 'exchange', account: { equity: 100, daily_pnl: 0 } };
+    mocks.websocketOptions[0]?.onMessage?.(exchangeMessage);
+    expect(mocks.addWebSocketMessage).toHaveBeenCalledWith(exchangeMessage);
+    expect(mocks.applyWebSocketMessage).not.toHaveBeenCalled();
+
+    const strategyMessage = { type: 'strategy_status', scope: 'strategy', strategy: 'desk:btc', status: 'running' };
+    mocks.websocketOptions[1]?.onMessage?.(strategyMessage);
+    const configMessage = { type: 'strategy_config_updated', scope: 'strategy', strategy: 'desk:btc', config: { name: 'desk:btc' } };
+    mocks.websocketOptions[1]?.onMessage?.(configMessage);
+    expect(mocks.addWebSocketMessage).toHaveBeenNthCalledWith(2, strategyMessage);
+    expect(mocks.addWebSocketMessage).toHaveBeenNthCalledWith(3, configMessage);
+    expect(mocks.applyWebSocketMessage).toHaveBeenNthCalledWith(1, strategyMessage);
+    expect(mocks.applyWebSocketMessage).toHaveBeenNthCalledWith(2, configMessage);
 
     route.path = '/strategies';
     route.fullPath = '/strategies';
     route.name = 'strategies';
     await wrapper.flush();
-    expect(mocks.useWebSocket).toHaveBeenCalledTimes(1);
-    expect(mocks.connect).toHaveBeenCalledTimes(1);
+    expect(mocks.useWebSocket).toHaveBeenCalledTimes(2);
+    expect(mocks.connect).toHaveBeenCalledTimes(2);
 
     wrapper.unmount();
-    expect(mocks.disconnect).toHaveBeenCalledTimes(1);
+    expect(mocks.disconnect).toHaveBeenCalledTimes(2);
   });
 
   it('switches locale without changing the current route', async () => {

@@ -2682,3 +2682,40 @@ async def test_simultaneous_feed_worker_shutdown_owners_do_not_deadlock_cleanup(
         if cleanup_task is not None and not cleanup_task.done():
             cleanup_task.cancel()
             await asyncio.gather(cleanup_task, return_exceptions=True)
+
+
+async def test_engine_releases_native_market_data_lease_on_stop():
+    class NativeLease:
+        def __init__(self, service, task):
+            self.service = service
+            self.task = task
+
+        async def release(self):
+            self.service.release_count += 1
+            await self.service.stop()
+
+    class NativeMarketDataService(FakeMarketDataService):
+        def __init__(self):
+            super().__init__()
+            self.acquire_count = 0
+            self.release_count = 0
+
+        def ensure_started(self):
+            return asyncio.create_task(self.start())
+
+        def acquire_started(self, *, stop_on_release=True):
+            self.acquire_count += 1
+            return NativeLease(self, asyncio.create_task(self.start()))
+
+    market_data = NativeMarketDataService()
+    engine = BotEngine(
+        [RecordingStrategy("native-lease")],
+        market_data_service=market_data,
+    )
+
+    await engine.start()
+    await engine.stop()
+
+    assert market_data.acquire_count == 1
+    assert market_data.release_count == 1
+    assert market_data.stop_count == 1

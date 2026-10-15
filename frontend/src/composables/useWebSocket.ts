@@ -50,13 +50,16 @@ export function useWebSocket(path = '/ws', options: UseWebSocketOptions = {}) {
       return;
     }
 
-    socket = new WebSocket(resolveWebSocketUrl(path));
+    const currentSocket = new WebSocket(resolveWebSocketUrl(path));
+    socket = currentSocket;
 
-    socket.onopen = () => {
+    currentSocket.onopen = () => {
+      if (socket !== currentSocket) return;
       connected.value = true;
     };
 
-    socket.onclose = () => {
+    currentSocket.onclose = () => {
+      if (socket !== currentSocket) return;
       connected.value = false;
       socket = null;
       if (!manuallyDisconnected) {
@@ -64,11 +67,12 @@ export function useWebSocket(path = '/ws', options: UseWebSocketOptions = {}) {
       }
     };
 
-    socket.onerror = () => {
+    currentSocket.onerror = () => {
+      if (socket !== currentSocket) return;
       connected.value = false;
     };
 
-    socket.onmessage = (event) => {
+    currentSocket.onmessage = (event) => {
       const receivedAt = Date.now();
       try {
         const message = {

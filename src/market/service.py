@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import math
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
@@ -11,11 +10,14 @@ from collections.abc import Awaitable, Callable
 from ccxt.base.errors import NotSupported
 
 from src.core.types import Bar
+from src.exchange.base import safe_ohlcv_bar
+from src.exchange.errors import MalformedProviderData
 from src.exchange.okx_client import (
     OKX_RUNTIME_TIMEFRAME_MILLISECONDS,
     create_okx_client,
 )
 from src.market.health import (
+    MARKET_FEED_DELIVERY_ERROR_CODE,
     MARKET_FEED_ERROR_CODE,
     MARKET_FEED_PUBLIC_MESSAGE,
     HealthListener,
@@ -57,6 +59,25 @@ class _ServiceTaskHandle:
         return self._owner.get_loop()
 
 
+class _ServiceTaskLease:
+    def __init__(
+        self,
+        service: MarketDataService,
+        task: _ServiceTaskHandle,
+        stop_on_release: bool,
+    ) -> None:
+        self.service = service
+        self.task = task
+        self.stop_on_release = stop_on_release
+        self._released = False
+
+    async def release(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        await self.service._release_started_lease(self)
+
+
 class MarketDataService:
     _poll_interval_seconds = 1
     _max_retry_delay_seconds = 8
@@ -81,6 +102,7 @@ class MarketDataService:
         self._subscriptions: dict[str, list[BarCallback]] = {}
         self._buffers: dict[str, deque[Bar]] = {}
         self._last_bar_timestamps: dict[str, int] = {}
+        self._subscriber_last_bar_timestamps: dict[str, dict[int, int]] = {}
         self._health: dict[str, MarketFeedHealth] = {}
         self._health_conditions: dict[str, asyncio.Condition] = {}
         self._health_listeners: dict[int, HealthListener] = {}
@@ -94,6 +116,8 @@ class MarketDataService:
         self._lifecycle_lock = asyncio.Lock()
         self._stopping = False
         self._shutdown_task: asyncio.Task[None] | None = None
+        self._started_leases: set[_ServiceTaskLease] = set()
+        self._keep_started = False
 
     def _create_exchange(self):
         return create_okx_client(
@@ -302,6 +326,25 @@ class MarketDataService:
     async def _record_failure(self, key: str, symbol: str, timeframe: str) -> None:
         await self._publish_health(self._failure_health_snapshot(key, symbol, timeframe))
 
+    async def _record_delivery_failure(self, key: str, symbol: str, timeframe: str) -> None:
+        previous = self._ensure_health(symbol, timeframe, key=key)
+        await self._publish_health(MarketFeedHealth(
+            key=key,
+            symbol=symbol,
+            timeframe=timeframe,
+            status="degraded" if previous.buffered_bars else "pending",
+            buffered_bars=self._buffered_bars(key),
+            consecutive_failures=0,
+            total_failures=previous.total_failures,
+            last_success_at=previous.last_success_at,
+            last_failure_at=self._current_time(),
+            last_bar_timestamp=self._last_bar_timestamp(key, previous.last_bar_timestamp),
+            error_code=MARKET_FEED_DELIVERY_ERROR_CODE,
+            public_message=MARKET_FEED_PUBLIC_MESSAGE,
+            generation=previous.generation + 1,
+            success_generation=previous.success_generation,
+        ))
+
     def _validate_subscription_notification_loop(self) -> None:
         if self._loop is None:
             return
@@ -319,6 +362,9 @@ class MarketDataService:
         callbacks = self._subscriptions.setdefault(key, [])
         if not any(existing is callback for existing in callbacks):
             callbacks.append(callback)
+            self._subscriber_last_bar_timestamps.setdefault(key, {})[id(callback)] = (
+                self._last_bar_timestamps.get(key, 0)
+            )
         self._ensure_feed_state(key)
         self._ensure_health(symbol, timeframe, key=key)
         if self._subscriptions_changed is not None:
@@ -331,8 +377,11 @@ class MarketDataService:
         if callbacks is None:
             return
         self._subscriptions[key] = [existing for existing in callbacks if existing is not callback]
+        subscriber_state = self._subscriber_last_bar_timestamps.get(key, {})
+        subscriber_state.pop(id(callback), None)
         if not self._subscriptions[key]:
             self._subscriptions.pop(key)
+            self._subscriber_last_bar_timestamps.pop(key, None)
         if self._subscriptions_changed is not None:
             self._subscriptions_changed.set()
 
@@ -363,6 +412,7 @@ class MarketDataService:
         *,
         timeout: float = 10,
         min_bars: int = 1,
+        require_subscribers: bool = False,
     ) -> MarketFeedHealth:
         self._timeframe_milliseconds(timeframe)
         loop = self._bind_running_loop()
@@ -380,6 +430,14 @@ class MarketDataService:
                     and health.error_code is None
                     and health.buffered_bars >= min_bars
                     and self._is_fresh_bar(health.last_bar_timestamp, timeframe)
+                    and (
+                        not require_subscribers
+                        or all(
+                            self._subscriber_last_bar_timestamps.get(key, {}).get(id(callback), 0)
+                            >= (health.last_bar_timestamp or 0)
+                            for callback in self._subscriptions.get(key, [])
+                        )
+                    )
                 ):
                     return health
                 remaining = deadline - loop.time()
@@ -417,63 +475,70 @@ class MarketDataService:
 
         callback_errors: list[Exception] = []
         try:
+            try:
+                rows = list(rows)
+            except TypeError:
+                raise
             parsed_bars: list[Bar] = []
             for row in rows:
-                if len(row) != 6:
-                    raise ValueError("OHLCV row must contain exactly 6 values")
-                timestamp = int(row[0])
-                open_price = float(row[1])
-                high = float(row[2])
-                low = float(row[3])
-                close = float(row[4])
-                volume = float(row[5])
-                if not all(
-                    math.isfinite(value) for value in (open_price, high, low, close, volume)
-                ):
-                    raise ValueError("OHLCV values must be finite")
-                parsed_bars.append(
-                    Bar(
-                        timestamp=timestamp,
-                        open=open_price,
-                        high=high,
-                        low=low,
-                        close=close,
-                        volume=volume,
-                    )
-                )
+                if not isinstance(row, (list, tuple)) or len(row) < 6:
+                    logger.warning("Skipping invalid OHLCV row for %s: %r", key, row)
+                    raise MalformedProviderData(f"Malformed OHLCV batch for {key}")
+                bar = safe_ohlcv_bar(row)
+                if bar is None:
+                    logger.warning("Skipping invalid OHLCV row for %s: %r", key, row)
+                    raise MalformedProviderData(f"Malformed OHLCV batch for {key}")
+                parsed_bars.append(bar)
 
+            parsed_bars.sort(key=lambda bar: bar.timestamp)
             for bar in parsed_bars:
                 if bar.timestamp <= self._last_bar_timestamps.get(key, 0):
                     continue
                 if not self._is_closed_bar(bar.timestamp, timeframe):
                     continue
-                self._last_bar_timestamps[key] = bar.timestamp
-                self._ensure_feed_state(key).append(bar)
-                for callback in list(self._subscriptions.get(key, [])):
+                bar_callback_errors: list[Exception] = []
+                callbacks = list(self._subscriptions.get(key, []))
+                subscriber_state = self._subscriber_last_bar_timestamps.setdefault(key, {})
+                for callback in callbacks:
                     if not any(
                         existing is callback for existing in self._subscriptions.get(key, [])
                     ):
+                        continue
+                    if subscriber_state.get(id(callback), 0) >= bar.timestamp:
                         continue
                     try:
                         await callback(bar)
                     except asyncio.CancelledError:
                         raise
                     except Exception as exc:
-                        callback_errors.append(exc)
+                        bar_callback_errors.append(exc)
+                    else:
+                        subscriber_state[id(callback)] = bar.timestamp
+                if bar_callback_errors:
+                    callback_errors.extend(bar_callback_errors)
+                    break
+                active_callbacks = self._subscriptions.get(key, [])
+                if not active_callbacks or all(
+                    subscriber_state.get(id(callback), 0) >= bar.timestamp
+                    for callback in active_callbacks
+                ):
+                    self._last_bar_timestamps[key] = bar.timestamp
+                    self._ensure_feed_state(key).append(bar)
         except asyncio.CancelledError:
             raise
         except Exception:
             await self._record_failure(key, symbol, timeframe)
             raise
 
-        await self._record_success(key, symbol, timeframe)
         if callback_errors:
+            await self._record_delivery_failure(key, symbol, timeframe)
             callback_error = _CallbackDispatchError(callback_errors[0], callback_errors)
             if len(callback_errors) == 1:
                 raise callback_error from callback_errors[0]
             raise callback_error from ExceptionGroup(
                 "Subscriber callback failures", callback_errors
             )
+        await self._record_success(key, symbol, timeframe)
 
     def ensure_started(self) -> _ServiceTaskHandle:
         loop = asyncio.get_running_loop()
@@ -493,6 +558,20 @@ class MarketDataService:
         handle = _ServiceTaskHandle(task)
         self._service_handle = handle
         return handle
+
+    def acquire_started(self, *, stop_on_release: bool = True) -> _ServiceTaskLease:
+        lease = _ServiceTaskLease(self, self.ensure_started(), stop_on_release)
+        self._started_leases.add(lease)
+        if not stop_on_release:
+            self._keep_started = True
+        return lease
+
+    async def _release_started_lease(self, lease: _ServiceTaskLease) -> None:
+        if lease not in self._started_leases:
+            return
+        self._started_leases.remove(lease)
+        if not self._started_leases and not self._keep_started:
+            await self.stop()
 
     async def _poll_feed(self, key: str, started: asyncio.Event) -> None:
         first_poll = True
@@ -655,3 +734,5 @@ class MarketDataService:
             finally:
                 self._shutdown_task = None
                 self._stopping = False
+                self._started_leases.clear()
+                self._keep_started = False

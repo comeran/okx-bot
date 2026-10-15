@@ -28,4 +28,5 @@ class MarketFeedHealth:
 HealthListener = Callable[[MarketFeedHealth], None]
 
 MARKET_FEED_ERROR_CODE = "market_feed_poll_failed"
+MARKET_FEED_DELIVERY_ERROR_CODE = "market_feed_subscriber_delivery_failed"
 MARKET_FEED_PUBLIC_MESSAGE = "Market data feed is temporarily unavailable. Please retry shortly."

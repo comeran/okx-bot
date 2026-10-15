@@ -45,6 +45,8 @@ def save_cached(repo: Repository, timestamp: int) -> None:
             low=float(timestamp - 1),
             close=float(timestamp),
             volume=1.0,
+            source="backtest",
+            runtime_mode="backtest",
         )
     )
 
@@ -54,7 +56,7 @@ def bar(timestamp: int) -> Bar:
         timestamp=timestamp,
         open=float(timestamp),
         high=float(timestamp + 1),
-        low=float(timestamp - 1),
+        low=float(max(0, timestamp - 1)),
         close=float(timestamp),
         volume=1.0,
     )
@@ -98,7 +100,10 @@ async def test_ensure_historical_bars_fetches_missing_range_and_persists(repo: R
     assert [item.timestamp for item in bars] == [0, 60_000, 120_000, 180_000]
     assert adapter.calls == [{"symbol": "BTC-USDT", "timeframe": "1m", "limit": 2, "since": 60_000}]
     assert adapter.closed is True
-    assert [kline.timestamp for kline in repo.get_klines("BTC-USDT", "1m", 0, 180_000)] == [
+    assert [kline.timestamp for kline in repo.get_klines(
+        "BTC-USDT", "1m", 0, 180_000,
+        source="backtest", runtime_mode="backtest",
+    )] == [
         0,
         60_000,
         120_000,
@@ -127,7 +132,10 @@ async def test_ensure_historical_bars_fetches_disjoint_missing_ranges(repo: Repo
         {"symbol": "BTC-USDT", "timeframe": "1m", "limit": 1, "since": 60_000},
         {"symbol": "BTC-USDT", "timeframe": "1m", "limit": 1, "since": 180_000},
     ]
-    assert [kline.timestamp for kline in repo.get_klines("BTC-USDT", "1m", 0, 240_000)] == [
+    assert [kline.timestamp for kline in repo.get_klines(
+        "BTC-USDT", "1m", 0, 240_000,
+        source="backtest", runtime_mode="backtest",
+    )] == [
         0,
         60_000,
         120_000,
@@ -261,4 +269,7 @@ async def test_ensure_historical_bars_raises_when_missing_rows_remain_after_fetc
         )
 
     assert adapter.closed is True
-    assert repo.get_klines("BTC-USDT", "1m", 0, 180_000) == []
+    assert repo.get_klines(
+        "BTC-USDT", "1m", 0, 180_000,
+        source="backtest", runtime_mode="backtest",
+    ) == []

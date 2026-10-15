@@ -36,6 +36,71 @@ const usdtAsset = {
 };
 
 describe('dashboard store', () => {
+  it('applies exchange-scoped websocket state globally but does not apply strategy scope', () => {
+    const dashboard = useDashboardStore();
+    dashboard.account = { equity: 100, daily_pnl: 0 };
+    dashboard.positions = [{ strategy: '__exchange__', symbol: 'BTC-USDT', amount: 1 }];
+
+    dashboard.applyWebSocketMessage({
+      type: 'account',
+      scope: 'strategy',
+      strategy: 'alpha',
+      account: { equity: 999, daily_pnl: 99 },
+    } as never);
+    dashboard.applyWebSocketMessage({
+      type: 'positions',
+      scope: 'strategy',
+      strategy: 'alpha',
+      positions: [{ strategy: 'alpha', symbol: 'ETH-USDT', amount: 2 }],
+    } as never);
+
+    expect(dashboard.account?.equity).toBe(100);
+    expect(dashboard.positions).toEqual([{ strategy: '__exchange__', symbol: 'BTC-USDT', amount: 1 }]);
+
+    dashboard.applyWebSocketMessage({
+      type: 'account',
+      scope: 'exchange',
+      strategy: '__exchange__',
+      account: { equity: 200, daily_pnl: 2 },
+    } as never);
+    dashboard.applyWebSocketMessage({
+      type: 'positions',
+      scope: 'exchange',
+      strategy: '__exchange__',
+      positions: [{ strategy: '__exchange__', symbol: 'SOL-USDT', amount: 3 }],
+    } as never);
+
+    expect(dashboard.account?.equity).toBe(200);
+    expect(dashboard.positions).toEqual([{ strategy: '__exchange__', symbol: 'SOL-USDT', amount: 3 }]);
+  });
+
+  it('does not treat legacy unscoped local websocket snapshots as global state', () => {
+    const dashboard = useDashboardStore();
+    dashboard.account = { equity: 100, daily_pnl: 0 };
+    dashboard.positions = [{ strategy: '__exchange__', symbol: 'BTC-USDT', amount: 1 }];
+    dashboard.orders = [{ strategy: '__exchange__', order_id: 'old' }];
+
+    dashboard.applyWebSocketMessage({
+      type: 'account',
+      strategy: 'alpha',
+      account: { equity: 999, daily_pnl: 99 },
+    } as never);
+    dashboard.applyWebSocketMessage({
+      type: 'positions',
+      strategy: 'alpha',
+      positions: [{ strategy: 'alpha', symbol: 'ETH-USDT', amount: 2 }],
+    } as never);
+    dashboard.applyWebSocketMessage({
+      type: 'orders',
+      strategy: 'alpha',
+      orders: [{ strategy: 'alpha', order_id: 'new' }],
+    } as never);
+
+    expect(dashboard.account?.equity).toBe(100);
+    expect(dashboard.positions).toEqual([{ strategy: '__exchange__', symbol: 'BTC-USDT', amount: 1 }]);
+    expect(dashboard.orders).toEqual([{ strategy: '__exchange__', order_id: 'old' }]);
+  });
+
   beforeEach(() => {
     vi.useFakeTimers();
     setActivePinia(createPinia());
@@ -55,7 +120,7 @@ describe('dashboard store', () => {
       }
 
       const responses: Record<string, unknown> = {
-        '/api/trading/account': {
+        '/api/trading/account?scope=exchange': {
           cash_balance: 950,
           equity: 1000,
           realized_pnl: 50,
@@ -63,8 +128,8 @@ describe('dashboard store', () => {
           daily_pnl: 12.5,
           fees_paid: 2.5,
         },
-        '/api/trading/positions': [{ symbol: 'BTC-USDT', amount: 1 }],
-        '/api/trading/orders': [{ order_id: 'order-1', symbol: 'BTC-USDT' }],
+        '/api/trading/positions?scope=exchange': [{ symbol: 'BTC-USDT', amount: 1 }],
+        '/api/trading/orders?scope=exchange': [{ order_id: 'order-1', symbol: 'BTC-USDT' }],
       };
 
       return jsonResponse(responses[url]);
@@ -103,14 +168,14 @@ describe('dashboard store', () => {
     });
     let accountCall = 0;
     const fetchMock = vi.fn((url: string) => {
-      if (url === '/api/trading/account') {
+      if (url === '/api/trading/account?scope=exchange') {
         accountCall += 1;
         return accountCall === 1 ? firstAccount.then(jsonResponse) : secondAccount.then(jsonResponse);
       }
 
       const responses: Record<string, unknown> = {
-        '/api/trading/positions': [],
-        '/api/trading/orders': [],
+        '/api/trading/positions?scope=exchange': [],
+        '/api/trading/orders?scope=exchange': [],
         '/api/market/tickers': [{ symbol: 'BTC-USDT', last: 68000 }],
       };
       return jsonResponse(responses[url]);
@@ -149,7 +214,7 @@ describe('dashboard store', () => {
 
   it('refreshes only the account snapshot when the account overview retries', async () => {
     const fetchMock = vi.fn((url: string) => {
-      if (url !== '/api/trading/account') {
+      if (url !== '/api/trading/account?scope=exchange') {
         throw new Error(`Unexpected fetch: ${url}`);
       }
 
@@ -174,7 +239,7 @@ describe('dashboard store', () => {
     await dashboard.refreshAccountOverview();
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock).toHaveBeenCalledWith('/api/trading/account');
+    expect(fetchMock).toHaveBeenCalledWith('/api/trading/account?scope=exchange');
     expect(mockedFetchStrategyPerformance).not.toHaveBeenCalled();
     expect(dashboard.account).toEqual({
       cash_balance: 1500,
@@ -195,7 +260,7 @@ describe('dashboard store', () => {
 
   it('keeps shared loading, error, and last update untouched during account-only refresh', async () => {
     const fetchMock = vi.fn((url: string) => {
-      if (url !== '/api/trading/account') {
+      if (url !== '/api/trading/account?scope=exchange') {
         throw new Error(`Unexpected fetch: ${url}`);
       }
 
@@ -240,7 +305,7 @@ describe('dashboard store', () => {
     const fullLoadTickers = deferred<unknown>();
     let accountCall = 0;
     const fetchMock = vi.fn((url: string) => {
-      if (url === '/api/trading/account') {
+      if (url === '/api/trading/account?scope=exchange') {
         accountCall += 1;
         return (accountCall === 1 ? accountRefresh.promise : fullLoadAccount.promise).then(jsonResponse);
       }
@@ -250,8 +315,8 @@ describe('dashboard store', () => {
       }
 
       const responses: Record<string, unknown> = {
-        '/api/trading/positions': [{ symbol: 'BTC-USDT', amount: 1 }],
-        '/api/trading/orders': [{ order_id: 'order-1', symbol: 'BTC-USDT' }],
+        '/api/trading/positions?scope=exchange': [{ symbol: 'BTC-USDT', amount: 1 }],
+        '/api/trading/orders?scope=exchange': [{ order_id: 'order-1', symbol: 'BTC-USDT' }],
       };
       return jsonResponse(responses[url]);
     });
@@ -302,7 +367,7 @@ describe('dashboard store', () => {
     const secondAccount = deferred<unknown>();
     let accountCall = 0;
     const fetchMock = vi.fn((url: string) => {
-      if (url !== '/api/trading/account') {
+      if (url !== '/api/trading/account?scope=exchange') {
         throw new Error(`Unexpected fetch: ${url}`);
       }
 
@@ -343,7 +408,7 @@ describe('dashboard store', () => {
 
   it('keeps shared dashboard errors while the account overview refresh succeeds', async () => {
     const fetchMock = vi.fn((url: string) => {
-      if (url !== '/api/trading/account') {
+      if (url !== '/api/trading/account?scope=exchange') {
         throw new Error(`Unexpected fetch: ${url}`);
       }
 
@@ -379,7 +444,7 @@ describe('dashboard store', () => {
 
   it('stores account refresh failures without clearing shared dashboard errors', async () => {
     const fetchMock = vi.fn((url: string) => {
-      if (url !== '/api/trading/account') {
+      if (url !== '/api/trading/account?scope=exchange') {
         throw new Error(`Unexpected fetch: ${url}`);
       }
 
@@ -404,13 +469,13 @@ describe('dashboard store', () => {
       resolveAccount = resolve;
     });
     const fetchMock = vi.fn((url: string) => {
-      if (url === '/api/trading/account') {
+      if (url === '/api/trading/account?scope=exchange') {
         return account.then(jsonResponse);
       }
 
       const responses: Record<string, unknown> = {
-        '/api/trading/positions': [{ symbol: 'BTC-USDT', amount: 1 }],
-        '/api/trading/orders': [{ order_id: 'order-1', symbol: 'BTC-USDT' }],
+        '/api/trading/positions?scope=exchange': [{ symbol: 'BTC-USDT', amount: 1 }],
+        '/api/trading/orders?scope=exchange': [{ order_id: 'order-1', symbol: 'BTC-USDT' }],
         '/api/market/tickers': [{ symbol: 'BTC-USDT', last: 68000 }],
       };
       return jsonResponse(responses[url]);
@@ -449,7 +514,7 @@ describe('dashboard store', () => {
 
     const fetchMock = vi.fn((url: string) => {
       const responses: Record<string, unknown> = {
-        '/api/trading/account': {
+        '/api/trading/account?scope=exchange': {
           cash_balance: 950,
           equity: 1000,
           realized_pnl: 50,
@@ -457,8 +522,8 @@ describe('dashboard store', () => {
           daily_pnl: 12.5,
           fees_paid: 2.5,
         },
-        '/api/trading/positions': [{ symbol: 'BTC-USDT', amount: 1 }],
-        '/api/trading/orders': [{ order_id: 'order-1', symbol: 'BTC-USDT' }],
+        '/api/trading/positions?scope=exchange': [{ symbol: 'BTC-USDT', amount: 1 }],
+        '/api/trading/orders?scope=exchange': [{ order_id: 'order-1', symbol: 'BTC-USDT' }],
         '/api/market/tickers': [{ symbol: 'BTC-USDT', last: 68000 }],
       };
 
@@ -533,7 +598,7 @@ describe('dashboard store', () => {
 
     const fetchMock = vi.fn((url: string) => {
       const responses: Record<string, unknown> = {
-        '/api/trading/account': {
+        '/api/trading/account?scope=exchange': {
           cash_balance: 950,
           equity: 1000,
           realized_pnl: 50,
@@ -541,8 +606,8 @@ describe('dashboard store', () => {
           daily_pnl: 12.5,
           fees_paid: 2.5,
         },
-        '/api/trading/positions': [],
-        '/api/trading/orders': [],
+        '/api/trading/positions?scope=exchange': [],
+        '/api/trading/orders?scope=exchange': [],
         '/api/market/tickers': [],
       };
 
@@ -617,7 +682,7 @@ describe('dashboard store', () => {
 
     const fetchMock = vi.fn((url: string) => {
       const responses: Record<string, unknown> = {
-        '/api/trading/account': {
+        '/api/trading/account?scope=exchange': {
           cash_balance: 950,
           equity: 1000,
           realized_pnl: 50,
@@ -625,8 +690,8 @@ describe('dashboard store', () => {
           daily_pnl: 12.5,
           fees_paid: 2.5,
         },
-        '/api/trading/positions': [{ symbol: 'BTC-USDT', amount: 1 }],
-        '/api/trading/orders': [{ order_id: 'order-1', symbol: 'BTC-USDT' }],
+        '/api/trading/positions?scope=exchange': [{ symbol: 'BTC-USDT', amount: 1 }],
+        '/api/trading/orders?scope=exchange': [{ order_id: 'order-1', symbol: 'BTC-USDT' }],
         '/api/market/tickers': [],
       };
 
@@ -649,7 +714,7 @@ describe('dashboard store', () => {
 
     const fetchMock = vi.fn((url: string) => {
       const responses: Record<string, unknown> = {
-        '/api/trading/account': {
+        '/api/trading/account?scope=exchange': {
           cash_balance: 950,
           equity: 1000,
           realized_pnl: 50,
@@ -657,8 +722,8 @@ describe('dashboard store', () => {
           daily_pnl: 12.5,
           fees_paid: 2.5,
         },
-        '/api/trading/positions': [{ symbol: 'BTC-USDT', amount: 1 }],
-        '/api/trading/orders': [{ order_id: 'order-1', symbol: 'BTC-USDT' }],
+        '/api/trading/positions?scope=exchange': [{ symbol: 'BTC-USDT', amount: 1 }],
+        '/api/trading/orders?scope=exchange': [{ order_id: 'order-1', symbol: 'BTC-USDT' }],
         '/api/market/tickers': [{ symbol: 'BTC-USDT', last: 68000 }],
       };
 
@@ -689,7 +754,7 @@ describe('dashboard store', () => {
   it('coalesces burst websocket updates into one strategy performance refresh', async () => {
     const fetchMock = vi.fn((url: string) => {
       const responses: Record<string, unknown> = {
-        '/api/trading/account': {
+        '/api/trading/account?scope=exchange': {
           cash_balance: 950,
           equity: 1000,
           realized_pnl: 50,
@@ -697,8 +762,8 @@ describe('dashboard store', () => {
           daily_pnl: 12.5,
           fees_paid: 2.5,
         },
-        '/api/trading/positions': [],
-        '/api/trading/orders': [],
+        '/api/trading/positions?scope=exchange': [],
+        '/api/trading/orders?scope=exchange': [],
         '/api/market/tickers': [],
       };
 
@@ -763,7 +828,7 @@ describe('dashboard store', () => {
   it('preserves assets from initial account API load', async () => {
     const fetchMock = vi.fn((url: string) => {
       const responses: Record<string, unknown> = {
-        '/api/trading/account': {
+        '/api/trading/account?scope=exchange': {
           cash_balance: 100,
           equity: 100,
           realized_pnl: 0,
@@ -773,8 +838,8 @@ describe('dashboard store', () => {
           available_balance: 90,
           assets: [usdtAsset],
         },
-        '/api/trading/positions': [],
-        '/api/trading/orders': [],
+        '/api/trading/positions?scope=exchange': [],
+        '/api/trading/orders?scope=exchange': [],
         '/api/market/tickers': [],
       };
 
@@ -793,7 +858,7 @@ describe('dashboard store', () => {
   it('retains zero-valued account API load when assets are present', async () => {
     const fetchMock = vi.fn((url: string) => {
       const responses: Record<string, unknown> = {
-        '/api/trading/account': {
+        '/api/trading/account?scope=exchange': {
           cash_balance: 0,
           equity: 0,
           realized_pnl: 0,
@@ -802,8 +867,8 @@ describe('dashboard store', () => {
           fees_paid: 0,
           assets: [usdtAsset],
         },
-        '/api/trading/positions': [],
-        '/api/trading/orders': [],
+        '/api/trading/positions?scope=exchange': [],
+        '/api/trading/orders?scope=exchange': [],
         '/api/market/tickers': [],
       };
 
@@ -831,6 +896,7 @@ describe('dashboard store', () => {
 
     dashboard.addWebSocketMessage({
       type: 'account',
+      scope: 'exchange',
       account: {
         cash_balance: 100,
         equity: 100,
@@ -850,6 +916,7 @@ describe('dashboard store', () => {
 
     dashboard.addWebSocketMessage({
       type: 'snapshot',
+      scope: 'exchange',
       data: {
         account: {
           cash_balance: 100,
@@ -872,7 +939,7 @@ describe('dashboard store', () => {
   it('treats all-zero account responses without runtime rows as missing account state', async () => {
     const fetchMock = vi.fn((url: string) => {
       const responses: Record<string, unknown> = {
-        '/api/trading/account': {
+        '/api/trading/account?scope=exchange': {
           cash_balance: 0,
           equity: 0,
           realized_pnl: 0,
@@ -880,8 +947,8 @@ describe('dashboard store', () => {
           daily_pnl: 0,
           fees_paid: 0,
         },
-        '/api/trading/positions': [],
-        '/api/trading/orders': [],
+        '/api/trading/positions?scope=exchange': [],
+        '/api/trading/orders?scope=exchange': [],
         '/api/market/tickers': [],
       };
 
@@ -902,7 +969,7 @@ describe('dashboard store', () => {
   it('retains otherwise zero account responses when available balance is non-zero', async () => {
     const fetchMock = vi.fn((url: string) => {
       const responses: Record<string, unknown> = {
-        '/api/trading/account': {
+        '/api/trading/account?scope=exchange': {
           cash_balance: 0,
           available_balance: 25,
           equity: 0,
@@ -911,8 +978,8 @@ describe('dashboard store', () => {
           daily_pnl: 0,
           fees_paid: 0,
         },
-        '/api/trading/positions': [],
-        '/api/trading/orders': [],
+        '/api/trading/positions?scope=exchange': [],
+        '/api/trading/orders?scope=exchange': [],
         '/api/market/tickers': [],
       };
 
@@ -938,7 +1005,7 @@ describe('dashboard store', () => {
   it('keeps rejected orders while treating all-zero account responses as missing account state', async () => {
     const fetchMock = vi.fn((url: string) => {
       const responses: Record<string, unknown> = {
-        '/api/trading/account': {
+        '/api/trading/account?scope=exchange': {
           cash_balance: 0,
           equity: 0,
           realized_pnl: 0,
@@ -946,8 +1013,8 @@ describe('dashboard store', () => {
           daily_pnl: 0,
           fees_paid: 0,
         },
-        '/api/trading/positions': [],
-        '/api/trading/orders': [{ order_id: 'risk-1', status: 'rejected' }],
+        '/api/trading/positions?scope=exchange': [],
+        '/api/trading/orders?scope=exchange': [{ order_id: 'risk-1', status: 'rejected' }],
         '/api/market/tickers': [],
       };
 
@@ -966,7 +1033,7 @@ describe('dashboard store', () => {
   it('loads public market tickers with the dashboard snapshot data', async () => {
     const fetchMock = vi.fn((url: string) => {
       const responses: Record<string, unknown> = {
-        '/api/trading/account': {
+        '/api/trading/account?scope=exchange': {
           cash_balance: 950,
           equity: 1000,
           realized_pnl: 50,
@@ -974,8 +1041,8 @@ describe('dashboard store', () => {
           daily_pnl: 12.5,
           fees_paid: 2.5,
         },
-        '/api/trading/positions': [],
-        '/api/trading/orders': [],
+        '/api/trading/positions?scope=exchange': [],
+        '/api/trading/orders?scope=exchange': [],
         '/api/market/tickers': [
           { symbol: 'BTC-USDT', last: 68000, bidPx: 67999.5, askPx: 68000.5, vol24h: 123.45 },
         ],

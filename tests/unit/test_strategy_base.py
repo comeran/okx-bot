@@ -45,6 +45,31 @@ async def test_strategy_buy_requires_order_manager() -> None:
         await strategy.on_bar(make_bar(close=50001))
 
 
+def test_strategy_reads_each_hedged_position_by_side_without_hiding_one_direction() -> None:
+    long = object()
+    short = object()
+
+    class Manager:
+        def get_positions(self, strategy: str, symbol: str):
+            assert (strategy, symbol) == ("dummy", "BTC-USDT")
+            return [long, short]
+
+        def get_position(self, strategy: str, symbol: str, side: str | None = None):
+            positions = self.get_positions(strategy, symbol)
+            expected = long if side == "long" else short
+            return next(
+                (position for position in positions if position is expected),
+                None,
+            )
+
+    strategy = DummyStrategy()
+    strategy.set_order_manager(Manager())
+
+    assert strategy.get_positions("BTC-USDT") == [long, short]
+    assert strategy.get_position("BTC-USDT", side="long") is long
+    assert strategy.get_position("BTC-USDT", side="short") is short
+
+
 async def test_strategy_cancel_forwards_symbol() -> None:
     class Manager:
         def __init__(self) -> None:

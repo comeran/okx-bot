@@ -96,7 +96,7 @@ class BotEngine:
         self._pending_bars: dict[str, list[Bar]] = {}
         self._last_processed_timestamps: dict[str, int] = {}
         self._market_data_task: Any | None = None
-        self._market_data_lease: _LegacyMarketDataLease | None = None
+        self._market_data_lease: Any | None = None
         self._owns_market_data_task = False
         self._has_market_data_subscription = False
         self._market_data_subscriptions: dict[str, tuple[str, str, Any]] = {}
@@ -634,6 +634,14 @@ class BotEngine:
             return None
         self._market_data_lease = None
         self._owns_market_data_task = False
+        release = getattr(lease, "release", None)
+        if callable(release):
+            try:
+                await release()
+            except BaseException as exc:
+                self._record_cleanup_error(exc)
+                return exc
+            return None
 
         cached_runtime = None
         for runtime in self._legacy_market_data_tasks:
@@ -680,6 +688,12 @@ class BotEngine:
     async def _ensure_market_data_started(self) -> Any:
         if self.market_data_service is None:
             return None
+        acquire_started = getattr(self.market_data_service, "acquire_started", None)
+        if callable(acquire_started):
+            lease = acquire_started(stop_on_release=self.stop_market_data_on_stop)
+            self._market_data_lease = lease
+            self._owns_market_data_task = True
+            return lease.task
         ensure_started = getattr(self.market_data_service, "ensure_started", None)
         if ensure_started is not None:
             self._market_data_lease = None
