@@ -104,6 +104,10 @@ class StrategyParameterDefinition:
             result["default"] = self.default
         result["minimum"] = self.minimum
         result["maximum"] = self.maximum
+        if self.exclusive_min:
+            result["exclusive_min"] = True
+        if self.exclusive_max:
+            result["exclusive_max"] = True
         if self.step is not None:
             result["step"] = self.step
         return result

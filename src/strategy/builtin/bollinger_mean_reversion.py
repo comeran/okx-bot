@@ -32,6 +32,9 @@ class BollingerMeanReversionStrategy(BaseStrategy):
         self.amount = float(amount)
         self._closes: list[float] = []
 
+    def required_warmup_bars(self) -> int:
+        return self.window
+
     async def on_bar(self, bar: Bar) -> None:
         self._closes.append(bar.close)
         self._closes = self._closes[-(self.window + 1) :]

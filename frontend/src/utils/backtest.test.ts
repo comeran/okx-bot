@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest';
 
-import { getBacktestApiErrorMessage, getBacktestValidationError } from './backtest';
+import {
+  EMPTY_BACKTEST_VALUE,
+  formatBacktestNumber,
+  formatBacktestPercent,
+  formatBacktestTime,
+  formatBacktestTimestamp,
+  getBacktestApiErrorMessage,
+  getBacktestValidationError,
+} from './backtest';
 
 function axiosErrorWithDetail(detail?: unknown): unknown {
   return {
@@ -77,5 +85,22 @@ describe('backtest validation', () => {
         100000,
       ),
     ).toBeNull();
+  });
+});
+
+describe('backtest formatting', () => {
+  it('formats numbers and percentages without fabricating missing values', () => {
+    expect(formatBacktestNumber(1234.5678)).toBe('1,234.57');
+    expect(formatBacktestPercent(0.1234)).toBe('12.34%');
+    expect(formatBacktestNumber(undefined)).toBe(EMPTY_BACKTEST_VALUE);
+    expect(formatBacktestPercent(null)).toBe(EMPTY_BACKTEST_VALUE);
+  });
+
+  it('formats timestamps with an explicit locale and preserves an empty placeholder for invalid values', () => {
+    const timestamp = new Date('2026-01-02T03:04:05Z').getTime();
+    expect(formatBacktestTime(timestamp, 'en')).toBe(new Date(timestamp).toLocaleString('en'));
+    expect(formatBacktestTime(timestamp, 'zh-CN')).toBe(new Date(timestamp).toLocaleString('zh-CN'));
+    expect(formatBacktestTimestamp(timestamp)).toBe(new Date(timestamp).toLocaleString('en'));
+    expect(formatBacktestTimestamp(Number.NaN)).toBe(EMPTY_BACKTEST_VALUE);
   });
 });

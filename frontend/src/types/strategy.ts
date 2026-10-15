@@ -13,6 +13,8 @@ export interface StrategyParameterDefinition {
   default?: StrategyParameterValue;
   minimum: number | null;
   maximum: number | null;
+  exclusive_min?: boolean;
+  exclusive_max?: boolean;
   step?: number;
 }
 
@@ -82,6 +84,7 @@ export interface StrategySnapshot {
 
 interface StrategyMessageBase {
   received_at?: number;
+  scope?: 'strategy';
 }
 
 export interface StrategyStatusWebSocketMessage extends StrategyMessageBase {

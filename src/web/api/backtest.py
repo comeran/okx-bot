@@ -41,10 +41,27 @@ async def run_backtest(req: BacktestRequest) -> dict[str, float | int]:
         raise HTTPException(status_code=422, detail="initial_capital must be greater than 0")
 
     registry = create_strategy_registry()
-    if req.strategy not in registry.list_strategies():
+    repository = Repository()
+    strategy_config = None
+    get_strategy_config = getattr(repository, "get_strategy_config", None)
+    if get_strategy_config is not None:
+        strategy_config = get_strategy_config(req.strategy)
+
+    if strategy_config is not None:
+        if strategy_config.strategy_type not in registry.list_strategies():
+            raise HTTPException(status_code=404, detail="Strategy not found")
+        strategy = registry.create_instance(
+            strategy_config.name,
+            strategy_config.strategy_type,
+            strategy_config.symbol,
+            strategy_config.timeframe,
+            strategy_config.params,
+        )
+    elif req.strategy in registry.list_strategies():
+        strategy = registry.create(req.strategy)
+    else:
         raise HTTPException(status_code=404, detail="Strategy not found")
 
-    repository = Repository()
     try:
         bars = await ensure_historical_bars(
             repo=repository,
@@ -85,7 +102,6 @@ async def run_backtest(req: BacktestRequest) -> dict[str, float | int]:
             detail="insufficient historical data for requested backtest range",
         )
 
-    strategy = registry.create(req.strategy)
     if hasattr(strategy, "symbol"):
         strategy.symbol = req.symbol
 
@@ -146,16 +162,45 @@ async def get_result_detail(result_id: str) -> dict[str, list[dict] | dict]:
     if result is None:
         raise HTTPException(status_code=404, detail="Backtest result not found")
 
-    klines = repository.get_klines(
-        symbol=result.symbol,
-        timeframe=result.timeframe,
-        start=result.start_time,
-        end=result.end_time,
-    )
+    try:
+        klines = repository.get_klines(
+            symbol=result.symbol,
+            timeframe=result.timeframe,
+            start=result.start_time,
+            end=result.end_time,
+            source="backtest",
+            runtime_mode="backtest",
+        )
+    except TypeError as exc:
+        if "unexpected keyword argument" not in str(exc):
+            raise
+        raise HTTPException(
+            status_code=422,
+            detail="repository does not support scoped backtest kline queries",
+        ) from exc
+    klines = [
+        kline
+        for kline in klines
+        if getattr(kline, "source", "unknown") == "backtest"
+        and getattr(kline, "runtime_mode", "unknown") == "backtest"
+    ]
     markers = repository.get_backtest_trades(result_id)
     return {
         "result": result.model_dump(),
-        "klines": [kline.model_dump() for kline in klines],
+        "klines": [
+            {
+                **{
+                    field: getattr(kline, field)
+                    for field in (
+                        "id", "symbol", "timeframe", "timestamp", "open", "high",
+                        "low", "close", "volume",
+                    )
+                },
+                "source": "backtest",
+                "runtime_mode": "backtest",
+            }
+            for kline in klines
+        ],
         "markers": [marker.model_dump() for marker in markers],
     }
 

@@ -1,453 +1,256 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import * as echarts from 'echarts/core';
-import { PieChart } from 'echarts/charts';
-import { LegendComponent, TooltipComponent } from 'echarts/components';
-import { CanvasRenderer } from 'echarts/renderers';
-import type { PieSeriesOption } from 'echarts/charts';
-import type { ComposeOption, ECharts } from 'echarts/core';
-import type { LegendComponentOption, TooltipComponentOption } from 'echarts/components';
+import { computed, onMounted } from 'vue';
 import { useI18n } from 'vue-i18n';
+import { CircleCheckFilled, CircleCloseFilled } from '@element-plus/icons-vue';
 
+import AccountOverview from '@/components/dashboard/AccountOverview.vue';
+import DashboardActivity from '@/components/dashboard/DashboardActivity.vue';
+import StrategyPerformanceTable from '@/components/dashboard/StrategyPerformanceTable.vue';
+import AppPageHeader from '@/components/ui/AppPageHeader.vue';
+import MetricCard from '@/components/ui/MetricCard.vue';
+import StatusBadge from '@/components/ui/StatusBadge.vue';
 import { useDashboardStore } from '@/stores/dashboard';
 import { useStrategiesStore } from '@/stores/strategies';
-import type { AssetBalance } from '@/types/dashboard';
-import {
-  formatRuntimeCurrency,
-  formatRuntimeNumber,
-  formatRuntimePayloadPreview,
-  formatRuntimeText,
-  formatRuntimeTime,
-  formatTickerPrice,
-  getDashboardStrategyStatusTagType,
-} from '@/utils/dashboard';
+import { formatRuntimeCurrency, formatRuntimeTime } from '@/utils/dashboard';
+import { enrichStrategyPerformanceRows } from '@/utils/strategyPerformance';
 
-echarts.use([CanvasRenderer, LegendComponent, PieChart, TooltipComponent]);
-
-type AccountAllocationOption = ComposeOption<
-  LegendComponentOption | PieSeriesOption | TooltipComponentOption
->;
-
-type AssetAllocationRow = AssetBalance & {
-  allocationShare: number;
-};
-
-const { t } = useI18n();
+const { t, locale } = useI18n();
 const dashboard = useDashboardStore();
 const strategies = useStrategiesStore();
 
 const latestMessages = computed(() => dashboard.websocketMessages.slice(0, 5));
-const lastUpdatedText = computed(() => formatRuntimeTime(dashboard.lastUpdatedAt ?? undefined));
-const accountAllocationChartRef = ref<HTMLDivElement | null>(null);
-let accountAllocationChart: ECharts | null = null;
+const recentOrders = computed(() => dashboard.orders.slice(0, 20));
+const strategyPerformanceRows = computed(() => enrichStrategyPerformanceRows(
+  strategies.runtimeSummaries,
+  dashboard.strategyPerformance,
+  dashboard.positions,
+  dashboard.orders,
+));
+const lastUpdatedText = computed(() => formatRuntimeTime(dashboard.lastUpdatedAt ?? undefined, locale.value));
+const headerLoading = computed(() => dashboard.loading || strategies.loadingInitial);
 
-const positiveAccountAssets = computed(() => (
-  dashboard.account?.assets?.filter((asset) => asset.eq_utd > 0) ?? []
+const accountOverviewHasVisibleData = computed(() => (dashboard.account?.assets?.length ?? 0) > 0);
+const dashboardVisibleData = computed(() => (
+  dashboard.account !== null
+  || dashboard.positions.length > 0
+  || dashboard.orders.length > 0
+  || dashboard.tickers.length > 0
 ));
-const accountAllocationTotal = computed(() => (
-  positiveAccountAssets.value.reduce((sum, asset) => sum + asset.eq_utd, 0)
+const accountOverviewError = computed(() => dashboard.accountError ?? dashboard.error);
+const accountOverviewStale = computed(() => Boolean(accountOverviewHasVisibleData.value && (dashboard.accountError || dashboard.error)));
+const dashboardHasVisibleData = computed(() => (
+  dashboardVisibleData.value
+  || strategyPerformanceRows.value.length > 0
+  || latestMessages.value.length > 0
+  || strategies.runtimeSummaries.length > 0
 ));
-const accountAssetRows = computed<AssetAllocationRow[]>(() => (
-  dashboard.account?.assets?.map((asset) => ({
-    ...asset,
-    allocationShare: asset.eq_utd > 0 && accountAllocationTotal.value > 0
-      ? (asset.eq_utd / accountAllocationTotal.value) * 100
-      : 0,
-  })) ?? []
-));
-const accountAllocationPieData = computed(() => (
-  positiveAccountAssets.value.map((asset) => ({
-    name: asset.ccy,
-    value: asset.eq_utd,
-  }))
-));
-const hasAccountAssets = computed(() => accountAssetRows.value.length > 0);
-const hasAccountAllocationAssets = computed(() => accountAllocationPieData.value.length > 0);
-
-function disposeAccountAllocationChart() {
-  accountAllocationChart?.dispose();
-  accountAllocationChart = null;
+const dashboardErrorTone = computed(() => (dashboardHasVisibleData.value ? 'warning' : 'error'));
+const activityLoading = computed(() => dashboard.loading || strategies.loadingInitial);
+interface DashboardAlert {
+  key: string;
+  title: string;
+  description?: string;
+  type: 'error' | 'warning';
 }
 
-function resizeAccountAllocationChart() {
-  accountAllocationChart?.resize();
-}
+const dashboardStatusAlerts = computed<DashboardAlert[]>(() => {
+  const alerts: DashboardAlert[] = [];
 
-async function updateAccountAllocationChart() {
-  if (!hasAccountAllocationAssets.value) {
-    disposeAccountAllocationChart();
-    return;
+  if (dashboard.error) {
+    alerts.push({
+      key: 'dashboard-error',
+      title: dashboardHasVisibleData.value ? t('common.stale') : dashboard.error,
+      description: dashboardHasVisibleData.value ? dashboard.error : undefined,
+      type: dashboardErrorTone.value,
+    });
   }
 
-  await nextTick();
-  const chartElement = accountAllocationChartRef.value;
-  if (!chartElement) {
-    return;
+  if (dashboard.accountError) {
+    alerts.push({
+      key: 'account-error',
+      title: accountOverviewHasVisibleData.value ? t('common.stale') : dashboard.accountError,
+      description: accountOverviewHasVisibleData.value ? dashboard.accountError : undefined,
+      type: accountOverviewHasVisibleData.value ? 'warning' : 'error',
+    });
   }
 
-  accountAllocationChart = echarts.getInstanceByDom(chartElement) ?? echarts.init(chartElement);
+  if (dashboard.tickerError) {
+    alerts.push({
+      key: 'ticker-error',
+      title: t('dashboard.tickerLoadError'),
+      description: dashboard.tickerError,
+      type: 'warning',
+    });
+  }
 
-  const option: AccountAllocationOption = {
-    tooltip: {
-      trigger: 'item',
-      valueFormatter: (value) => formatRuntimeCurrency(Number(value)),
-    },
-    legend: {
-      bottom: 0,
-      type: 'scroll',
-    },
-    series: [
-      {
-        name: t('dashboard.assetAllocation'),
-        type: 'pie',
-        radius: ['42%', '70%'],
-        center: ['50%', '44%'],
-        avoidLabelOverlap: true,
-        data: accountAllocationPieData.value,
-        label: {
-          formatter: '{b}: {d}%',
-        },
-      },
-    ],
-  };
-
-  accountAllocationChart.setOption(option, true);
-  accountAllocationChart.resize();
-}
-
-watch(
-  accountAllocationPieData,
-  () => {
-    void updateAccountAllocationChart();
-  },
-  { deep: true },
-);
-
-onMounted(() => {
-  void dashboard.loadInitialData();
-  void strategies.loadInitialData();
-  window.addEventListener('resize', resizeAccountAllocationChart);
-  void updateAccountAllocationChart();
+  return alerts;
 });
 
-onBeforeUnmount(() => {
-  window.removeEventListener('resize', resizeAccountAllocationChart);
-  disposeAccountAllocationChart();
+const strategyPerformanceHasVisibleData = computed(() => strategyPerformanceRows.value.length > 0);
+const strategyPerformanceStale = computed(() => Boolean(
+  dashboard.strategyPerformanceError
+  && strategyPerformanceHasVisibleData.value
+  && !dashboard.strategyPerformanceLoading,
+));
+
+function refreshAll() {
+  void Promise.all([
+    dashboard.loadInitialData(),
+    strategies.loadInitialData(),
+  ]);
+}
+
+function retryAccountOverview() {
+  void dashboard.refreshAccountOverview();
+}
+
+function retryStrategyPerformance() {
+  void dashboard.refreshStrategyPerformance();
+}
+
+onMounted(() => {
+  refreshAll();
 });
 </script>
 
 <template>
-  <section>
-    <div class="dashboard-header">
-      <div>
-        <h2>{{ t('dashboard.title') }}</h2>
-        <p class="dashboard-header__meta">
-          {{ t('dashboard.lastUpdated') }}: {{ lastUpdatedText }}
-        </p>
-      </div>
-      <div class="dashboard-header__actions">
-        <el-tag :type="dashboard.websocketConnected ? 'success' : 'danger'">
-          WebSocket {{ dashboard.websocketConnected ? t('common.connected') : t('common.disconnected') }}
-        </el-tag>
-        <el-button :loading="dashboard.loading" @click="dashboard.loadInitialData">
+  <section class="dashboard-view">
+    <AppPageHeader
+      :title="t('dashboard.title')"
+      :description="`${t('dashboard.lastUpdated')}: ${lastUpdatedText}`"
+    >
+      <template #actions>
+        <StatusBadge
+          :status="dashboard.websocketConnected ? t('common.connected') : t('common.disconnected')"
+          :tone="dashboard.websocketConnected ? 'success' : 'danger'"
+          :icon="dashboard.websocketConnected ? CircleCheckFilled : CircleCloseFilled"
+        />
+        <el-button :loading="headerLoading" @click="refreshAll">
           {{ t('common.refresh') }}
         </el-button>
-      </div>
+      </template>
+    </AppPageHeader>
+
+    <div v-if="dashboardStatusAlerts.length" class="dashboard-view__alerts">
+      <el-alert
+        v-for="alert in dashboardStatusAlerts"
+        :key="alert.key"
+        :title="alert.title"
+        :description="alert.description"
+        :type="alert.type"
+        show-icon
+        class="dashboard-view__alert"
+      />
     </div>
 
-    <el-alert
-      v-if="dashboard.error"
-      :title="dashboard.error"
-      type="error"
-      show-icon
-      class="dashboard-alert"
-    />
-
-    <el-row :gutter="16">
+    <el-row :gutter="16" class="dashboard-view__metrics">
       <el-col :xs="24" :sm="12" :lg="4">
-        <el-card shadow="hover" v-loading="dashboard.loading">
-          <template #header>{{ t('dashboard.totalEquity') }}</template>
-          <div class="metric">{{ formatRuntimeCurrency(dashboard.account?.equity) }}</div>
-        </el-card>
+        <MetricCard
+          :label="t('dashboard.equity')"
+          :value="formatRuntimeCurrency(dashboard.account?.equity)"
+          tone="primary"
+          :loading="dashboard.loading"
+        />
       </el-col>
       <el-col :xs="24" :sm="12" :lg="4">
-        <el-card shadow="hover" v-loading="dashboard.loading">
-          <template #header>{{ t('dashboard.cashBalance') }}</template>
-          <div class="metric">{{ formatRuntimeCurrency(dashboard.account?.cash_balance) }}</div>
-        </el-card>
+        <MetricCard
+          :label="t('dashboard.cashBalance')"
+          :value="formatRuntimeCurrency(dashboard.account?.cash_balance)"
+          tone="neutral"
+          :loading="dashboard.loading"
+        />
       </el-col>
       <el-col :xs="24" :sm="12" :lg="4">
-        <el-card shadow="hover" v-loading="dashboard.loading">
-          <template #header>{{ t('dashboard.realizedPnl') }}</template>
-          <div class="metric">{{ formatRuntimeCurrency(dashboard.account?.realized_pnl) }}</div>
-        </el-card>
+        <MetricCard
+          :label="t('dashboard.realizedPnl')"
+          :value="formatRuntimeCurrency(dashboard.account?.realized_pnl)"
+          tone="success"
+          :loading="dashboard.loading"
+        />
       </el-col>
       <el-col :xs="24" :sm="12" :lg="4">
-        <el-card shadow="hover" v-loading="dashboard.loading">
-          <template #header>{{ t('dashboard.dailyPnl') }}</template>
-          <div class="metric">{{ formatRuntimeCurrency(dashboard.account?.daily_pnl) }}</div>
-        </el-card>
+        <MetricCard
+          :label="t('dashboard.dailyPnl')"
+          :value="formatRuntimeCurrency(dashboard.account?.daily_pnl)"
+          tone="warning"
+          :loading="dashboard.loading"
+        />
       </el-col>
       <el-col :xs="24" :sm="12" :lg="4">
-        <el-card shadow="hover" v-loading="dashboard.loading">
-          <template #header>{{ t('dashboard.feesPaid') }}</template>
-          <div class="metric">{{ formatRuntimeCurrency(dashboard.account?.fees_paid) }}</div>
-        </el-card>
+        <MetricCard
+          :label="t('dashboard.feesPaid')"
+          :value="formatRuntimeCurrency(dashboard.account?.fees_paid)"
+          tone="danger"
+          :loading="dashboard.loading"
+        />
       </el-col>
       <el-col :xs="24" :sm="12" :lg="4">
-        <el-card shadow="hover" v-loading="dashboard.loading">
-          <template #header>{{ t('dashboard.activeStrategies') }}</template>
-          <div class="metric">{{ strategies.activeStrategyCount }}</div>
-        </el-card>
+        <MetricCard
+          :label="t('dashboard.activeStrategies')"
+          :value="String(strategies.activeStrategyCount)"
+          tone="primary"
+          :loading="strategies.loadingInitial && strategies.runtimeSummaries.length === 0"
+        />
       </el-col>
     </el-row>
 
-    <el-row :gutter="16" class="dashboard-section">
-      <el-col :span="24">
-        <el-card shadow="never" v-loading="dashboard.loading">
-          <template #header>
-            <div class="account-overview__header">
-              <span>{{ t('dashboard.accountOverview') }}</span>
-              <span class="account-overview__total">
-                {{ t('dashboard.totalEquity') }}: {{ formatRuntimeCurrency(dashboard.account?.equity) }}
-              </span>
-            </div>
-          </template>
-          <el-empty v-if="!hasAccountAssets" :description="t('dashboard.noAssets')" />
-          <el-row v-else :gutter="16" class="account-overview">
-            <el-col :xs="24" :lg="8">
-              <div
-                v-if="hasAccountAllocationAssets"
-                class="account-allocation-chart"
-                ref="accountAllocationChartRef"
-              />
-              <el-empty v-else :description="t('dashboard.noAssets')" />
-            </el-col>
-            <el-col :xs="24" :lg="16">
-              <el-table :data="accountAssetRows" size="small">
-                <el-table-column prop="ccy" :label="t('dashboard.currency')" min-width="90" />
-                <el-table-column :label="t('dashboard.assetCashBalance')" min-width="130">
-                  <template #default="{ row }">{{ formatRuntimeNumber(row.cash_bal) }}</template>
-                </el-table-column>
-                <el-table-column :label="t('dashboard.nativeEquity')" min-width="130">
-                  <template #default="{ row }">{{ formatRuntimeNumber(row.eq) }}</template>
-                </el-table-column>
-                <el-table-column :label="t('dashboard.convertedEquity')" min-width="140">
-                  <template #default="{ row }">{{ formatRuntimeCurrency(row.eq_utd) }}</template>
-                </el-table-column>
-                <el-table-column :label="t('dashboard.unrealizedPnl')" min-width="130">
-                  <template #default="{ row }">{{ formatRuntimeNumber(row.upl) }}</template>
-                </el-table-column>
-                <el-table-column :label="t('dashboard.allocationShare')" min-width="130">
-                  <template #default="{ row }">{{ formatRuntimeNumber(row.allocationShare) }}%</template>
-                </el-table-column>
-              </el-table>
-            </el-col>
-          </el-row>
-        </el-card>
-      </el-col>
-    </el-row>
+    <div class="dashboard-view__section">
+      <AccountOverview
+        :assets="dashboard.account?.assets ?? []"
+        :loading="dashboard.loading || dashboard.accountLoading"
+        :error="dashboard.error"
+        :account-error="dashboard.accountError"
+        :stale="accountOverviewStale"
+        @retry="retryAccountOverview"
+      />
+    </div>
 
-    <el-row :gutter="16" class="dashboard-section">
-      <el-col :span="24">
-        <el-card shadow="never" v-loading="dashboard.loading">
-          <template #header>{{ t('dashboard.marketTickers') }}</template>
-          <el-alert
-            v-if="dashboard.tickerError"
-            :title="t('dashboard.tickerLoadError')"
-            :description="dashboard.tickerError"
-            type="warning"
-            show-icon
-            class="dashboard-alert"
-          />
-          <el-empty v-else-if="dashboard.tickers.length === 0" :description="t('dashboard.noMarketTickers')" />
-          <el-table v-else :data="dashboard.tickers" size="small">
-            <el-table-column prop="symbol" :label="t('common.symbol')" />
-            <el-table-column :label="t('dashboard.last')">
-              <template #default="{ row }">{{ formatTickerPrice(row.last) }}</template>
-            </el-table-column>
-            <el-table-column :label="t('dashboard.bid')">
-              <template #default="{ row }">{{ formatTickerPrice(row.bidPx) }}</template>
-            </el-table-column>
-            <el-table-column :label="t('dashboard.ask')">
-              <template #default="{ row }">{{ formatTickerPrice(row.askPx) }}</template>
-            </el-table-column>
-            <el-table-column :label="t('dashboard.volume24h')">
-              <template #default="{ row }">{{ formatTickerPrice(row.vol24h) }}</template>
-            </el-table-column>
-          </el-table>
-        </el-card>
-      </el-col>
-    </el-row>
+    <div class="dashboard-view__section">
+      <StrategyPerformanceTable
+        :rows="strategyPerformanceRows"
+        :loading="dashboard.strategyPerformanceLoading"
+        :error="dashboard.strategyPerformanceError"
+        :stale="strategyPerformanceStale"
+        @retry="retryStrategyPerformance"
+      />
+    </div>
 
-    <el-row :gutter="16" class="dashboard-section">
-      <el-col :xs="24" :lg="12">
-        <el-card shadow="never" v-loading="dashboard.loading">
-          <template #header>{{ t('dashboard.positions') }}</template>
-          <el-empty v-if="dashboard.positions.length === 0" :description="t('dashboard.noPositions')" />
-          <el-table v-else :data="dashboard.positions" size="small">
-            <el-table-column prop="symbol" :label="t('common.symbol')" min-width="110">
-              <template #default="{ row }">{{ formatRuntimeText(row.symbol) }}</template>
-            </el-table-column>
-            <el-table-column :label="t('dashboard.side')" min-width="80">
-              <template #default="{ row }">{{ formatRuntimeText(row.side) }}</template>
-            </el-table-column>
-            <el-table-column :label="t('dashboard.size')" min-width="100">
-              <template #default="{ row }">{{ formatRuntimeNumber(row.amount) }}</template>
-            </el-table-column>
-            <el-table-column :label="t('dashboard.entryPrice')" min-width="110">
-              <template #default="{ row }">{{ formatRuntimeNumber(row.entry_price) }}</template>
-            </el-table-column>
-            <el-table-column :label="t('dashboard.markPrice')" min-width="110">
-              <template #default="{ row }">{{ formatRuntimeNumber(row.mark_price) }}</template>
-            </el-table-column>
-            <el-table-column :label="t('dashboard.unrealizedPnl')" min-width="130">
-              <template #default="{ row }">{{ formatRuntimeCurrency(row.unrealized_pnl) }}</template>
-            </el-table-column>
-          </el-table>
-        </el-card>
-      </el-col>
-      <el-col :xs="24" :lg="12">
-        <el-card shadow="never" v-loading="dashboard.loading">
-          <template #header>{{ t('dashboard.orders') }}</template>
-          <el-empty v-if="dashboard.orders.length === 0" :description="t('dashboard.noOrders')" />
-          <el-table v-else :data="dashboard.orders" size="small">
-            <el-table-column prop="symbol" :label="t('common.symbol')" min-width="110">
-              <template #default="{ row }">{{ formatRuntimeText(row.symbol) }}</template>
-            </el-table-column>
-            <el-table-column :label="t('dashboard.side')" min-width="80">
-              <template #default="{ row }">{{ formatRuntimeText(row.side) }}</template>
-            </el-table-column>
-            <el-table-column :label="t('dashboard.orderType')" min-width="90">
-              <template #default="{ row }">{{ formatRuntimeText(row.type) }}</template>
-            </el-table-column>
-            <el-table-column :label="t('dashboard.price')" min-width="100">
-              <template #default="{ row }">{{ formatRuntimeNumber(row.price) }}</template>
-            </el-table-column>
-            <el-table-column :label="t('dashboard.amount')" min-width="100">
-              <template #default="{ row }">{{ formatRuntimeNumber(row.amount) }}</template>
-            </el-table-column>
-            <el-table-column :label="t('common.status')" min-width="100">
-              <template #default="{ row }">{{ formatRuntimeText(row.status) }}</template>
-            </el-table-column>
-            <el-table-column :label="t('dashboard.timestamp')" min-width="160">
-              <template #default="{ row }">{{ formatRuntimeTime(row.timestamp) }}</template>
-            </el-table-column>
-          </el-table>
-        </el-card>
-      </el-col>
-    </el-row>
-
-    <el-row :gutter="16" class="dashboard-section">
-      <el-col :xs="24" :lg="12">
-        <el-card shadow="never" v-loading="dashboard.loading">
-          <template #header>{{ t('dashboard.strategies') }}</template>
-          <el-empty v-if="strategies.runtimeSummaries.length === 0" :description="t('dashboard.noStrategies')" />
-          <el-table v-else :data="strategies.runtimeSummaries" size="small">
-            <el-table-column prop="name" :label="t('common.name')" min-width="140" />
-            <el-table-column :label="t('common.status')" min-width="110">
-              <template #default="{ row }">
-                <el-tag :type="getDashboardStrategyStatusTagType(row.status)" effect="plain">
-                  {{ row.status }}
-                </el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column :label="t('dashboard.lastError')" min-width="180">
-              <template #default="{ row }">
-                {{ formatRuntimeText(strategies.errors[row.name]) }}
-              </template>
-            </el-table-column>
-          </el-table>
-        </el-card>
-      </el-col>
-      <el-col :xs="24" :lg="12">
-        <el-card shadow="never">
-          <template #header>{{ t('dashboard.websocketMessages') }}</template>
-          <el-empty v-if="latestMessages.length === 0" :description="t('dashboard.noMessages')" />
-          <el-table v-else :data="latestMessages" size="small">
-            <el-table-column :label="t('dashboard.messageType')" min-width="120">
-              <template #default="{ row }">
-                <el-tag size="small" effect="plain">{{ row.type }}</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column :label="t('dashboard.messageReceived')" min-width="160">
-              <template #default="{ row }">{{ formatRuntimeTime(row.received_at) }}</template>
-            </el-table-column>
-            <el-table-column :label="t('dashboard.messagePayload')" min-width="260">
-              <template #default="{ row }">
-                <code class="dashboard-message-payload">{{ formatRuntimePayloadPreview(row) }}</code>
-              </template>
-            </el-table-column>
-          </el-table>
-        </el-card>
-      </el-col>
-    </el-row>
+    <div class="dashboard-view__section">
+      <DashboardActivity
+        :recent-orders="recentOrders"
+        :positions="dashboard.positions"
+        :runtime-summaries="strategies.runtimeSummaries"
+        :runtime-errors="strategies.errors"
+        :websocket-messages="latestMessages"
+        :loading="activityLoading"
+      />
+    </div>
   </section>
 </template>
 
 <style scoped>
-.dashboard-header {
+.dashboard-view {
   display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 20px;
+  flex-direction: column;
+  gap: var(--ui-space-16);
+  min-width: 0;
 }
 
-.dashboard-header__meta {
-  margin: 6px 0 0;
-  color: #606266;
-}
-
-.dashboard-header__actions {
+.dashboard-view__alerts {
   display: flex;
-  align-items: center;
-  gap: 12px;
+  flex-direction: column;
+  gap: var(--ui-space-12);
 }
 
-h2 {
+.dashboard-view__alert {
+  min-width: 0;
+}
+
+.dashboard-view__metrics {
   margin: 0;
 }
 
-.dashboard-alert {
-  margin-bottom: 16px;
-}
-
-.metric {
-  font-size: 28px;
-  font-weight: 700;
-  color: #409eff;
-}
-
-.dashboard-section {
-  margin-top: 16px;
-}
-
-.account-overview__header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.account-overview__total {
-  font-size: 14px;
-  font-weight: 600;
-  color: #409eff;
-}
-
-.account-overview {
-  align-items: center;
-}
-
-.account-allocation-chart {
-  width: 100%;
-  min-height: 280px;
-}
-
-.dashboard-message-payload {
-  white-space: nowrap;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
-  color: #606266;
+.dashboard-view__section {
+  min-width: 0;
 }
 </style>

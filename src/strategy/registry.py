@@ -4,6 +4,7 @@ import math
 from collections.abc import Mapping
 from typing import Any
 
+from src.exchange.okx_client import OKX_RUNTIME_TIMEFRAME_MILLISECONDS
 from src.strategy.base import BaseStrategy
 from src.strategy.definitions import (
     NormalizedStrategyConfig,
@@ -14,6 +15,7 @@ from src.strategy.definitions import (
 )
 
 _ALLOWED_CONFIG_FIELDS = {"name", "strategy_type", "symbol", "timeframe", "enabled", "params"}
+_RESERVED_STRATEGY_NAMES = frozenset({"__exchange__"})
 _MISSING = object()
 
 
@@ -43,6 +45,8 @@ class StrategyRegistry:
         )
 
     def register_definition(self, definition: StrategyDefinition) -> None:
+        if definition.name.startswith("__") or definition.name in _RESERVED_STRATEGY_NAMES:
+            raise ValueError(f"Strategy type is reserved: {definition.name}")
         if definition.name in self._definitions:
             raise ValueError(f"Strategy type already registered: {definition.name}")
         self._definitions[definition.name] = definition
@@ -63,6 +67,7 @@ class StrategyRegistry:
         timeframe: Any = _MISSING,
         enabled: Any = True,
         params: Mapping[str, Any] | None = None,
+        allow_builtin_name: bool = False,
     ) -> NormalizedStrategyConfig:
         issues: list[StrategyValidationIssue] = []
         if config is not None:
@@ -105,6 +110,23 @@ class StrategyRegistry:
                 )
             )
 
+        normalized_timeframe = self._normalize_required_text(
+            values["timeframe"] if "timeframe" in values else _MISSING,
+            "timeframe",
+            issues,
+        )
+        if (
+            normalized_timeframe
+            and normalized_timeframe not in OKX_RUNTIME_TIMEFRAME_MILLISECONDS
+        ):
+            issues.append(
+                StrategyValidationIssue(
+                    path="timeframe",
+                    code="unsupported_timeframe",
+                    message="Unsupported strategy timeframe",
+                )
+            )
+
         raw_params = values.get("params", {})
         if not isinstance(raw_params, Mapping):
             issues.append(
@@ -136,23 +158,37 @@ class StrategyRegistry:
             if not unsafe_param_errors:
                 issues.extend(definition.validate(normalized_params))
 
+        normalized_name = self._normalize_required_text(
+            values["name"] if "name" in values else _MISSING,
+            "name",
+            issues,
+        )
+        if (
+            normalized_name.startswith("__")
+            or normalized_name in _RESERVED_STRATEGY_NAMES
+            or normalized_name in self._definitions and not allow_builtin_name
+        ):
+            issues.append(
+                StrategyValidationIssue(
+                    path="name",
+                    code="reserved_name",
+                    message=(
+                        "Strategy name is reserved for the exchange system actor"
+                        if normalized_name.startswith("__")
+                        else "Strategy name is reserved"
+                    ),
+                )
+            )
+
         normalized = NormalizedStrategyConfig(
-            name=self._normalize_required_text(
-                values["name"] if "name" in values else _MISSING,
-                "name",
-                issues,
-            ),
+            name=normalized_name,
             strategy_type=normalized_type,
             symbol=self._normalize_required_text(
                 values["symbol"] if "symbol" in values else _MISSING,
                 "symbol",
                 issues,
             ),
-            timeframe=self._normalize_required_text(
-                values["timeframe"] if "timeframe" in values else _MISSING,
-                "timeframe",
-                issues,
-            ),
+            timeframe=normalized_timeframe,
             enabled=self._normalize_enabled(values.get("enabled", True), issues),
             params=normalized_params,
         )
@@ -175,6 +211,7 @@ class StrategyRegistry:
             timeframe=timeframe,
             params=params or {},
             enabled=True,
+            allow_builtin_name=True,
         )
         definition = self.get_definition(normalized.strategy_type)
         strategy = definition.strategy_cls(symbol=normalized.symbol, **normalized.params)

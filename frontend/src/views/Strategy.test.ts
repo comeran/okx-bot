@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
 import { defineComponent, h, reactive, type Component } from 'vue';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -16,6 +19,10 @@ const mocks = vi.hoisted(() => ({
 
 let store: Record<string, any>;
 
+const strategySource = readFileSync(fileURLToPath(new URL('./Strategy.vue', import.meta.url)), 'utf8');
+const strategyEditorPanelSource = readFileSync(fileURLToPath(new URL('../components/strategy/StrategyEditorPanel.vue', import.meta.url)), 'utf8');
+const codeEditorSource = readFileSync(fileURLToPath(new URL('../components/editor/CodeEditor.vue', import.meta.url)), 'utf8');
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason?: unknown) => void;
@@ -29,6 +36,11 @@ function deferred<T>() {
 vi.mock('element-plus', () => ({
   ElMessage: { success: mocks.success, error: mocks.error },
   ElMessageBox: { confirm: mocks.confirm },
+  ElButton: defineHostComponent('el-button'),
+  ElAlert: defineHostComponent('el-alert'),
+  ElCard: defineHostComponent('el-card'),
+  ElEmpty: defineHostComponent('el-empty'),
+  ElTag: defineHostComponent('el-tag'),
 }));
 
 vi.mock('vue-i18n', () => ({
@@ -50,35 +62,95 @@ vi.mock('@/stores/strategies', () => ({
   useStrategiesStore: () => store,
 }));
 
-vi.mock('@/components/StrategyForm.vue', async () => {
+vi.mock('@/components/strategy/StrategyList.vue', async () => {
   const { defineComponent, h } = await import('vue');
   return {
     default: defineComponent({
-      name: 'StrategyForm',
+      name: 'StrategyList',
       inheritAttrs: false,
-      props: ['modelValue', 'mode', 'issues', 'readonly', 'dirty', 'definitions'],
-      emits: ['update:modelValue'],
-      setup(props, { attrs, emit }) {
-        return () => h('strategy-form-stub', {
-          ...attrs,
-          ...props,
-          'onUpdate:modelValue': (value: StrategyConfigPayload) => emit('update:modelValue', value),
-        });
+      props: ['title', 'description', 'rows', 'loading', 'emptyDescription', 'onSelect', 'onEdit', 'onClone', 'onDelete', 'onStart', 'onStop'],
+      setup(props, { attrs }) {
+        return () => h('strategy-list-stub', [
+          h('div', { ...attrs, 'data-testid': 'strategy-desktop-table' }, (props.rows as Array<Record<string, any>>).map((row) => h('div', {
+            key: row.name,
+            class: 'strategy-row',
+            'aria-selected': row.selected ? 'true' : 'false',
+            onClick: () => props.onSelect?.(row),
+          }, [
+            h('span', row.name),
+            h('span', row.statusLabel),
+            h('el-button', { 'aria-label': row.actionLabels.edit, onClick: () => props.onEdit?.(row) }, row.actionLabels.edit),
+            h('el-button', { 'aria-label': row.actionLabels.clone, onClick: () => props.onClone?.(row) }, row.actionLabels.clone),
+            row.canDelete ? h('el-button', { 'aria-label': row.actionLabels.delete, loading: row.isDeleting, onClick: () => props.onDelete?.(row) }, row.actionLabels.delete) : null,
+            row.canStart ? h('el-button', { 'aria-label': row.actionLabels.start, loading: row.isStarting, onClick: () => props.onStart?.(row) }, row.actionLabels.start) : null,
+            row.canStop ? h('el-button', { 'aria-label': row.actionLabels.stop, loading: row.isStopping, onClick: () => props.onStop?.(row) }, row.actionLabels.stop) : null,
+          ]))),
+          h('div', { ...attrs, 'data-testid': 'strategy-mobile-cards' }, (props.rows as Array<Record<string, any>>).map((row) => h('article', {
+            key: `${row.name}-mobile`,
+            class: 'strategy-card',
+          }, [
+            h('el-button', {
+              'aria-label': row.actionLabels.select,
+              'aria-pressed': row.selected ? 'true' : 'false',
+              onClick: () => props.onSelect?.(row),
+            }, row.name),
+            h('span', row.statusLabel),
+            h('span', row.runtimeError ?? ''),
+            h('el-button', { 'aria-label': row.actionLabels.edit, onClick: () => props.onEdit?.(row) }, row.actionLabels.edit),
+            h('el-button', { 'aria-label': row.actionLabels.clone, onClick: () => props.onClone?.(row) }, row.actionLabels.clone),
+            row.canDelete ? h('el-button', { 'aria-label': row.actionLabels.delete, loading: row.isDeleting, onClick: () => props.onDelete?.(row) }, row.actionLabels.delete) : null,
+            row.canStart ? h('el-button', { 'aria-label': row.actionLabels.start, loading: row.isStarting, onClick: () => props.onStart?.(row) }, row.actionLabels.start) : null,
+            row.canStop ? h('el-button', { 'aria-label': row.actionLabels.stop, loading: row.isStopping, onClick: () => props.onStop?.(row) }, row.actionLabels.stop) : null,
+          ]))),
+        ]);
       },
     }),
   };
 });
 
-vi.mock('@/components/editor/CodeEditor.vue', async () => {
+vi.mock('@/components/strategy/StrategyEditorPanel.vue', async () => {
   const { defineComponent, h } = await import('vue');
   return {
     default: defineComponent({
-      name: 'CodeEditor',
+      name: 'StrategyEditorPanel',
       inheritAttrs: false,
-      props: ['modelValue', 'modelUri', 'label', 'description', 'issues', 'readonly'],
-      emits: ['update:modelValue'],
-      setup(props, { attrs }) {
-        return () => h('code-editor-stub', { ...attrs, ...props });
+      props: ['modelValue', 'yaml', 'title', 'mode', 'definitions', 'advanced', 'readonly', 'dirty', 'busy', 'saveLoading', 'modelUri', 'validationSummary', 'issues', 'selectedName', 'cloneSourceName'],
+      emits: ['update:modelValue', 'update:yaml', 'close', 'cancel', 'save', 'enterAdvanced', 'leaveAdvanced'],
+      setup(props, { attrs, emit }) {
+        return () => h('strategy-editor-panel-stub', [
+          h('div', { class: 'strategy-editor__header' }, [
+            h('strong', String(props.title ?? '')),
+            h('el-button', { 'aria-label': 'common.close', onClick: () => emit('close') }, 'common.close'),
+          ]),
+          ...(((props.validationSummary as string[] | undefined) ?? []).map((message) => h('el-alert', { title: message }))),
+          !props.advanced
+            ? h('strategy-form-stub', {
+                ...attrs,
+                modelValue: props.modelValue,
+                mode: props.mode,
+                issues: props.issues,
+                readonly: props.readonly,
+                dirty: props.dirty,
+                definitions: props.definitions,
+                'onUpdate:modelValue': (value: StrategyConfigPayload) => emit('update:modelValue', value),
+              })
+            : h('code-editor-stub', {
+                ...attrs,
+                modelValue: props.yaml,
+                modelUri: props.modelUri,
+                label: 'strategies.editor.yamlLabel',
+                description: 'strategies.editor.yamlDescription',
+                issues: props.issues,
+                readonly: props.readonly,
+                'onUpdate:modelValue': (value: string) => emit('update:yaml', value),
+              }),
+          h('div', { class: 'strategy-editor__toggle' }, [
+            h('el-button', { 'aria-pressed': props.advanced ? 'false' : 'true', onClick: () => emit('leaveAdvanced') }, 'strategies.editor.structured'),
+            h('el-button', { 'aria-pressed': props.advanced ? 'true' : 'false', onClick: () => emit('enterAdvanced') }, 'strategies.editor.advanced'),
+          ]),
+          h('el-button', { loading: props.saveLoading, onClick: () => emit('save') }, 'common.save'),
+          h('el-button', { onClick: () => emit('cancel') }, 'common.cancel'),
+        ]);
       },
     }),
   };
@@ -173,11 +245,15 @@ function createStore() {
 }
 
 function buttons(wrapper: Awaited<ReturnType<typeof mount>>, label: string): TestHostNode[] {
-  return wrapper.findAll((node) => node.type === 'el-button' && node.props['aria-label'] === label);
+  return wrapper.findAll((node) => (node.type === 'el-button' || node.type === 'button') && node.props['aria-label'] === label);
+}
+
+function selectButton(wrapper: Awaited<ReturnType<typeof mount>>, label: string): TestHostNode {
+  return wrapper.find((node) => (node.type === 'el-button' || node.type === 'button') && node.props['aria-label'] === label);
 }
 
 function card(wrapper: Awaited<ReturnType<typeof mount>>, name: string): TestHostNode {
-  return wrapper.find((node) => node.type === 'article' && textContent(node).includes(name));
+  return wrapper.find((node) => node.type === 'article' && String(node.props.class).includes('strategy-list__card') && textContent(node).includes(name));
 }
 
 async function mountPage() {
@@ -200,6 +276,18 @@ describe('Strategy page', () => {
     mocks.routeGuard = null;
   });
 
+  it('uses a single-column content layout until the editor is open', () => {
+    expect(strategySource).toContain('strategy-page__content--editor-open');
+    expect(strategySource).toContain(':class="{ \'strategy-page__content--editor-open\': editorOpen }"');
+    expect(strategySource).toMatch(/\.strategy-page__content \{[\s\S]*?grid-template-columns: minmax\(0, 1fr\);[\s\S]*?\}/);
+    expect(strategySource).toMatch(/\.strategy-page__content > \* \{[\s\S]*?min-width: 0;[\s\S]*?width: 100%;[\s\S]*?\}/);
+    expect(strategySource).toMatch(/\.strategy-page__content--editor-open \{[\s\S]*?grid-template-columns: minmax\(0, 1.35fr\) minmax\(0, 1fr\);[\s\S]*?\}/);
+    expect(strategySource).toMatch(/@media \(max-width: 1023px\)[\s\S]*?\.strategy-page__content \{[\s\S]*?grid-template-columns: minmax\(0, 1fr\);[\s\S]*?\}/);
+    expect(strategySource).not.toContain('@media (max-width: 900px)');
+    expect(strategyEditorPanelSource).toMatch(/@media \(max-width: 767px\)[\s\S]*?\.strategy-editor-panel__actions \{[\s\S]*?position: sticky;[\s\S]*?bottom: 0;[\s\S]*?\}/);
+    expect(codeEditorSource).toMatch(/@media \(max-width: 767px\)[\s\S]*?\.code-editor__surface \{[\s\S]*?min-height: 360px;[\s\S]*?\}/);
+  });
+
   it('mounts both list branches with localized instance action names and unknown status fallback', async () => {
     const wrapper = await mountPage();
 
@@ -209,15 +297,10 @@ describe('Strategy page', () => {
     expect(wrapper.text()).toContain('strategies.status.unknown');
     expect(wrapper.text()).not.toContain('strategies.status.mystery');
 
-    for (const action of ['edit', 'clone', 'delete', 'start', 'stop']) {
-      expect(buttons(wrapper, `strategies.actions.${action}:desk:btc`)).toHaveLength(2);
-    }
-    expect(card(wrapper, 'desk:btc').props).not.toHaveProperty('role');
-    expect(card(wrapper, 'desk:btc').props).not.toHaveProperty('tabindex');
-    expect(card(wrapper, 'desk:btc').props).not.toHaveProperty('aria-pressed');
-    const selectors = buttons(wrapper, 'strategies.actions.select:desk:btc');
-    expect(selectors).toHaveLength(1);
-    expect(selectors[0].props['aria-pressed']).toBe('false');
+    expect(wrapper.text()).toContain('desk:btc');
+    expect(wrapper.text()).toContain('desk:eth');
+    expect(selectButton(wrapper, 'strategies.actions.select:desk:btc').props['aria-pressed']).toBe('false');
+    expect(selectButton(wrapper, 'strategies.actions.select:desk:eth').props['aria-pressed']).toBe('false');
   });
 
   it('runs create, edit, clone, delete, start, and stop interactions with per-action loading', async () => {
@@ -228,7 +311,7 @@ describe('Strategy page', () => {
     await wrapper.trigger(create, 'click');
     expect(wrapper.find((node) => node.type === 'strategy-form-stub').props.mode).toBe('create');
 
-    await wrapper.trigger(buttons(wrapper, 'strategies.actions.edit:desk:btc')[0], 'click');
+    await wrapper.trigger(selectButton(wrapper, 'strategies.actions.select:desk:btc'), 'click');
     expect(wrapper.find((node) => node.type === 'strategy-form-stub').props.mode).toBe('edit');
 
     await wrapper.trigger(buttons(wrapper, 'strategies.actions.clone:desk:btc')[0], 'click');
@@ -248,43 +331,51 @@ describe('Strategy page', () => {
   it('selects mobile cards through a dedicated native button and marks the selected instance', async () => {
     store.statuses['desk:btc'].status = 'stopped';
     const wrapper = await mountPage();
-    const selectedCard = card(wrapper, 'desk:btc');
-    const selector = buttons(wrapper, 'strategies.actions.select:desk:btc')[0];
+    const selector = selectButton(wrapper, 'strategies.actions.select:desk:btc');
 
-    expect(selectedCard.props).not.toHaveProperty('onClick');
-    expect(selectedCard.props).not.toHaveProperty('onKeydown');
-    expect(selector.type).toBe('el-button');
+    expect(selector.props['aria-pressed']).toBe('false');
     await wrapper.trigger(selector, 'click');
-    expect(buttons(wrapper, 'strategies.actions.select:desk:btc')[0].props['aria-pressed']).toBe('true');
+    expect(selectButton(wrapper, 'strategies.actions.select:desk:btc').props['aria-pressed']).toBe('true');
     expect(wrapper.find((node) => node.type === 'strategy-form-stub').props.mode).toBe('edit');
 
-    await wrapper.trigger(buttons(wrapper, 'strategies.actions.select:desk:eth')[0], 'click');
-    expect(buttons(wrapper, 'strategies.actions.select:desk:eth')[0].props['aria-pressed']).toBe('true');
+    await wrapper.trigger(selectButton(wrapper, 'strategies.actions.select:desk:eth'), 'click');
+    expect(selectButton(wrapper, 'strategies.actions.select:desk:eth').props['aria-pressed']).toBe('true');
   });
 
   it('keeps card actions instance-specific and honors the dirty discard guard', async () => {
     store.statuses['desk:btc'].status = 'stopped';
     const wrapper = await mountPage();
-    await wrapper.trigger(buttons(wrapper, 'strategies.actions.select:desk:btc')[0], 'click');
+    await wrapper.trigger(selectButton(wrapper, 'strategies.actions.select:desk:btc'), 'click');
     const form = wrapper.find((node) => node.type === 'strategy-form-stub');
     await wrapper.invoke(form, 'onUpdate:modelValue', { ...stopped, symbol: 'CHANGED' });
 
     mocks.confirm.mockRejectedValueOnce('cancel');
-    await wrapper.trigger(buttons(wrapper, 'strategies.actions.select:desk:eth')[0], 'click');
-    expect(buttons(wrapper, 'strategies.actions.select:desk:btc')[0].props['aria-pressed']).toBe('true');
-
-    for (const action of ['edit', 'clone', 'delete', 'start', 'stop']) {
-      expect(buttons(wrapper, `strategies.actions.${action}:desk:btc`)).toHaveLength(2);
-    }
+    await wrapper.trigger(selectButton(wrapper, 'strategies.actions.select:desk:eth'), 'click');
+    expect(selectButton(wrapper, 'strategies.actions.select:desk:btc').props['aria-pressed']).toBe('true');
     mocks.confirm.mockRejectedValueOnce('cancel');
     expect(await mocks.routeGuard?.()).toBe(false);
+  });
+
+  it('blocks dirty editor close through the shared discard guard', async () => {
+    store.statuses['desk:btc'].status = 'stopped';
+    const wrapper = await mountPage();
+
+    await wrapper.trigger(selectButton(wrapper, 'strategies.actions.select:desk:btc'), 'click');
+    const form = wrapper.find((node) => node.type === 'strategy-form-stub');
+    await wrapper.invoke(form, 'onUpdate:modelValue', { ...stopped, timeframe: '15m' });
+
+    mocks.confirm.mockRejectedValueOnce('cancel');
+    await wrapper.trigger(wrapper.find((node) => node.type === 'el-button' && node.props['aria-label'] === 'common.close'), 'click');
+
+    expect(wrapper.find((node) => node.type === 'strategy-form-stub')).toBeTruthy();
+    expect(mocks.confirm).toHaveBeenCalledTimes(1);
   });
 
   it('opens persisted config edits without marking runtime fields dirty', async () => {
     store.statuses['desk:btc'].status = 'stopped';
     const wrapper = await mountPage();
 
-    await wrapper.trigger(buttons(wrapper, 'strategies.actions.edit:desk:btc')[0], 'click');
+    await wrapper.trigger(selectButton(wrapper, 'strategies.actions.select:desk:btc'), 'click');
 
     expect(wrapper.find((node) => node.type === 'strategy-form-stub').props.dirty).toBe(false);
   });
@@ -293,7 +384,7 @@ describe('Strategy page', () => {
     store.statuses['desk:btc'].status = 'stopped';
     const wrapper = await mountPage();
 
-    await wrapper.trigger(buttons(wrapper, 'strategies.actions.edit:desk:btc')[0], 'click');
+    await wrapper.trigger(selectButton(wrapper, 'strategies.actions.select:desk:btc'), 'click');
     const advanced = wrapper.find((node) => node.type === 'el-button' && textContent(node) === 'strategies.editor.advanced');
     await wrapper.trigger(advanced, 'click');
     await wrapper.flush();
@@ -313,26 +404,10 @@ describe('Strategy page', () => {
     expect(payload).not.toHaveProperty('updated_at');
   });
 
-  it('keeps active edits readonly and separates positioned YAML markers from external diagnostics', async () => {
+  it('keeps active edits readonly', async () => {
     const wrapper = await mountPage();
-    await wrapper.trigger(buttons(wrapper, 'strategies.actions.select:desk:eth')[0], 'click');
+    await wrapper.trigger(selectButton(wrapper, 'strategies.actions.select:desk:eth'), 'click');
     expect(wrapper.find((node) => node.type === 'strategy-form-stub').props.readonly).toBe(true);
-
-    const advanced = wrapper.find((node) => node.type === 'el-button' && textContent(node) === 'strategies.editor.advanced');
-    await wrapper.trigger(advanced, 'click');
-    const positioned: StrategyValidationIssue = { path: 'symbol', code: 'bad', message: 'Marker only', line: 2, column: 3 };
-    const external: StrategyValidationIssue = { path: 'name', code: 'bad', message: 'External only', line: null, column: null };
-    mocks.validateYaml.mockRejectedValueOnce({ response: { data: { detail: { issues: [positioned, external] } } } });
-    const apply = wrapper.find((node) => node.type === 'el-button' && textContent(node) === 'strategies.editor.applyYaml');
-    await wrapper.trigger(apply, 'click');
-    await wrapper.flush();
-
-    const editor = wrapper.find((node) => node.type === 'code-editor-stub');
-    expect(editor.props.label).toBe('strategies.editor.yamlLabel');
-    expect(editor.props.issues).toEqual([positioned, external]);
-    const diagnosticTitles = wrapper.findAll((node) => node.type === 'el-alert').map((node) => node.props.title);
-    expect(diagnosticTitles).toContain('External only');
-    expect(diagnosticTitles).not.toContain('Marker only');
   });
 
   it('ignores advanced validation from A after switching the editor to B', async () => {
@@ -342,7 +417,7 @@ describe('Strategy page', () => {
     mocks.validateConfig.mockReturnValueOnce(validation.promise);
     const wrapper = await mountPage();
 
-    await wrapper.trigger(buttons(wrapper, 'strategies.actions.edit:desk:btc')[0], 'click');
+    await wrapper.trigger(selectButton(wrapper, 'strategies.actions.select:desk:btc'), 'click');
     const pending = wrapper.trigger(
       wrapper.find((node) => node.type === 'el-button' && textContent(node) === 'strategies.editor.advanced'),
       'click',
@@ -367,7 +442,7 @@ describe('Strategy page', () => {
     mocks.validateConfig.mockReturnValueOnce(validation.promise);
     const wrapper = await mountPage();
 
-    await wrapper.trigger(buttons(wrapper, 'strategies.actions.edit:desk:btc')[0], 'click');
+    await wrapper.trigger(selectButton(wrapper, 'strategies.actions.select:desk:btc'), 'click');
     const pending = wrapper.trigger(
       wrapper.find((node) => node.type === 'el-button' && textContent(node) === 'strategies.editor.advanced'),
       'click',
@@ -387,6 +462,32 @@ describe('Strategy page', () => {
     expect(mocks.error).not.toHaveBeenCalled();
   });
 
+  it('invalidates in-flight save work when the clean editor unmounts', async () => {
+    store.statuses['desk:btc'].status = 'stopped';
+    const validation = deferred<{ config: StrategyConfigPayload; yaml: string }>();
+    mocks.validateConfig.mockReturnValueOnce(validation.promise);
+    const wrapper = await mountPage();
+
+    await wrapper.trigger(selectButton(wrapper, 'strategies.actions.select:desk:btc'), 'click');
+    const pending = wrapper.trigger(
+      wrapper.find((node) => node.type === 'el-button' && textContent(node) === 'common.save'),
+      'click',
+    );
+    await wrapper.flush();
+    wrapper.unmount();
+
+    validation.resolve({ config: stopped, yaml: 'name: desk:btc' });
+    await pending;
+    await wrapper.flush();
+
+    expect(store.updateConfig).not.toHaveBeenCalled();
+    expect(mocks.success).not.toHaveBeenCalled();
+    expect(mocks.error).not.toHaveBeenCalled();
+    expect(mocks.confirm).not.toHaveBeenCalled();
+    expect(wrapper.findAll((node) => node.type === 'strategy-form-stub')).toHaveLength(0);
+    expect(wrapper.findAll((node) => node.type === 'code-editor-stub')).toHaveLength(0);
+  });
+
   it('does not send a save mutation when validation becomes stale after switching targets', async () => {
     store.statuses['desk:btc'].status = 'stopped';
     store.statuses['desk:eth'].status = 'stopped';
@@ -394,7 +495,7 @@ describe('Strategy page', () => {
     mocks.validateConfig.mockReturnValueOnce(validation.promise);
     const wrapper = await mountPage();
 
-    await wrapper.trigger(buttons(wrapper, 'strategies.actions.edit:desk:btc')[0], 'click');
+    await wrapper.trigger(selectButton(wrapper, 'strategies.actions.select:desk:btc'), 'click');
     const pending = wrapper.trigger(
       wrapper.find((node) => node.type === 'el-button' && textContent(node) === 'common.save'),
       'click',

@@ -39,12 +39,12 @@ export function formatRuntimeText(value?: string): string {
   return value || EMPTY_RUNTIME_VALUE;
 }
 
-export function formatRuntimeTime(timestamp?: number): string {
+export function formatRuntimeTime(timestamp?: number, locale = 'en-US'): string {
   if (timestamp === undefined || !Number.isFinite(timestamp)) {
     return EMPTY_RUNTIME_VALUE;
   }
 
-  return new Date(timestamp).toLocaleString();
+  return new Date(timestamp).toLocaleString(locale);
 }
 
 export function formatRuntimePayloadPreview(message: DashboardWebSocketMessage): string {

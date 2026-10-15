@@ -42,8 +42,15 @@ def create_public_market_adapter(market_type: str):
     return adapter_cls(api_key="", secret="", passphrase="")
 
 
-def _serialize_kline(symbol: str, timeframe: str, item: Any) -> dict[str, float | int | str]:
-    return {
+def _serialize_kline(
+    symbol: str,
+    timeframe: str,
+    item: Any,
+    *,
+    source: str | None = None,
+    runtime_mode: str | None = None,
+) -> dict[str, float | int | str]:
+    payload: dict[str, float | int | str] = {
         "symbol": symbol,
         "timeframe": timeframe,
         "timestamp": item.timestamp,
@@ -53,6 +60,10 @@ def _serialize_kline(symbol: str, timeframe: str, item: Any) -> dict[str, float 
         "close": item.close,
         "volume": item.volume,
     }
+    if source is not None and runtime_mode is not None:
+        payload["source"] = source
+        payload["runtime_mode"] = runtime_mode
+    return payload
 
 
 @router.get("/klines")
@@ -63,8 +74,20 @@ async def get_klines(
     start_time: int | None = None,
     end_time: int | None = None,
     market_type: str | None = None,
+    source: str | None = None,
+    runtime_mode: str | None = None,
 ) -> list[dict[str, float | int | str]]:
     resolved_market_type = normalize_market_type(market_type)
+    if (source is None) != (runtime_mode is None):
+        raise HTTPException(
+            status_code=422,
+            detail="source and runtime_mode must be provided together",
+        )
+    if source is not None and (source, runtime_mode) != ("market", "market"):
+        raise HTTPException(
+            status_code=422,
+            detail="market klines only support source=market and runtime_mode=market",
+        )
     symbol = symbol.strip()
     if not symbol:
         raise HTTPException(status_code=422, detail="symbol must not be empty")
@@ -75,14 +98,50 @@ async def get_klines(
             detail="start_time and end_time must be provided together",
         )
 
+    if source is not None and start_time is None and end_time is None:
+        raise HTTPException(
+            status_code=422,
+            detail="scoped market klines require start_time and end_time",
+        )
+
     if start_time is not None and end_time is not None:
         if end_time <= start_time:
             raise HTTPException(status_code=422, detail="end_time must be after start_time")
 
         repository = Repository()
+        requested_source = source or "market"
+        requested_runtime_mode = runtime_mode or "market"
+        try:
+            klines = repository.get_klines(
+                symbol,
+                timeframe,
+                start_time,
+                end_time,
+                source=requested_source,
+                runtime_mode=requested_runtime_mode,
+            )
+        except TypeError as exc:
+            if "unexpected keyword argument" not in str(exc):
+                raise
+            raise HTTPException(
+                status_code=422,
+                detail="repository does not support scoped market kline queries",
+            ) from exc
+        klines = [
+            kline
+            for kline in klines
+            if getattr(kline, "source", "unknown") == requested_source
+            and getattr(kline, "runtime_mode", "unknown") == requested_runtime_mode
+        ]
         return [
-            _serialize_kline(kline.symbol, kline.timeframe, kline)
-            for kline in repository.get_klines(symbol, timeframe, start_time, end_time)
+            _serialize_kline(
+                kline.symbol,
+                kline.timeframe,
+                kline,
+                source=source,
+                runtime_mode=runtime_mode,
+            )
+            for kline in klines
         ]
 
     adapter = create_public_market_adapter(resolved_market_type)

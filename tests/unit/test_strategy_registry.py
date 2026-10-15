@@ -68,6 +68,7 @@ def test_builtin_definition_metadata_is_canonical_and_stably_ordered() -> None:
                     "default": 0.1,
                     "minimum": 0,
                     "maximum": None,
+                    "exclusive_min": True,
                     "step": 0.01,
                 },
             ],
@@ -97,6 +98,8 @@ def test_builtin_definition_metadata_is_canonical_and_stably_ordered() -> None:
                     "default": 30,
                     "minimum": 0,
                     "maximum": 100,
+                    "exclusive_min": True,
+                    "exclusive_max": True,
                     "step": 0.1,
                 },
                 {
@@ -108,6 +111,8 @@ def test_builtin_definition_metadata_is_canonical_and_stably_ordered() -> None:
                     "default": 70,
                     "minimum": 0,
                     "maximum": 100,
+                    "exclusive_min": True,
+                    "exclusive_max": True,
                     "step": 0.1,
                 },
                 {
@@ -119,6 +124,7 @@ def test_builtin_definition_metadata_is_canonical_and_stably_ordered() -> None:
                     "default": 0.1,
                     "minimum": 0,
                     "maximum": None,
+                    "exclusive_min": True,
                     "step": 0.01,
                 },
             ],
@@ -148,6 +154,7 @@ def test_builtin_definition_metadata_is_canonical_and_stably_ordered() -> None:
                     "default": 2.0,
                     "minimum": 0,
                     "maximum": None,
+                    "exclusive_min": True,
                     "step": 0.1,
                 },
                 {
@@ -159,6 +166,7 @@ def test_builtin_definition_metadata_is_canonical_and_stably_ordered() -> None:
                     "default": 0.1,
                     "minimum": 0,
                     "maximum": None,
+                    "exclusive_min": True,
                     "step": 0.01,
                 },
             ],
@@ -199,6 +207,7 @@ def test_builtin_definition_metadata_is_canonical_and_stably_ordered() -> None:
                     "default": 0.1,
                     "minimum": 0,
                     "maximum": None,
+                    "exclusive_min": True,
                     "step": 0.01,
                 },
             ],
@@ -253,6 +262,101 @@ def test_normalize_config_trims_fields_applies_defaults_and_coerces_numbers() ->
     assert normalized.timeframe == "1h"
     assert normalized.enabled is False
     assert normalized.params == {"fast_window": 5, "slow_window": 30, "amount": 1.0}
+
+
+def test_normalize_config_accepts_runtime_two_hour_timeframe() -> None:
+    normalized = make_registry().normalize_config(
+        name="two-hour",
+        strategy_type="ma_cross",
+        symbol="BTC-USDT-SWAP",
+        timeframe="  2h  ",
+        params={},
+    )
+
+    assert normalized.timeframe == "2h"
+
+
+@pytest.mark.parametrize("timeframe", ["7m", "invalid", "1M", "3M"])
+def test_normalize_config_rejects_unsupported_runtime_timeframes(timeframe: str) -> None:
+    with pytest.raises(StrategyConfigValidationError) as error:
+        make_registry().normalize_config(
+            name="unsupported-timeframe",
+            strategy_type="ma_cross",
+            symbol="BTC-USDT-SWAP",
+            timeframe=timeframe,
+            params={},
+        )
+
+    assert [
+        (issue.path, issue.code, issue.message)
+        for issue in error.value.issues
+        if issue.path == "timeframe"
+    ] == [
+        ("timeframe", "unsupported_timeframe", "Unsupported strategy timeframe")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("config", "expected_code"),
+    [
+        (
+            {
+                "name": "missing-timeframe",
+                "strategy_type": "ma_cross",
+                "symbol": "BTC-USDT-SWAP",
+                "params": {},
+            },
+            "missing_required",
+        ),
+        (
+            {
+                "name": "empty-timeframe",
+                "strategy_type": "ma_cross",
+                "symbol": "BTC-USDT-SWAP",
+                "timeframe": " ",
+                "params": {},
+            },
+            "empty",
+        ),
+        (
+            {
+                "name": "invalid-timeframe-type",
+                "strategy_type": "ma_cross",
+                "symbol": "BTC-USDT-SWAP",
+                "timeframe": 2,
+                "params": {},
+            },
+            "invalid_type",
+        ),
+    ],
+)
+def test_normalize_config_does_not_duplicate_required_timeframe_issues(
+    config: dict[str, object], expected_code: str
+) -> None:
+    with pytest.raises(StrategyConfigValidationError) as error:
+        make_registry().normalize_config(config)
+
+    assert [
+        (issue.path, issue.code)
+        for issue in error.value.issues
+        if issue.path == "timeframe"
+    ] == [("timeframe", expected_code)]
+
+
+@pytest.mark.parametrize("timeframe", ["7m", "invalid", "1M", "3M"])
+def test_create_instance_rejects_unsupported_runtime_timeframe(timeframe: str) -> None:
+    with pytest.raises(StrategyConfigValidationError) as error:
+        make_registry().create_instance(
+            name="unsupported-timeframe",
+            strategy_type="ma_cross",
+            symbol="BTC-USDT-SWAP",
+            timeframe=timeframe,
+            params={},
+        )
+
+    assert {(issue.path, issue.code) for issue in error.value.issues} == {
+        ("timeframe", "unsupported_timeframe")
+    }
 
 
 @pytest.mark.parametrize("value", [True, 3.5, math.nan, math.inf, -math.inf, "3"])
@@ -401,6 +505,23 @@ def test_normalize_config_rejects_unsupported_strategy_type() -> None:
     assert issue_codes(unsupported.value) == {"unsupported_strategy_type"}
 
 
+def test_normalize_config_rejects_exchange_system_actor_as_strategy_name() -> None:
+    with pytest.raises(StrategyConfigValidationError) as error:
+        make_registry().normalize_config(
+            name="__exchange__",
+            strategy_type="ma_cross",
+            symbol="BTC-USDT",
+            timeframe="1h",
+            params={},
+        )
+
+    assert {
+        (issue.path, issue.code)
+        for issue in error.value.issues
+        if issue.path == "name"
+    } == {("name", "reserved_name")}
+
+
 @pytest.mark.parametrize(
     ("strategy_type", "params", "expected_params", "expected_types", "expected_class"),
     [
@@ -456,3 +577,37 @@ def test_create_instance_supports_all_builtin_strategy_types_with_normalized_ide
         assert actual == expected_value
         assert type(actual) is expected_types[key]
     assert registry.list_implicit_strategies() == ["ma_cross"]
+
+
+def test_normalize_config_rejects_builtin_strategy_name() -> None:
+    with pytest.raises(StrategyConfigValidationError) as error:
+        make_registry().normalize_config(
+            name="ma_cross",
+            strategy_type="ma_cross",
+            symbol="BTC-USDT",
+            timeframe="1h",
+            params={},
+        )
+
+    assert issue_codes(error.value) == {"reserved_name"}
+
+
+def test_strategy_definition_exposes_exclusive_parameter_bounds() -> None:
+    definition = make_registry().get_definition("rsi_mean_reversion")
+    parameters = {param["key"]: param for param in definition.to_dict()["params"]}
+
+    assert parameters["oversold"]["exclusive_min"] is True
+    assert parameters["oversold"]["exclusive_max"] is True
+
+
+def test_normalize_config_rejects_all_system_prefixed_strategy_names() -> None:
+    with pytest.raises(StrategyConfigValidationError) as error:
+        make_registry().normalize_config(
+            name="__risk_actor",
+            strategy_type="ma_cross",
+            symbol="BTC-USDT",
+            timeframe="1h",
+            params={},
+        )
+
+    assert issue_codes(error.value) == {"reserved_name"}

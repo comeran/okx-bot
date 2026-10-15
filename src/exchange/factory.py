@@ -34,7 +34,8 @@ def create_okx_adapter(
     exchange: object,
     adapter_classes: Mapping[str, OKXAdapterFactory] | None = None,
 ) -> ExchangeAdapter:
-    if not exchange.api_key or not exchange.secret or not exchange.passphrase:
+    credentials = (exchange.api_key, exchange.secret, exchange.passphrase)
+    if any(not isinstance(value, str) or not value.strip() for value in credentials):
         raise ValueError("Live trading requires OKX api_key, secret, and passphrase")
 
     market_type = exchange.market_type.strip().lower()

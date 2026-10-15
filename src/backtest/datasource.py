@@ -10,7 +10,26 @@ class BacktestDataSource:
         self.timeframe = timeframe
 
     def get_cached_bars(self, start: int, end: int) -> list[Bar]:
-        klines = self.repo.get_klines(self.symbol, self.timeframe, start, end)
+        try:
+            klines = self.repo.get_klines(
+                self.symbol,
+                self.timeframe,
+                start,
+                end,
+                source="backtest",
+                runtime_mode="backtest",
+            )
+        except TypeError as exc:
+            if "unexpected keyword argument" not in str(exc):
+                raise
+            # A legacy repository cannot prove that unscoped rows belong to the
+            # backtest domain, so never fall back to its unscoped result.
+            return []
+        scoped_klines = [
+            kline
+            for kline in klines
+            if kline.source == "backtest" and kline.runtime_mode == "backtest"
+        ]
         return [
             Bar(
                 timestamp=kline.timestamp,
@@ -20,7 +39,7 @@ class BacktestDataSource:
                 close=kline.close,
                 volume=kline.volume,
             )
-            for kline in klines
+            for kline in scoped_klines
         ]
 
     def save_bars_to_cache(self, bars: list[Bar]) -> None:
@@ -35,5 +54,7 @@ class BacktestDataSource:
                     low=bar.low,
                     close=bar.close,
                     volume=bar.volume,
+                    source="backtest",
+                    runtime_mode="backtest",
                 )
             )

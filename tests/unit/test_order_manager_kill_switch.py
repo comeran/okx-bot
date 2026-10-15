@@ -4,13 +4,14 @@ import pytest
 
 from src.core.types import Order, OrderSide, OrderStatus, OrderType
 from src.order.manager import UnifiedOrderManager, risk_reason_code
+from src.strategy.base import BaseStrategy
 
 
 class RecordingRepository:
     def __init__(self):
         self.orders = []
 
-    def save_order(self, order):
+    def upsert_order(self, order):
         self.orders.append(order)
         return order
 
@@ -79,3 +80,29 @@ async def test_disengaged_kill_switch_allows_router_submit():
 
 def test_kill_switch_reason_code_is_specific():
     assert risk_reason_code("Kill switch engaged") == "kill_switch_engaged"
+
+
+@pytest.mark.asyncio
+async def test_strategy_submit_rejects_unsafe_limit_order_values():
+    class TestStrategy(BaseStrategy):
+        name = "test_strategy"
+
+        async def on_bar(self, bar):
+            del bar
+
+    router = AsyncMock()
+    router.submit.side_effect = lambda order: order
+    manager = UnifiedOrderManager(router=router)
+    strategy = TestStrategy()
+    strategy.set_order_manager(manager)
+
+    order = await strategy.buy(
+        "BTC-USDT",
+        amount=-float("inf"),
+        price=float("nan"),
+    )
+
+    assert order.amount == 0.0
+    assert order.price is None
+    assert order.status.value == "rejected"
+    router.submit.assert_not_awaited()

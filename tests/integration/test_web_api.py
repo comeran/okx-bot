@@ -1,14 +1,24 @@
 import asyncio
 import subprocess
 import sys
+from dataclasses import asdict
 from types import SimpleNamespace
 
 import pytest
 import yaml
-from fastapi import FastAPI
+from ccxt.base.errors import (
+    AuthenticationError,
+    NetworkError,
+    NotSupported,
+    PermissionDenied,
+    RequestTimeout,
+)
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from httpx import ASGITransport, AsyncClient
+from starlette.websockets import WebSocketDisconnect
 
+from src.analytics.strategy_performance import build_strategy_performance
 from src.core.config import AppConfig, ExchangeConfig, RiskConfig
 from src.core.engine import BotEngine
 from src.core.types import Bar, Order, OrderSide, OrderStatus, OrderType
@@ -17,9 +27,14 @@ from src.data.models import (
     BacktestResultRecord,
     BacktestTradeRecord,
     KlineCache,
+    OrderRecord,
     PositionRecord,
     StrategyConfigRecord,
+    TradeRecord,
 )
+from src.data.repository import Repository as SqliteRepository
+from src.exchange import factory as adapter_factory
+from src.exchange.errors import MalformedProviderData
 from src.exchange.live_sync import LiveStateSyncResult
 from src.order.manager import UnifiedOrderManager
 from src.strategy.base import BaseStrategy
@@ -32,6 +47,7 @@ from src.web import app as web_app
 from src.web.api import backtest as backtest_api
 from src.web.api import market as market_api
 from src.web.api import ops as ops_api
+from src.web.api import strategies
 from src.web.api import strategies as strategy_api
 from src.web.api import trading as trading_api
 from src.web.app import app as exported_app
@@ -39,7 +55,22 @@ from src.web.app import create_app
 
 
 @pytest.fixture
-def app():
+def app(monkeypatch, tmp_path):
+    db_path = tmp_path / "bot.db"
+
+    def repository_factory(db_path=db_path):
+        return SqliteRepository(db_path=str(db_path))
+
+    for module in (
+        web_app,
+        strategy_api,
+        ops_api,
+        trading_api,
+        market_api,
+        backtest_api,
+    ):
+        monkeypatch.setattr(module, "Repository", repository_factory, raising=False)
+
     return create_app()
 
 
@@ -131,6 +162,242 @@ def test_private_sync_endpoint_rejects_live_mode(monkeypatch):
     assert response.json()["detail"] == "Private sync is only available in OKX demo mode"
 
 
+def test_private_sync_endpoint_preserves_none_symbols_for_full_sync(monkeypatch):
+    class FakeAdapter:
+        async def close(self):
+            pass
+
+    captured = {}
+
+    class FakeResult:
+        def as_response(self):
+            return {
+                "account_upserted": 0,
+                "orders_upserted": 0,
+                "trades_upserted": 0,
+                "trades_status": "available",
+                "risk_events_saved": 0,
+                "kill_switch_engaged": False,
+                "divergences": [],
+            }
+
+    async def fake_sync(*args, **kwargs):
+        captured.update(kwargs)
+        return FakeResult()
+
+    monkeypatch.setattr(ops_api.settings_api, "_load_settings", lambda: private_sync_settings())
+    monkeypatch.setattr(ops_api, "_create_adapter", lambda settings: FakeAdapter())
+    monkeypatch.setattr(ops_api, "sync_private_state", fake_sync)
+    app = FastAPI()
+    app.include_router(ops_api.create_router(), prefix="/api/ops")
+
+    response = TestClient(app).post("/api/ops/sync/private", json={})
+
+    assert response.status_code == 200
+    assert captured["symbols"] is None
+
+
+def test_private_sync_endpoint_broadcasts_exchange_snapshot_after_success(monkeypatch):
+    class FakeAdapter:
+        async def close(self):
+            pass
+
+    class FakeResult:
+        def as_response(self):
+            return {
+                "account_upserted": 1,
+                "orders_upserted": 1,
+                "trades_upserted": 1,
+                "trades_status": "available",
+                "risk_events_saved": 0,
+                "kill_switch_engaged": False,
+                "divergences": [],
+            }
+
+    async def fake_sync(*args, **kwargs):
+        return FakeResult()
+
+    broadcasts = []
+    async def broadcast(message):
+        broadcasts.append(message)
+
+    monkeypatch.setattr(ops_api.settings_api, "_load_settings", lambda: private_sync_settings())
+    monkeypatch.setattr(ops_api, "_create_adapter", lambda settings: FakeAdapter())
+    monkeypatch.setattr(ops_api, "sync_private_state", fake_sync)
+    app = FastAPI()
+    app.include_router(ops_api.create_router(broadcast=broadcast), prefix="/api/ops")
+
+    response = TestClient(app).post("/api/ops/sync/private", json={})
+
+    assert response.status_code == 200
+    assert len(broadcasts) == 1
+    assert broadcasts[0]["type"] == "snapshot"
+    assert broadcasts[0]["scope"] == "exchange"
+    assert broadcasts[0]["strategy"] == "__exchange__"
+    assert broadcasts[0]["data"]["scope"] == "exchange"
+
+
+def test_private_sync_endpoint_rejects_invalid_symbol_scope(monkeypatch):
+    monkeypatch.setattr(
+        ops_api,
+        "_create_adapter",
+        lambda settings: (_ for _ in ()).throw(AssertionError("adapter should not be created")),
+    )
+    app = FastAPI()
+    app.include_router(ops_api.create_router(), prefix="/api/ops")
+
+    response = TestClient(app).post(
+        "/api/ops/sync/private",
+        json={"symbols": ["", "NOT-A-SYMBOL"]},
+    )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize("market_type", ["OPTIONS", " option "])
+def test_private_sync_endpoint_uses_factory_market_type_aliases(monkeypatch, market_type):
+    class FakeAdapter:
+        async def close(self):
+            pass
+
+    class FakeResult:
+        def as_response(self):
+            return {
+                "account_upserted": 0,
+                "orders_upserted": 0,
+                "trades_upserted": 0,
+                "trades_status": "available",
+                "risk_events_saved": 0,
+                "kill_switch_engaged": False,
+                "divergences": [],
+            }
+
+    def fake_options_adapter(*args, **kwargs):
+        return FakeAdapter()
+
+    async def fake_sync(*args, **kwargs):
+        return FakeResult()
+
+    monkeypatch.setattr(
+        adapter_factory,
+        "OKX_ADAPTERS",
+        {"option": fake_options_adapter, "options": fake_options_adapter},
+    )
+    monkeypatch.setattr(
+        ops_api.settings_api,
+        "_load_settings",
+        lambda: private_sync_settings(market_type=market_type),
+    )
+    monkeypatch.setattr(ops_api, "sync_private_state", fake_sync)
+    app = FastAPI()
+    app.include_router(ops_api.create_router(), prefix="/api/ops")
+
+    response = TestClient(app).post("/api/ops/sync/private", json={})
+
+    assert response.status_code == 200
+
+
+def test_private_sync_endpoint_rejects_unsupported_factory_market_type(monkeypatch):
+    monkeypatch.setattr(
+        ops_api.settings_api,
+        "_load_settings",
+        lambda: private_sync_settings(market_type="unsupported"),
+    )
+    app = FastAPI()
+    app.include_router(ops_api.create_router(), prefix="/api/ops")
+
+    response = TestClient(app).post("/api/ops/sync/private", json={})
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "Unsupported OKX market_type for live trading: unsupported"
+    )
+
+
+@pytest.mark.parametrize("error", [TimeoutError("timed out"), ConnectionError("offline")])
+def test_private_sync_endpoint_maps_provider_network_errors_to_502(monkeypatch, error):
+    class FakeAdapter:
+        async def close(self):
+            pass
+
+    async def failing_sync(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(ops_api.settings_api, "_load_settings", lambda: private_sync_settings())
+    monkeypatch.setattr(ops_api, "_create_adapter", lambda settings: FakeAdapter())
+    monkeypatch.setattr(ops_api, "sync_private_state", failing_sync)
+    app = FastAPI()
+    app.include_router(ops_api.create_router(), prefix="/api/ops")
+
+    response = TestClient(app).post("/api/ops/sync/private", json={})
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == "OKX provider unavailable"
+
+
+def test_private_sync_endpoint_maps_malformed_provider_data_to_502(monkeypatch):
+    class FakeAdapter:
+        async def close(self):
+            pass
+
+    async def failing_sync(*args, **kwargs):
+        from src.exchange.errors import MalformedProviderData
+        raise MalformedProviderData("bad provider payload")
+
+    monkeypatch.setattr(ops_api.settings_api, "_load_settings", lambda: private_sync_settings())
+    monkeypatch.setattr(ops_api, "_create_adapter", lambda settings: FakeAdapter())
+    monkeypatch.setattr(ops_api, "sync_private_state", failing_sync)
+    app = FastAPI()
+    app.include_router(ops_api.create_router(), prefix="/api/ops")
+
+    response = TestClient(app).post("/api/ops/sync/private", json={})
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == "Malformed OKX provider data"
+
+
+def test_private_sync_endpoint_maps_unsupported_provider_capability_to_501_even_if_close_fails(
+    monkeypatch,
+):
+    class FakeAdapter:
+        async def close(self):
+            raise RuntimeError("close failed")
+
+    async def failing_sync(*args, **kwargs):
+        raise NotSupported("trigger orders are unsupported")
+
+    monkeypatch.setattr(ops_api.settings_api, "_load_settings", lambda: private_sync_settings())
+    monkeypatch.setattr(ops_api, "_create_adapter", lambda settings: FakeAdapter())
+    monkeypatch.setattr(ops_api, "sync_private_state", failing_sync)
+    app = FastAPI()
+    app.include_router(ops_api.create_router(), prefix="/api/ops")
+
+    response = TestClient(app).post("/api/ops/sync/private", json={})
+
+    assert response.status_code == 501
+    assert response.json() == {"detail": "OKX provider capability unsupported"}
+
+
+def test_private_sync_endpoint_preserves_http_errors(monkeypatch):
+    class FakeAdapter:
+        async def close(self):
+            pass
+
+    async def failing_sync(*args, **kwargs):
+        raise HTTPException(status_code=422, detail="business validation failed")
+
+    monkeypatch.setattr(ops_api.settings_api, "_load_settings", lambda: private_sync_settings())
+    monkeypatch.setattr(ops_api, "_create_adapter", lambda settings: FakeAdapter())
+    monkeypatch.setattr(ops_api, "sync_private_state", failing_sync)
+    app = FastAPI()
+    app.include_router(ops_api.create_router(), prefix="/api/ops")
+
+    response = TestClient(app).post("/api/ops/sync/private", json={})
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "business validation failed"
+
+
 def test_private_sync_endpoint_returns_counts_in_demo_mode(monkeypatch):
     class FakeAdapter:
         closed = False
@@ -147,6 +414,7 @@ def test_private_sync_endpoint_returns_counts_in_demo_mode(monkeypatch):
                 "account_upserted": 1,
                 "orders_upserted": 2,
                 "trades_upserted": 3,
+                "trades_status": "available",
                 "risk_events_saved": 1,
                 "kill_switch_engaged": True,
                 "divergences": [{"type": "risk_event"}],
@@ -184,6 +452,7 @@ def test_private_sync_endpoint_returns_counts_in_demo_mode(monkeypatch):
         "account_upserted": 1,
         "orders_upserted": 2,
         "trades_upserted": 3,
+        "trades_status": "available",
         "risk_events_saved": 1,
         "kill_switch_engaged": True,
         "divergences": [{"type": "risk_event"}],
@@ -193,6 +462,68 @@ def test_private_sync_endpoint_returns_counts_in_demo_mode(monkeypatch):
     assert captured["kwargs"]["symbols"] == ["BTC-USDT"]
     assert captured["kwargs"]["since"] == 1700000000000
     assert adapter.closed is True
+
+
+@pytest.mark.parametrize(
+    "close_error",
+    [
+        NetworkError("close failed"),
+        TimeoutError("close timed out"),
+        ConnectionError("close offline"),
+    ],
+)
+def test_private_sync_endpoint_ignores_close_error_after_success(monkeypatch, caplog, close_error):
+    class FakeAdapter:
+        async def close(self):
+            raise close_error
+
+    class FakeResult:
+        def as_response(self):
+            return {"account_upserted": 1, "orders_upserted": 0, "trades_upserted": 0,
+                    "risk_events_saved": 0, "kill_switch_engaged": False, "divergences": []}
+
+    async def successful_sync(*args, **kwargs):
+        return FakeResult()
+
+    monkeypatch.setattr(ops_api.settings_api, "_load_settings", lambda: private_sync_settings())
+    monkeypatch.setattr(ops_api, "_create_adapter", lambda settings: FakeAdapter())
+    monkeypatch.setattr(ops_api, "sync_private_state", successful_sync)
+    app = FastAPI()
+    app.include_router(ops_api.create_router(), prefix="/api/ops")
+
+    response = TestClient(app).post("/api/ops/sync/private", json={})
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+    assert "Failed to close private sync adapter" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "close_error",
+    [
+        NetworkError("close failed"),
+        TimeoutError("close timed out"),
+        ConnectionError("close offline"),
+    ],
+)
+def test_private_sync_endpoint_preserves_sync_error_when_close_also_fails(monkeypatch, close_error):
+    class FakeAdapter:
+        async def close(self):
+            raise close_error
+
+    async def failing_sync(*args, **kwargs):
+        raise TimeoutError("sync timed out")
+
+    monkeypatch.setattr(ops_api.settings_api, "_load_settings", lambda: private_sync_settings())
+    monkeypatch.setattr(ops_api, "_create_adapter", lambda settings: FakeAdapter())
+    monkeypatch.setattr(ops_api, "sync_private_state", failing_sync)
+    app = FastAPI()
+    app.include_router(ops_api.create_router(), prefix="/api/ops")
+
+    response = TestClient(app).post("/api/ops/sync/private", json={})
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == "OKX provider unavailable"
 
 
 @pytest.mark.asyncio
@@ -280,7 +611,7 @@ async def test_legacy_ma_cross_runtime_defaults_to_1m_subscription_and_latest_pr
     class FakeMarketDataService:
         def __init__(self):
             self.subscriptions = []
-            self.bars = {("BTC-USDT", "1m"): [Bar(1, 10, 11, 9, 123.45, 1)]}
+            self.bars = {("BTC-USDT", "1m"): [Bar(1, 10, 130, 9, 123.45, 1)]}
             self._running = False
 
         def subscribe(self, symbol, timeframe, callback):
@@ -291,6 +622,9 @@ async def test_legacy_ma_cross_runtime_defaults_to_1m_subscription_and_latest_pr
 
         async def start(self):
             self._running = True
+            for symbol, timeframe, callback in list(self.subscriptions):
+                for bar in self.bars.get((symbol, timeframe), []):
+                    await callback(bar)
 
     class CapturingOrderManager:
         async def submit(self, *args, **kwargs):
@@ -396,6 +730,70 @@ async def test_strategy_config_api_saves_and_lists_configs(monkeypatch):
     }
     assert list_resp.status_code == 200
     assert [item["name"] for item in list_resp.json()] == ["ma_cross_btc"]
+
+
+@pytest.mark.asyncio
+async def test_strategy_config_api_rejects_reserved_exchange_actor_name(monkeypatch):
+    class FakeRepository:
+        configs = []
+
+        def get_strategy_configs(self):
+            return self.configs
+
+        def create_strategy_config(self, config):
+            self.configs.append(config)
+            return config
+
+    FakeRepository.configs = []
+    monkeypatch.setattr(strategy_api, "Repository", FakeRepository, raising=False)
+
+    transport = ASGITransport(app=create_app())
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/strategies/configs",
+            json={
+                "name": "__exchange__",
+                "strategy_type": "ma_cross",
+                "symbol": "BTC-USDT",
+                "timeframe": "1h",
+                "params": {},
+                "enabled": True,
+            },
+        )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["issues"] == [
+        {
+            "path": "name",
+            "code": "reserved_name",
+            "message": "Strategy name is reserved for the exchange system actor",
+            "line": None,
+            "column": None,
+        }
+    ]
+    assert FakeRepository.configs == []
+
+
+@pytest.mark.asyncio
+async def test_strategy_config_api_validation_rejects_reserved_exchange_actor_name(monkeypatch):
+    monkeypatch.setattr(strategy_api, "Repository", lambda: object(), raising=False)
+
+    transport = ASGITransport(app=create_app())
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/strategies/configs/validate",
+            json={
+                "name": "__exchange__",
+                "strategy_type": "ma_cross",
+                "symbol": "BTC-USDT",
+                "timeframe": "1h",
+                "params": {},
+                "enabled": True,
+            },
+        )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["issues"][0]["code"] == "reserved_name"
 
 
 @pytest.mark.asyncio
@@ -740,10 +1138,21 @@ class FakeMarketDataService:
     async def start(self):
         self.start_calls += 1
         self._running = True
+        for _symbol, _timeframe, callback in list(self.subscriptions):
+            await callback(Bar(1, 1, 1, 1, 1, 1))
 
     async def stop(self):
         self.stop_calls += 1
         self._running = False
+
+
+@pytest.fixture(autouse=True)
+def fake_market_data_service_factory(monkeypatch):
+    monkeypatch.setattr(
+        strategy_api,
+        "create_market_data_service",
+        lambda: FakeMarketDataService(),
+    )
 
 
 @pytest.fixture
@@ -767,6 +1176,148 @@ def isolated_strategy_config_api(monkeypatch):
         prefix="/api/strategies",
     )
     return app, runtime, messages
+
+
+@pytest.mark.asyncio
+async def test_clone_config_to_different_strategy_type_replaces_source_params(
+    isolated_strategy_config_api,
+):
+    app, _runtime, _messages = isolated_strategy_config_api
+    source_params = {"window": 20, "stddev_multiplier": 2, "amount": 0.1}
+    target_params = {
+        "period": 14,
+        "oversold": 30,
+        "overbought": 70,
+        "amount": 0.25,
+    }
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        create_resp = await client.post(
+            "/api/strategies/configs",
+            json={
+                "name": "test",
+                "strategy_type": "bollinger_mean_reversion",
+                "symbol": "BTC-USDT",
+                "timeframe": "1h",
+                "params": source_params,
+                "enabled": True,
+            },
+        )
+        clone_resp = await client.post(
+            "/api/strategies/configs/test/clone",
+            json={
+                "target_name": "test_rsi_clone",
+                "overrides": {
+                    "strategy_type": "rsi_mean_reversion",
+                    "symbol": "ETH-USDT",
+                    "timeframe": "15m",
+                    "enabled": False,
+                    "params": target_params,
+                },
+            },
+        )
+
+    assert create_resp.status_code == 201
+    assert clone_resp.status_code == 201
+    clone = clone_resp.json()
+    assert clone["enabled"] is False
+    assert clone["strategy_type"] == "rsi_mean_reversion"
+    assert clone["params"] == target_params
+    assert "window" not in clone["params"]
+    assert "stddev_multiplier" not in clone["params"]
+    assert IsolatedStrategyConfigRepository.configs["test_rsi_clone"].params == target_params
+
+
+@pytest.mark.asyncio
+async def test_clone_config_to_different_strategy_type_without_params_uses_target_defaults(
+    isolated_strategy_config_api,
+):
+    app, _runtime, _messages = isolated_strategy_config_api
+    source_params = {"window": 20, "stddev_multiplier": 2, "amount": 0.1}
+    rsi_defaults = {
+        "period": 14,
+        "oversold": 30,
+        "overbought": 70,
+        "amount": 0.1,
+    }
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        create_resp = await client.post(
+            "/api/strategies/configs",
+            json={
+                "name": "test",
+                "strategy_type": "bollinger_mean_reversion",
+                "symbol": "BTC-USDT",
+                "timeframe": "1h",
+                "params": source_params,
+                "enabled": True,
+            },
+        )
+        clone_resp = await client.post(
+            "/api/strategies/configs/test/clone",
+            json={
+                "target_name": "test_rsi_defaults_clone",
+                "overrides": {
+                    "strategy_type": "rsi_mean_reversion",
+                },
+            },
+        )
+
+    assert create_resp.status_code == 201
+    assert clone_resp.status_code == 201
+    clone = clone_resp.json()
+    assert clone["enabled"] is False
+    assert clone["strategy_type"] == "rsi_mean_reversion"
+    assert clone["params"] == rsi_defaults
+    assert "window" not in clone["params"]
+    assert "stddev_multiplier" not in clone["params"]
+    stored_clone = IsolatedStrategyConfigRepository.configs["test_rsi_defaults_clone"]
+    assert stored_clone.params == rsi_defaults
+
+
+@pytest.mark.asyncio
+async def test_clone_config_to_canonically_same_strategy_type_merges_partial_params(
+    isolated_strategy_config_api,
+):
+    app, _runtime, _messages = isolated_strategy_config_api
+    source_params = {"window": 24, "stddev_multiplier": 2.5, "amount": 0.2}
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        create_resp = await client.post(
+            "/api/strategies/configs",
+            json={
+                "name": "test",
+                "strategy_type": "bollinger_mean_reversion",
+                "symbol": "BTC-USDT",
+                "timeframe": "1h",
+                "params": source_params,
+                "enabled": True,
+            },
+        )
+        clone_resp = await client.post(
+            "/api/strategies/configs/test/clone",
+            json={
+                "target_name": "test_bollinger_clone",
+                "overrides": {
+                    "strategy_type": " bollinger_mean_reversion ",
+                    "params": {"amount": 0.35},
+                },
+            },
+        )
+
+    assert create_resp.status_code == 201
+    assert clone_resp.status_code == 201
+    clone = clone_resp.json()
+    assert clone["enabled"] is False
+    assert clone["strategy_type"] == "bollinger_mean_reversion"
+    assert clone["params"]["amount"] == 0.35
+    assert clone["params"]["window"] == 24
+    assert clone["params"]["stddev_multiplier"] == 2.5
+    stored_clone = IsolatedStrategyConfigRepository.configs["test_bollinger_clone"]
+    assert stored_clone.params == clone["params"]
 
 
 @pytest.fixture
@@ -909,15 +1460,940 @@ async def test_strategy_config_api_accepts_all_registered_builtin_types(
     assert any(
         config["name"] == case["name"]
         and all(
-            config[field] == expected_value
-            for field, expected_value in expected_config.items()
+            config[field] == expected_value for field, expected_value in expected_config.items()
         )
         for config in configs
     )
     assert {"name": case["name"], "status": "stopped"} in statuses
-    assert case["strategy_type"] in {
-        definition["strategy_type"] for definition in strategy_types
-    }
+    assert case["strategy_type"] in {definition["strategy_type"] for definition in strategy_types}
+
+
+@pytest.mark.asyncio
+async def test_strategy_start_preserves_preexisting_startup_owner(
+    hermetic_persisted_builtin_strategy_api,
+    monkeypatch,
+):
+    environment = hermetic_persisted_builtin_strategy_api
+    sentinel_owner = SimpleNamespace(stop_calls=0)
+    constructed_engines = []
+
+    async def fail_live_sync(*args, **kwargs):
+        raise AssertionError("External OKX sync must not be attempted")
+
+    class RecordingEngine:
+        def __init__(self, *args, **kwargs):
+            self.start_calls = 0
+            self.stop_calls = 0
+            constructed_engines.append(self)
+
+        async def start(self):
+            self.start_calls += 1
+
+        async def stop(self):
+            self.stop_calls += 1
+
+    monkeypatch.setattr(strategy_api, "refresh_okx_live_state", fail_live_sync, raising=False)
+    monkeypatch.setattr(strategy_api, "BotEngine", RecordingEngine)
+    environment.runtime.starting_engines["ma_cross"] = sentinel_owner
+    transport = ASGITransport(app=environment.app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/api/strategies/ma_cross/start")
+
+    assert response.status_code == 200
+    assert environment.runtime.starting_engines.get("ma_cross") is sentinel_owner
+    assert constructed_engines == []
+    assert sentinel_owner.stop_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_strategy_start_cancellation_during_engine_start_cleans_startup_owner(
+    hermetic_persisted_builtin_strategy_api,
+    monkeypatch,
+):
+    environment = hermetic_persisted_builtin_strategy_api
+    created_engines = []
+    start_entered = asyncio.Event()
+
+    class CancellableStartEngine:
+        def __init__(self, *args, **kwargs):
+            self.stop_calls = 0
+            created_engines.append(self)
+
+        async def start(self):
+            start_entered.set()
+            await asyncio.Future()
+
+        async def stop(self):
+            self.stop_calls += 1
+
+    monkeypatch.setattr(strategy_api, "BotEngine", CancellableStartEngine)
+    transport = ASGITransport(app=environment.app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        start_task = asyncio.create_task(client.post("/api/strategies/ma_cross/start"))
+        await asyncio.wait_for(start_entered.wait(), timeout=1)
+        engine = created_engines[0]
+        assert environment.runtime.starting_engines["ma_cross"] is engine
+
+        start_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await start_task
+
+    assert environment.runtime.starting_engines.get("ma_cross") is not engine
+    assert environment.runtime.engines.get("ma_cross") is not engine
+    assert engine.stop_calls == 1
+    assert environment.market_data.stop_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_strategy_start_cancellation_after_engine_start_cleans_orphaned_engine(
+    hermetic_persisted_builtin_strategy_api,
+    monkeypatch,
+):
+    environment = hermetic_persisted_builtin_strategy_api
+    created_engines = []
+
+    class CancelBeforeOwnershipTransferLock:
+        def __init__(self):
+            self._lock = asyncio.Lock()
+            self.entries = 0
+
+        async def __aenter__(self):
+            await self._lock.acquire()
+            self.entries += 1
+            if self.entries == 2:
+                self._lock.release()
+                asyncio.current_task().cancel()
+                await asyncio.sleep(0)
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            self._lock.release()
+
+    class StartedEngine:
+        def __init__(self, *args, **kwargs):
+            self.stop_calls = 0
+            created_engines.append(self)
+
+        async def start(self):
+            return None
+
+        async def stop(self):
+            self.stop_calls += 1
+
+    environment.runtime.market_data_lifecycle_lock = CancelBeforeOwnershipTransferLock()
+    monkeypatch.setattr(strategy_api, "BotEngine", StartedEngine)
+    transport = ASGITransport(app=environment.app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        start_task = asyncio.create_task(client.post("/api/strategies/ma_cross/start"))
+        with pytest.raises(asyncio.CancelledError):
+            await start_task
+
+    engine = created_engines[0]
+    assert environment.runtime.starting_engines.get("ma_cross") is not engine
+    assert environment.runtime.engines.get("ma_cross") is not engine
+    assert engine.stop_calls == 1
+    assert environment.market_data.stop_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_strategy_start_cancellation_preserves_request_cancel_when_stop_is_cancelled(
+    hermetic_persisted_builtin_strategy_api,
+    monkeypatch,
+):
+    environment = hermetic_persisted_builtin_strategy_api
+    created_engines = []
+    start_entered = asyncio.Event()
+
+    class StopCancelledEngine:
+        def __init__(self, *args, **kwargs):
+            self.stop_calls = 0
+            self.running = False
+            self.market_data_service = kwargs["market_data_service"]
+            created_engines.append(self)
+
+        async def start(self):
+            self.running = True
+            self.market_data_service._running = True
+            start_entered.set()
+            await asyncio.Future()
+
+        async def stop(self):
+            self.stop_calls += 1
+            self.running = False
+            raise asyncio.CancelledError("engine stop cleanup cancelled")
+
+    monkeypatch.setattr(strategy_api, "BotEngine", StopCancelledEngine)
+    transport = ASGITransport(app=environment.app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        start_task = asyncio.create_task(client.post("/api/strategies/ma_cross/start"))
+        await asyncio.wait_for(start_entered.wait(), timeout=1)
+        engine = created_engines[0]
+        assert environment.runtime.starting_engines["ma_cross"] is engine
+
+        start_task.cancel("original request cancellation")
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await start_task
+
+    assert exc_info.value.args == ("original request cancellation",)
+    assert environment.runtime.starting_engines.get("ma_cross") is not engine
+    assert environment.runtime.engines.get("ma_cross") is not engine
+    assert engine.running is False
+    assert engine.stop_calls == 1
+    assert environment.market_data.stop_calls == 1
+    assert environment.market_data._running is False
+
+
+@pytest.mark.asyncio
+async def test_strategy_start_cancellation_cleanup_finishes_despite_second_cancel(
+    hermetic_persisted_builtin_strategy_api,
+    monkeypatch,
+):
+    environment = hermetic_persisted_builtin_strategy_api
+    created_engines = []
+    start_entered = asyncio.Event()
+    stop_entered = asyncio.Event()
+    allow_stop_to_finish = asyncio.Event()
+
+    class SlowStopEngine:
+        def __init__(self, *args, **kwargs):
+            self.stop_calls = 0
+            self.running = False
+            self.market_data_service = kwargs["market_data_service"]
+            created_engines.append(self)
+
+        async def start(self):
+            self.running = True
+            self.market_data_service._running = True
+            start_entered.set()
+            await asyncio.Future()
+
+        async def stop(self):
+            self.stop_calls += 1
+            stop_entered.set()
+            await allow_stop_to_finish.wait()
+            self.running = False
+
+    monkeypatch.setattr(strategy_api, "BotEngine", SlowStopEngine)
+    transport = ASGITransport(app=environment.app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        start_task = asyncio.create_task(client.post("/api/strategies/ma_cross/start"))
+        await asyncio.wait_for(start_entered.wait(), timeout=1)
+        engine = created_engines[0]
+
+        start_task.cancel("first request cancellation")
+        await asyncio.wait_for(stop_entered.wait(), timeout=1)
+        start_task.cancel("second request cancellation")
+        await asyncio.sleep(0)
+        allow_stop_to_finish.set()
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await asyncio.wait_for(start_task, timeout=1)
+
+    assert exc_info.value.args == ("first request cancellation",)
+    assert environment.runtime.starting_engines.get("ma_cross") is not engine
+    assert environment.runtime.engines.get("ma_cross") is not engine
+    assert engine.running is False
+    assert engine.stop_calls == 1
+    assert environment.market_data.stop_calls == 1
+    assert environment.market_data._running is False
+
+
+@pytest.mark.asyncio
+async def test_strategy_start_cancellation_after_ownership_transfer_cleans_engine(
+    hermetic_persisted_builtin_strategy_api,
+    monkeypatch,
+):
+    environment = hermetic_persisted_builtin_strategy_api
+    created_engines = []
+    running_broadcast_entered = asyncio.Event()
+
+    async def broadcast(message):
+        if message["type"] == "strategy_status" and message["status"] == "running":
+            running_broadcast_entered.set()
+            await asyncio.Future()
+        environment.messages.append(message)
+
+    class TransferredEngine:
+        def __init__(self, *args, **kwargs):
+            self.stop_calls = 0
+            self.running = False
+            self.market_data_service = kwargs["market_data_service"]
+            created_engines.append(self)
+
+        async def start(self):
+            self.running = True
+            self.market_data_service._running = True
+
+        async def stop(self):
+            self.stop_calls += 1
+            self.running = False
+
+    app = FastAPI()
+    app.include_router(
+        strategy_api.create_router(broadcast=broadcast, runtime=environment.runtime),
+        prefix="/api/strategies",
+    )
+    monkeypatch.setattr(strategy_api, "BotEngine", TransferredEngine)
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        start_task = asyncio.create_task(client.post("/api/strategies/ma_cross/start"))
+        await asyncio.wait_for(running_broadcast_entered.wait(), timeout=1)
+        engine = created_engines[0]
+        assert environment.runtime.engines["ma_cross"] is engine
+
+        start_task.cancel("post-transfer cancellation")
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await start_task
+
+    assert exc_info.value.args == ("post-transfer cancellation",)
+    assert environment.runtime.engines.get("ma_cross") is not engine
+    assert environment.runtime.starting_engines.get("ma_cross") is not engine
+    assert environment.runtime.strategy_status["ma_cross"] == "stopped"
+    assert engine.running is False
+    assert engine.stop_calls == 1
+    assert environment.market_data.stop_calls == 1
+    assert environment.market_data._running is False
+    assert not any(message.get("status") == "running" for message in environment.messages)
+
+
+@pytest.mark.asyncio
+async def test_strategy_start_post_transfer_cleanup_finishes_despite_second_cancel(
+    hermetic_persisted_builtin_strategy_api,
+    monkeypatch,
+):
+    environment = hermetic_persisted_builtin_strategy_api
+    created_engines = []
+    running_broadcast_entered = asyncio.Event()
+    stop_entered = asyncio.Event()
+    allow_stop_to_finish = asyncio.Event()
+
+    async def broadcast(message):
+        if message["type"] == "strategy_status" and message["status"] == "running":
+            running_broadcast_entered.set()
+            await asyncio.Future()
+        environment.messages.append(message)
+
+    class SlowTransferredEngine:
+        def __init__(self, *args, **kwargs):
+            self.stop_calls = 0
+            self.running = False
+            self.market_data_service = kwargs["market_data_service"]
+            created_engines.append(self)
+
+        async def start(self):
+            self.running = True
+            self.market_data_service._running = True
+
+        async def stop(self):
+            self.stop_calls += 1
+            stop_entered.set()
+            await allow_stop_to_finish.wait()
+            self.running = False
+
+    app = FastAPI()
+    app.include_router(
+        strategy_api.create_router(broadcast=broadcast, runtime=environment.runtime),
+        prefix="/api/strategies",
+    )
+    monkeypatch.setattr(strategy_api, "BotEngine", SlowTransferredEngine)
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        start_task = asyncio.create_task(client.post("/api/strategies/ma_cross/start"))
+        await asyncio.wait_for(running_broadcast_entered.wait(), timeout=1)
+        engine = created_engines[0]
+
+        start_task.cancel("first post-transfer cancellation")
+        await asyncio.wait_for(stop_entered.wait(), timeout=1)
+        start_task.cancel("second post-transfer cancellation")
+        await asyncio.sleep(0)
+        allow_stop_to_finish.set()
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await asyncio.wait_for(start_task, timeout=1)
+
+    assert exc_info.value.args == ("first post-transfer cancellation",)
+    assert environment.runtime.engines.get("ma_cross") is not engine
+    assert environment.runtime.starting_engines.get("ma_cross") is not engine
+    assert engine.running is False
+    assert engine.stop_calls == 1
+    assert environment.market_data.stop_calls == 1
+    assert environment.market_data._running is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replacement_map", ["engines", "starting_engines"])
+async def test_strategy_start_post_transfer_cleanup_keeps_replacement_owner(
+    hermetic_persisted_builtin_strategy_api,
+    monkeypatch,
+    replacement_map,
+):
+    environment = hermetic_persisted_builtin_strategy_api
+    created_engines = []
+    running_broadcast_entered = asyncio.Event()
+    stop_entered = asyncio.Event()
+    allow_stop_to_finish = asyncio.Event()
+    replacement_engine = SimpleNamespace(stop_calls=0)
+
+    async def broadcast(message):
+        if message["type"] == "strategy_status" and message["status"] == "running":
+            running_broadcast_entered.set()
+            await asyncio.Future()
+        environment.messages.append(message)
+
+    class ReplacedTransferredEngine:
+        def __init__(self, *args, **kwargs):
+            self.stop_calls = 0
+            self.running = False
+            self.market_data_service = kwargs["market_data_service"]
+            created_engines.append(self)
+
+        async def start(self):
+            self.running = True
+            self.market_data_service._running = True
+
+        async def stop(self):
+            self.stop_calls += 1
+            stop_entered.set()
+            await allow_stop_to_finish.wait()
+            self.running = False
+
+    app = FastAPI()
+    app.include_router(
+        strategy_api.create_router(broadcast=broadcast, runtime=environment.runtime),
+        prefix="/api/strategies",
+    )
+    monkeypatch.setattr(strategy_api, "BotEngine", ReplacedTransferredEngine)
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        start_task = asyncio.create_task(client.post("/api/strategies/ma_cross/start"))
+        await asyncio.wait_for(running_broadcast_entered.wait(), timeout=1)
+        engine = created_engines[0]
+
+        start_task.cancel("replacement post-transfer cancellation")
+        await asyncio.wait_for(stop_entered.wait(), timeout=1)
+        async with environment.runtime.market_data_lifecycle_lock:
+            if replacement_map == "engines":
+                environment.runtime.engines["ma_cross"] = replacement_engine
+            else:
+                environment.runtime.starting_engines["ma_cross"] = replacement_engine
+        allow_stop_to_finish.set()
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await start_task
+
+    assert exc_info.value.args == ("replacement post-transfer cancellation",)
+    owner_map = getattr(environment.runtime, replacement_map)
+    assert owner_map["ma_cross"] is replacement_engine
+    assert engine.stop_calls == 1
+    assert engine.running is False
+    assert environment.market_data.stop_calls == 0
+    assert environment.market_data._running is True
+
+
+@pytest.mark.asyncio
+async def test_strategy_start_cancellation_keeps_replacement_startup_owner(
+    hermetic_persisted_builtin_strategy_api,
+    monkeypatch,
+):
+    environment = hermetic_persisted_builtin_strategy_api
+    created_engines = []
+    start_entered = asyncio.Event()
+    replacement_engine = object()
+
+    class ReplacedStartupOwnerEngine:
+        def __init__(self, *args, **kwargs):
+            self.stop_calls = 0
+            self.running = False
+            created_engines.append(self)
+
+        async def start(self):
+            self.running = True
+            start_entered.set()
+            await asyncio.Future()
+
+        async def stop(self):
+            self.stop_calls += 1
+            self.running = False
+
+    monkeypatch.setattr(strategy_api, "BotEngine", ReplacedStartupOwnerEngine)
+    transport = ASGITransport(app=environment.app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        start_task = asyncio.create_task(client.post("/api/strategies/ma_cross/start"))
+        await asyncio.wait_for(start_entered.wait(), timeout=1)
+        engine = created_engines[0]
+        assert environment.runtime.starting_engines["ma_cross"] is engine
+        environment.runtime.starting_engines["ma_cross"] = replacement_engine
+
+        start_task.cancel("request cancellation")
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await start_task
+
+    assert exc_info.value.args == ("request cancellation",)
+    assert environment.runtime.starting_engines["ma_cross"] is replacement_engine
+    assert environment.runtime.engines.get("ma_cross") is not engine
+    assert engine.running is False
+    assert engine.stop_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_strategy_start_success_keeps_replacement_startup_owner(
+    hermetic_persisted_builtin_strategy_api,
+    monkeypatch,
+):
+    environment = hermetic_persisted_builtin_strategy_api
+    created_engines = []
+    start_entered = asyncio.Event()
+    finish_start = asyncio.Event()
+    replacement_engine = object()
+
+    class SuccessfulReplacedStartupOwnerEngine:
+        def __init__(self, *args, **kwargs):
+            self.stop_calls = 0
+            self.running = False
+            created_engines.append(self)
+
+        async def start(self):
+            self.running = True
+            start_entered.set()
+            await finish_start.wait()
+
+        async def stop(self):
+            self.stop_calls += 1
+            self.running = False
+
+    monkeypatch.setattr(strategy_api, "BotEngine", SuccessfulReplacedStartupOwnerEngine)
+    transport = ASGITransport(app=environment.app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        start_task = asyncio.create_task(client.post("/api/strategies/ma_cross/start"))
+        await asyncio.wait_for(start_entered.wait(), timeout=1)
+        engine = created_engines[0]
+        assert environment.runtime.starting_engines["ma_cross"] is engine
+        async with environment.runtime.market_data_lifecycle_lock:
+            environment.runtime.starting_engines["ma_cross"] = replacement_engine
+            environment.runtime.strategy_status["ma_cross"] = "replacement-starting"
+            environment.runtime.strategy_errors["ma_cross"] = "replacement startup pending"
+
+        finish_start.set()
+        response = await start_task
+
+    assert environment.runtime.starting_engines["ma_cross"] is replacement_engine
+    assert environment.runtime.engines.get("ma_cross") is not engine
+    assert engine.running is False
+    assert engine.stop_calls == 1
+    assert environment.market_data.stop_calls == 0
+    assert environment.runtime.strategy_status["ma_cross"] == "replacement-starting"
+    assert environment.runtime.strategy_errors["ma_cross"] == "replacement startup pending"
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Strategy startup was superseded"
+
+
+@pytest.mark.asyncio
+async def test_strategy_start_failure_keeps_replacement_startup_owner(
+    hermetic_persisted_builtin_strategy_api,
+    monkeypatch,
+):
+    environment = hermetic_persisted_builtin_strategy_api
+    created_engines = []
+    start_entered = asyncio.Event()
+    fail_start = asyncio.Event()
+    replacement_engine = object()
+
+    class FailingReplacedStartupOwnerEngine:
+        def __init__(self, *args, **kwargs):
+            self.stop_calls = 0
+            self.running = False
+            created_engines.append(self)
+
+        async def start(self):
+            self.running = True
+            start_entered.set()
+            await fail_start.wait()
+            raise RuntimeError("startup boom")
+
+        async def stop(self):
+            self.stop_calls += 1
+            self.running = False
+
+    monkeypatch.setattr(strategy_api, "BotEngine", FailingReplacedStartupOwnerEngine)
+    transport = ASGITransport(app=environment.app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        start_task = asyncio.create_task(client.post("/api/strategies/ma_cross/start"))
+        await asyncio.wait_for(start_entered.wait(), timeout=1)
+        engine = created_engines[0]
+        assert environment.runtime.starting_engines["ma_cross"] is engine
+        environment.runtime.starting_engines["ma_cross"] = replacement_engine
+        environment.runtime.strategy_status["ma_cross"] = "replacement-starting"
+        environment.runtime.strategy_errors["ma_cross"] = "replacement startup pending"
+
+        fail_start.set()
+        response = await start_task
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "startup boom"
+    assert environment.runtime.starting_engines["ma_cross"] is replacement_engine
+    assert environment.runtime.engines.get("ma_cross") is not engine
+    assert engine.running is False
+    assert engine.stop_calls == 1
+    assert environment.market_data.stop_calls == 0
+    assert environment.runtime.strategy_status["ma_cross"] == "replacement-starting"
+    assert environment.runtime.strategy_errors["ma_cross"] == "replacement startup pending"
+
+
+@pytest.mark.asyncio
+async def test_strategy_start_ordinary_failure_records_current_startup_owner_error(
+    hermetic_persisted_builtin_strategy_api,
+    monkeypatch,
+):
+    environment = hermetic_persisted_builtin_strategy_api
+    created_engines = []
+
+    class FailingStartupOwnerEngine:
+        def __init__(self, *args, **kwargs):
+            self.stop_calls = 0
+            self.running = False
+            created_engines.append(self)
+
+        async def start(self):
+            self.running = True
+            raise RuntimeError("startup boom")
+
+        async def stop(self):
+            self.stop_calls += 1
+            self.running = False
+
+    monkeypatch.setattr(strategy_api, "BotEngine", FailingStartupOwnerEngine)
+    transport = ASGITransport(app=environment.app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/api/strategies/ma_cross/start")
+
+    engine = created_engines[0]
+    assert response.status_code == 400
+    assert response.json()["detail"] == "startup boom"
+    assert environment.runtime.starting_engines == {}
+    assert environment.runtime.engines == {}
+    assert engine.running is False
+    assert engine.stop_calls == 1
+    assert environment.market_data.stop_calls == 1
+    assert environment.runtime.strategy_status["ma_cross"] == "stopped"
+    assert environment.runtime.strategy_errors["ma_cross"] == "startup boom"
+    assert {
+        "type": "strategy_status",
+        "scope": "strategy",
+        "strategy": "ma_cross",
+        "status": "stopped",
+        "timestamp": 1700000000000,
+    } in environment.messages
+    assert {
+        "type": "strategy_error",
+        "scope": "strategy",
+        "strategy": "ma_cross",
+        "error": "startup boom",
+        "timestamp": 1700000000000,
+    } in environment.messages
+
+
+@pytest.mark.asyncio
+async def test_strategy_error_after_ownership_loss_does_not_report_against_replacement(
+    hermetic_persisted_builtin_strategy_api,
+    monkeypatch,
+):
+    environment = hermetic_persisted_builtin_strategy_api
+    created_engines = []
+    stop_entered = asyncio.Event()
+    release_stop = asyncio.Event()
+    replacement_installed = asyncio.Event()
+    broadcasts_after_replacement = []
+    messages = []
+
+    class BlockingStopMarketDataService(FakeMarketDataService):
+        async def stop(self):
+            self.stop_calls += 1
+            stop_entered.set()
+            await release_stop.wait()
+            self._running = False
+
+    class CallbackCapturingEngine:
+        def __init__(self, *args, **kwargs):
+            self.stop_calls = 0
+            self.running = False
+            self.on_strategy_error = kwargs["on_strategy_error"]
+            created_engines.append(self)
+
+        async def start(self):
+            self.running = True
+
+        async def stop(self):
+            self.stop_calls += 1
+            self.running = False
+
+    async def broadcast(message):
+        messages.append(message)
+        if replacement_installed.is_set() and message.get("type") in {
+            "strategy_status",
+            "strategy_error",
+        }:
+            broadcasts_after_replacement.append(message)
+
+    blocking_market_data = BlockingStopMarketDataService()
+    monkeypatch.setattr(strategy_api, "create_market_data_service", lambda: blocking_market_data)
+    monkeypatch.setattr(strategy_api, "BotEngine", CallbackCapturingEngine)
+    app = FastAPI()
+    app.include_router(
+        strategy_api.create_router(broadcast=broadcast, runtime=environment.runtime),
+        prefix="/api/strategies",
+    )
+    transport = ASGITransport(app=app)
+    error_task = None
+    replacement_engine = object()
+
+    try:
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            start_response = await client.post("/api/strategies/ma_cross/start")
+            assert start_response.status_code == 200
+
+            engine = created_engines[0]
+            assert environment.runtime.engines["ma_cross"] is engine
+            environment.runtime.strategy_status["ma_cross"] = "running"
+            environment.runtime.strategy_errors["ma_cross"] = "replacement B error"
+            messages.clear()
+
+            error_task = asyncio.create_task(
+                engine.on_strategy_error("ma_cross", RuntimeError("stale A boom"))
+            )
+            await asyncio.wait_for(stop_entered.wait(), timeout=1)
+            assert environment.runtime.engines.get("ma_cross") is not engine
+
+            environment.runtime.engines["ma_cross"] = replacement_engine
+            replacement_installed.set()
+            release_stop.set()
+            await asyncio.wait_for(error_task, timeout=1)
+    finally:
+        release_stop.set()
+        if error_task is not None and not error_task.done():
+            error_task.cancel()
+            await asyncio.gather(error_task, return_exceptions=True)
+
+    assert environment.runtime.engines["ma_cross"] is replacement_engine
+    assert environment.runtime.strategy_status["ma_cross"] == "running"
+    assert environment.runtime.strategy_errors["ma_cross"] == "replacement B error"
+    assert broadcasts_after_replacement == []
+
+
+@pytest.mark.asyncio
+async def test_persisted_strategy_error_suppressed_after_transient_replacement_supersession(
+    hermetic_persisted_builtin_strategy_api,
+    monkeypatch,
+):
+    environment = hermetic_persisted_builtin_strategy_api
+    strategy_name = "persisted_ma_cross"
+    created_engines = []
+    status_broadcast_entered = asyncio.Event()
+    allow_status_broadcast = asyncio.Event()
+    messages = []
+
+    class CallbackCapturingEngine:
+        def __init__(self, *args, **kwargs):
+            self.running = False
+            self.stop_calls = 0
+            self.on_strategy_error = kwargs["on_strategy_error"]
+            created_engines.append(self)
+
+        async def start(self):
+            self.running = True
+
+        async def stop(self):
+            self.stop_calls += 1
+            self.running = False
+
+    async def broadcast(message):
+        messages.append(message)
+        if (
+            message.get("type") == "strategy_status"
+            and message.get("strategy") == strategy_name
+            and message.get("status") == "stopped"
+        ):
+            assert environment.runtime.engines.get(strategy_name) is None
+            assert environment.runtime.starting_engines.get(strategy_name) is None
+            status_broadcast_entered.set()
+            await allow_status_broadcast.wait()
+
+    monkeypatch.setattr(strategy_api, "BotEngine", CallbackCapturingEngine)
+    app = FastAPI()
+    app.include_router(
+        strategy_api.create_router(broadcast=broadcast, runtime=environment.runtime),
+        prefix="/api/strategies",
+    )
+    transport = ASGITransport(app=app)
+    error_task = None
+    replacement_engine = object()
+
+    try:
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            create_response = await client.post(
+                "/api/strategies/configs",
+                json={
+                    "name": strategy_name,
+                    "strategy_type": "ma_cross",
+                    "symbol": "BTC-USDT",
+                    "timeframe": "1h",
+                    "enabled": True,
+                    "params": {"fast_window": 5, "slow_window": 20, "amount": 0.1},
+                },
+            )
+            assert create_response.status_code == 201
+            start_response = await client.post(f"/api/strategies/{strategy_name}/start")
+            assert start_response.status_code == 200
+
+            engine = created_engines[0]
+            assert environment.runtime.engines[strategy_name] is engine
+            messages.clear()
+
+            error_task = asyncio.create_task(
+                engine.on_strategy_error(strategy_name, RuntimeError("stale A boom"))
+            )
+            await asyncio.wait_for(status_broadcast_entered.wait(), timeout=1)
+
+            environment.runtime.engines[strategy_name] = replacement_engine
+            environment.runtime.strategy_status[strategy_name] = "running"
+            environment.runtime.strategy_errors[strategy_name] = "replacement B error"
+            if environment.runtime.engines.get(strategy_name) is replacement_engine:
+                environment.runtime.engines.pop(strategy_name)
+            allow_status_broadcast.set()
+            await asyncio.wait_for(error_task, timeout=1)
+    finally:
+        allow_status_broadcast.set()
+        if error_task is not None and not error_task.done():
+            error_task.cancel()
+            await asyncio.gather(error_task, return_exceptions=True)
+
+    assert environment.runtime.engines.get(strategy_name) is None
+    assert environment.runtime.starting_engines.get(strategy_name) is None
+    assert environment.runtime.strategy_status[strategy_name] == "running"
+    assert environment.runtime.strategy_errors[strategy_name] == "replacement B error"
+    assert not any(
+        message.get("type") == "strategy_error"
+        and message.get("strategy") == strategy_name
+        and message.get("error") == "stale A boom"
+        for message in messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_strategy_start_callback_error_after_transfer_stays_stopped(
+    hermetic_persisted_builtin_strategy_api,
+    monkeypatch,
+):
+    environment = hermetic_persisted_builtin_strategy_api
+    created_engines = []
+    callback_tasks = []
+    engine_transferred = asyncio.Event()
+    stopped_broadcast_entered = asyncio.Event()
+    release_stopped_broadcast = asyncio.Event()
+    messages = []
+
+    class TransferTrackingEngines(dict):
+        def __setitem__(self, key, value):
+            super().__setitem__(key, value)
+            if key == "ma_cross" and value is created_engines[0]:
+                engine_transferred.set()
+
+    async def broadcast(message):
+        messages.append(message)
+        if (
+            message.get("type") == "strategy_status"
+            and message.get("strategy") == "ma_cross"
+            and message.get("status") == "stopped"
+        ):
+            assert environment.runtime.engines.get("ma_cross") is not created_engines[0]
+            assert environment.runtime.strategy_status["ma_cross"] == "stopped"
+            assert environment.runtime.strategy_errors["ma_cross"] == "callback startup boom"
+            stopped_broadcast_entered.set()
+            await release_stopped_broadcast.wait()
+
+    environment.runtime.engines = TransferTrackingEngines()
+    app = FastAPI()
+    app.include_router(
+        strategy_api.create_router(broadcast=broadcast, runtime=environment.runtime),
+        prefix="/api/strategies",
+    )
+
+    class CallbackErrorAfterTransferEngine:
+        def __init__(self, *args, **kwargs):
+            self.stop_calls = 0
+            self.running = False
+            self.on_strategy_error = kwargs["on_strategy_error"]
+            created_engines.append(self)
+
+        async def start(self):
+            self.running = True
+
+            async def fail_after_transfer():
+                await engine_transferred.wait()
+                await self.on_strategy_error(
+                    "ma_cross",
+                    RuntimeError("callback startup boom"),
+                )
+
+            callback_tasks.append(asyncio.create_task(fail_after_transfer()))
+
+        async def stop(self):
+            self.stop_calls += 1
+            self.running = False
+
+    monkeypatch.setattr(strategy_api, "BotEngine", CallbackErrorAfterTransferEngine)
+    transport = ASGITransport(app=app)
+
+    response = None
+    try:
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            start_task = asyncio.create_task(client.post("/api/strategies/ma_cross/start"))
+            await asyncio.wait_for(stopped_broadcast_entered.wait(), timeout=1)
+            response = await asyncio.wait_for(start_task, timeout=1)
+    finally:
+        release_stopped_broadcast.set()
+        if callback_tasks:
+            if engine_transferred.is_set():
+                await asyncio.gather(*callback_tasks)
+            else:
+                for task in callback_tasks:
+                    task.cancel()
+                await asyncio.gather(*callback_tasks, return_exceptions=True)
+
+    engine = created_engines[0]
+    assert response.status_code == 400
+    assert response.json()["detail"] == "callback startup boom"
+    assert environment.runtime.engines.get("ma_cross") is not engine
+    assert environment.runtime.strategy_status["ma_cross"] == "stopped"
+    assert environment.runtime.strategy_errors["ma_cross"] == "callback startup boom"
+    assert {
+        "type": "strategy_status",
+        "scope": "strategy",
+        "strategy": "ma_cross",
+        "status": "stopped",
+        "timestamp": 1700000000000,
+    } in messages
+    assert {
+        "type": "strategy_error",
+        "scope": "strategy",
+        "strategy": "ma_cross",
+        "error": "callback startup boom",
+        "timestamp": 1700000000000,
+    } in messages
+    assert not any(
+        message.get("type") == "strategy_status"
+        and message.get("strategy") == "ma_cross"
+        and message.get("status") == "running"
+        for message in messages
+    )
 
 
 @pytest.mark.asyncio
@@ -970,9 +2446,7 @@ async def test_persisted_builtin_strategy_configs_share_start_stop_lifecycle(
         lifecycle_lock = environment.runtime.lifecycle_locks[case["name"]]
         environment.messages.clear()
 
-        start_response = await client.post(
-            f"/api/strategies/{case['name']}/start"
-        )
+        start_response = await client.post(f"/api/strategies/{case['name']}/start")
 
         assert start_response.status_code == 200
         assert start_response.json() == {
@@ -1015,15 +2489,14 @@ async def test_persisted_builtin_strategy_configs_share_start_stop_lifecycle(
         assert environment.messages == [
             {
                 "type": "strategy_status",
+                "scope": "strategy",
                 "strategy": case["name"],
                 "status": "running",
                 "timestamp": 1700000000000,
             }
         ]
 
-        stop_response = await client.post(
-            f"/api/strategies/{case['name']}/stop"
-        )
+        stop_response = await client.post(f"/api/strategies/{case['name']}/stop")
 
     assert stop_response.status_code == 200
     assert stop_response.json() == {
@@ -1053,21 +2526,20 @@ async def test_persisted_builtin_strategy_configs_share_start_stop_lifecycle(
     assert environment.messages == [
         {
             "type": "strategy_status",
+            "scope": "strategy",
             "strategy": case["name"],
             "status": "running",
             "timestamp": 1700000000000,
         },
         {
             "type": "strategy_status",
+            "scope": "strategy",
             "strategy": case["name"],
             "status": "stopped",
             "timestamp": 1700000000000,
         },
     ]
-    assert not any(
-        message["type"] == "strategy_error"
-        for message in environment.messages
-    )
+    assert not any(message["type"] == "strategy_error" for message in environment.messages)
     assert environment.notifier_factory_calls == [True]
 
 
@@ -1123,9 +2595,7 @@ async def test_disabled_persisted_builtin_configs_cannot_start(
         environment.messages.clear()
 
         def fail_runtime_construction(*args, **kwargs):
-            raise AssertionError(
-                "Disabled strategy must not construct runtime dependencies"
-            )
+            raise AssertionError("Disabled strategy must not construct runtime dependencies")
 
         monkeypatch.setattr(
             environment.runtime.registry,
@@ -1140,9 +2610,7 @@ async def test_disabled_persisted_builtin_configs_cannot_start(
         )
         monkeypatch.setattr(strategy_api, "BotEngine", fail_runtime_construction)
 
-        start_response = await client.post(
-            f"/api/strategies/{case['name']}/start"
-        )
+        start_response = await client.post(f"/api/strategies/{case['name']}/start")
 
     assert start_response.status_code == 409
     assert start_response.json()["detail"] == "Strategy config is disabled"
@@ -1166,9 +2634,49 @@ def assert_strategy_validation_envelope(response, *, issue_codes):
     assert detail["message"] == "Strategy configuration is invalid"
     assert {issue["code"] for issue in detail["issues"]} == set(issue_codes)
     assert all(
-        set(issue) == {"path", "code", "message", "line", "column"}
-        for issue in detail["issues"]
+        set(issue) == {"path", "code", "message", "line", "column"} for issue in detail["issues"]
     )
+
+
+@pytest.mark.asyncio
+async def test_legacy_builtin_name_config_is_flagged_without_hiding_builtin(
+    isolated_strategy_config_api,
+):
+    app, _runtime, _messages = isolated_strategy_config_api
+    IsolatedStrategyConfigRepository.configs["ma_cross"] = StrategyConfigRecord(
+        **strategy_config_payload(name="ma_cross"), created_at=1, updated_at=1,
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        listed = await client.get("/api/strategies/configs")
+        created = await client.post(
+            "/api/strategies/configs",
+            json=strategy_config_payload(name="rsi_mean_reversion"),
+        )
+
+    assert listed.json()[0]["legacy_conflict"] is True
+    assert created.status_code == 422
+    assert_strategy_validation_envelope(created, issue_codes={"reserved_name"})
+
+
+@pytest.mark.asyncio
+async def test_deleting_legacy_builtin_name_config_preserves_implicit_strategy(
+    isolated_strategy_config_api,
+):
+    app, runtime, _messages = isolated_strategy_config_api
+    IsolatedStrategyConfigRepository.configs["ma_cross"] = StrategyConfigRecord(
+        **strategy_config_payload(name="ma_cross"), created_at=1, updated_at=1,
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        deleted = await client.delete("/api/strategies/configs/ma_cross")
+        strategies = await client.get("/api/strategies")
+
+    assert deleted.status_code == 204
+    assert "ma_cross" in {item["name"] for item in strategies.json()}
+    assert runtime.strategy_status["ma_cross"] == "stopped"
 
 
 @pytest.mark.asyncio
@@ -1328,6 +2836,134 @@ async def test_strategy_config_yaml_and_json_validation_envelopes_match(
     )
     assert semantic_yaml_resp.status_code == 422
     assert semantic_yaml_resp.json()["detail"] == semantic_json_resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_strategy_config_validation_accepts_supported_two_hour_timeframe(
+    isolated_strategy_config_api,
+):
+    app, _runtime, _messages = isolated_strategy_config_api
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        json_response = await client.post(
+            "/api/strategies/configs/validate",
+            json=strategy_config_payload(timeframe="2h"),
+        )
+        yaml_response = await client.post(
+            "/api/strategies/configs/validate-yaml",
+            content=(
+                "name: ma_cross_btc\nstrategy_type: ma_cross\nsymbol: BTC-USDT\n"
+                "timeframe: 2h\nenabled: true\nparams:\n"
+                "  fast_window: 5\n  slow_window: 20\n"
+            ),
+        )
+
+    for response in (json_response, yaml_response):
+        assert response.status_code == 200
+        assert response.json()["config"]["timeframe"] == "2h"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timeframe", ["7m", "invalid", "1M", "3M"])
+async def test_strategy_config_validation_rejects_unsupported_runtime_timeframes(
+    isolated_strategy_config_api,
+    timeframe,
+):
+    app, _runtime, _messages = isolated_strategy_config_api
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        json_response = await client.post(
+            "/api/strategies/configs/validate",
+            json=strategy_config_payload(timeframe=timeframe),
+        )
+        yaml_response = await client.post(
+            "/api/strategies/configs/validate-yaml",
+            content=(
+                "name: ma_cross_btc\nstrategy_type: ma_cross\nsymbol: BTC-USDT\n"
+                f"timeframe: {timeframe}\nenabled: true\nparams:\n"
+                "  fast_window: 5\n  slow_window: 20\n"
+            ),
+        )
+
+    expected_issue = {
+        "path": "timeframe",
+        "code": "unsupported_timeframe",
+        "message": "Unsupported strategy timeframe",
+        "line": None,
+        "column": None,
+    }
+    for response in (json_response, yaml_response):
+        assert response.status_code == 422
+        assert_strategy_validation_envelope(
+            response,
+            issue_codes={"unsupported_timeframe"},
+        )
+        assert response.json()["detail"]["issues"] == [expected_issue]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timeframe", ["7m", "invalid", "1M", "3M"])
+async def test_strategy_config_mutations_reject_unsupported_timeframe_without_persistence(
+    isolated_strategy_config_api,
+    timeframe,
+):
+    app, runtime, messages = isolated_strategy_config_api
+    initial_strategy_status = dict(runtime.strategy_status)
+    initial_strategy_errors = dict(runtime.strategy_errors)
+    initial_engines = dict(runtime.engines)
+    initial_starting_engines = dict(runtime.starting_engines)
+    initial_lifecycle_locks = dict(runtime.lifecycle_locks)
+    original_params = {"fast_window": 5, "slow_window": 20, "amount": 0.1}
+    source = StrategyConfigRecord(
+        **strategy_config_payload(enabled=False, params=dict(original_params)),
+        created_at=1,
+        updated_at=1,
+    )
+    IsolatedStrategyConfigRepository.configs[source.name] = source
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        create_response = await client.post(
+            "/api/strategies/configs",
+            json=strategy_config_payload(
+                name="unsupported_create",
+                timeframe=timeframe,
+            ),
+        )
+        update_response = await client.put(
+            f"/api/strategies/configs/{source.name}",
+            json=strategy_config_payload(
+                enabled=False,
+                timeframe=timeframe,
+                params={"fast_window": 6, "slow_window": 20, "amount": 0.2},
+            ),
+        )
+        clone_response = await client.post(
+            f"/api/strategies/configs/{source.name}/clone",
+            json={
+                "target_name": "unsupported_clone",
+                "overrides": {"timeframe": timeframe},
+            },
+        )
+
+    for response in (create_response, update_response, clone_response):
+        assert response.status_code == 422
+        assert_strategy_validation_envelope(
+            response,
+            issue_codes={"unsupported_timeframe"},
+        )
+    assert IsolatedStrategyConfigRepository.configs == {source.name: source}
+    assert source.timeframe == "1h"
+    assert source.params == original_params
+    assert source.updated_at == 1
+    assert runtime.strategy_status == initial_strategy_status
+    assert runtime.strategy_errors == initial_strategy_errors
+    assert runtime.engines == initial_engines
+    assert runtime.starting_engines == initial_starting_engines
+    assert runtime.lifecycle_locks == initial_lifecycle_locks
+    assert messages == []
 
 
 @pytest.mark.asyncio
@@ -1674,6 +3310,7 @@ def test_create_order_manager_maps_paper_runtime_to_demo_router(monkeypatch):
     assert manager.router.mode == "demo"
     assert manager.router.demo is not None
     assert manager.router.backtest is None
+    assert manager.post_live_order_sync is None
 
 
 def test_create_order_manager_maps_demo_runtime_to_safe_demo_router(monkeypatch):
@@ -1689,6 +3326,7 @@ def test_create_order_manager_maps_demo_runtime_to_safe_demo_router(monkeypatch)
     assert isinstance(manager.router.demo, strategy_api.LocalPaperOrderHandler)
     assert manager.router.live is None
     assert manager.router.backtest is None
+    assert manager.post_live_order_sync is None
 
 
 def test_create_order_manager_maps_explicit_paper_to_demo_router(monkeypatch):
@@ -1704,6 +3342,7 @@ def test_create_order_manager_maps_explicit_paper_to_demo_router(monkeypatch):
     assert manager.router.demo is not None
     assert manager.router.live is None
     assert manager.router.backtest is None
+    assert manager.post_live_order_sync is None
 
 
 def test_create_order_manager_rejects_live_missing_credentials_before_dependencies(
@@ -1788,9 +3427,63 @@ def test_create_order_manager_live_selects_okx_adapter(
     assert manager.router.live is not None
     assert manager.router.demo is None
     assert manager.router.backtest is None
+    assert manager.post_live_order_sync is not None
     assert manager.allow_live_open_orders is True
     assert manager.live_max_order_notional == 1234.0
     assert constructed == [(adapter_name, "key", "secret", "pass", True)]
+
+
+@pytest.mark.asyncio
+async def test_create_order_manager_live_syncs_with_router_adapter(monkeypatch):
+    class SentinelAdapter(strategy_api.LocalPaperOrderHandler):
+        def __init__(self, api_key, secret, passphrase, demo=True):
+            pass
+
+    monkeypatch.setattr(
+        strategy_api,
+        "load_runtime_settings",
+        lambda: AppConfig(
+            mode="live",
+            exchange=ExchangeConfig(
+                api_key="key",
+                secret="secret",
+                passphrase="pass",
+                market_type="swap",
+                demo=True,
+            ),
+        ),
+    )
+    monkeypatch.setattr(strategy_api, "OKXSwapAdapter", SentinelAdapter)
+    calls = []
+
+    async def fake_sync_private_state(repository, adapter, **kwargs):
+        calls.append((repository, adapter, kwargs))
+
+    monkeypatch.setattr(strategy_api, "sync_private_state", fake_sync_private_state)
+    repository = object()
+
+    async def on_risk_event(payload):
+        pass
+
+    manager = strategy_api.create_order_manager(
+        repository=repository,
+        on_risk_event=on_risk_event,
+        order_router_mode="live",
+    )
+
+    await manager.post_live_order_sync("ma_cross", "BTC-USDT-SWAP")
+
+    assert calls == [
+        (
+            repository,
+            manager.router.live,
+            {
+                "symbols": ["BTC-USDT-SWAP"],
+                "timestamp_ms": strategy_api.current_timestamp_ms,
+                "risk_event_notifier": on_risk_event,
+            },
+        )
+    ]
 
 
 @pytest.mark.parametrize(
@@ -1894,7 +3587,7 @@ async def test_refresh_live_state_endpoint_requires_live_mode(monkeypatch, app):
 @pytest.mark.asyncio
 async def test_refresh_live_state_endpoint_persists_and_returns_state(monkeypatch, app):
     account = AccountRecord(
-        strategy="ma_cross",
+        strategy="__exchange__",
         initial_equity=1000.0,
         cash_balance=950.0,
         equity=1000.0,
@@ -1940,14 +3633,194 @@ async def test_refresh_live_state_endpoint_persists_and_returns_state(monkeypatc
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.post(
             "/api/trading/live-state/refresh",
-            params={"strategy": "ma_cross", "symbol": "BTC-USDT-SWAP"},
+            params={"strategy": "__exchange__", "symbol": "BTC-USDT-SWAP"},
         )
 
     assert resp.status_code == 200
-    assert calls == [("swap", "ma_cross", ["BTC-USDT-SWAP"])]
+    assert calls == [("swap", "__exchange__", ["BTC-USDT-SWAP"])]
     payload = resp.json()
     assert payload["account"]["equity"] == 1000.0
     assert payload["positions"][0]["symbol"] == "BTC-USDT-SWAP"
+
+
+@pytest.mark.asyncio
+async def test_refresh_live_state_endpoint_preserves_omitted_symbol_as_full_scope(monkeypatch, app):
+    calls = []
+
+    async def fake_refresh(exchange, repository, strategy, symbols, timestamp_ms):
+        calls.append(symbols)
+        return LiveStateSyncResult(account=None, positions=[])
+
+    monkeypatch.setattr(
+        "src.web.api.trading.load_runtime_settings",
+        lambda: AppConfig(mode="live", exchange=ExchangeConfig(
+            api_key="key", secret="secret", passphrase="pass", market_type="swap", demo=True,
+        )),
+    )
+    monkeypatch.setattr("src.web.api.trading.refresh_okx_live_state", fake_refresh)
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/trading/live-state/refresh", params={"strategy": "__exchange__"}
+        )
+
+    assert response.status_code == 200
+    assert calls == [None]
+
+
+@pytest.mark.asyncio
+async def test_refresh_live_state_endpoint_rejects_explicit_empty_symbol(monkeypatch, app):
+    monkeypatch.setattr(
+        "src.web.api.trading.load_runtime_settings",
+        lambda: AppConfig(mode="live", exchange=ExchangeConfig(
+            api_key="key", secret="secret", passphrase="pass", market_type="swap", demo=True,
+        )),
+    )
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/trading/live-state/refresh",
+            params={"strategy": "__exchange__", "symbol": ""},
+        )
+
+    assert response.status_code in {400, 422}
+
+
+@pytest.mark.asyncio
+async def test_refresh_live_state_endpoint_rejects_invalid_symbol(monkeypatch, app):
+    monkeypatch.setattr(
+        "src.web.api.trading.load_runtime_settings",
+        lambda: AppConfig(mode="live", exchange=ExchangeConfig(
+            api_key="key", secret="secret", passphrase="pass", market_type="swap", demo=True,
+        )),
+    )
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/trading/live-state/refresh",
+            params={"strategy": "__exchange__", "symbol": "not-a-symbol"},
+        )
+
+    assert response.status_code in {400, 422}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider_error", "detail"),
+    [
+        (NetworkError("network"), "OKX provider unavailable"),
+        (RequestTimeout("timeout"), "OKX provider unavailable"),
+        (AuthenticationError("auth"), "OKX authentication failed"),
+        (PermissionDenied("permission"), "OKX permission denied"),
+        (MalformedProviderData("malformed"), "Malformed OKX provider data"),
+    ],
+)
+async def test_refresh_live_state_endpoint_maps_provider_errors_to_502(
+    monkeypatch, app, provider_error, detail
+):
+    monkeypatch.setattr(
+        "src.web.api.trading.load_runtime_settings",
+        lambda: AppConfig(mode="live", exchange=ExchangeConfig(demo=True)),
+    )
+
+    async def fail_refresh(*args, **kwargs):
+        raise provider_error
+
+    monkeypatch.setattr("src.web.api.trading.refresh_okx_live_state", fail_refresh)
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/api/trading/live-state/refresh",
+            params={"strategy": "__exchange__"},
+        )
+
+    assert resp.status_code == 502
+    assert resp.json()["detail"] == detail
+
+
+@pytest.mark.asyncio
+async def test_refresh_live_state_endpoint_maps_unsupported_provider_capability_to_501(
+    monkeypatch, app
+):
+    monkeypatch.setattr(
+        "src.web.api.trading.load_runtime_settings",
+        lambda: AppConfig(mode="live", exchange=ExchangeConfig(demo=True)),
+    )
+
+    async def fail_refresh(*args, **kwargs):
+        raise NotSupported("market capability unsupported")
+
+    monkeypatch.setattr("src.web.api.trading.refresh_okx_live_state", fail_refresh)
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/trading/live-state/refresh",
+            params={"strategy": "__exchange__"},
+        )
+
+    assert response.status_code == 501
+    assert response.json() == {"detail": "OKX provider capability unsupported"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "exchange",
+    [
+        ExchangeConfig(api_key="", secret="", passphrase="", market_type="swap", demo=True),
+        ExchangeConfig(
+            api_key="key", secret="secret", passphrase="pass", market_type="unknown", demo=True
+        ),
+    ],
+)
+async def test_refresh_live_state_endpoint_maps_invalid_live_configuration_to_422(
+    monkeypatch, app, exchange
+):
+    monkeypatch.setattr(
+        "src.web.api.trading.load_runtime_settings",
+        lambda: AppConfig(mode="live", exchange=exchange),
+    )
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/api/trading/live-state/refresh",
+            params={"strategy": "__exchange__"},
+        )
+
+    assert resp.status_code == 422
+    assert resp.json()["detail"].startswith("Invalid live OKX configuration:")
+
+
+@pytest.mark.asyncio
+async def test_refresh_live_state_endpoint_rejects_strategy_owned_live_state(monkeypatch, app):
+    monkeypatch.setattr(
+        "src.web.api.trading.load_runtime_settings",
+        lambda: AppConfig(mode="live", exchange=ExchangeConfig(demo=True)),
+    )
+    called = False
+
+    async def fail_refresh(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("exchange refresh must not run")
+
+    monkeypatch.setattr("src.web.api.trading.refresh_okx_live_state", fail_refresh)
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/api/trading/live-state/refresh",
+            params={"strategy": "ma_cross", "symbol": "BTC-USDT-SWAP"},
+        )
+
+    assert resp.status_code == 400
+    assert "__exchange__" in resp.json()["detail"]
+    assert called is False
 
 
 @pytest.mark.asyncio
@@ -2031,16 +3904,39 @@ async def test_start_strategy_refreshes_live_state_before_order_manager(monkeypa
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.post("/api/strategies/live_test/start")
 
-    assert resp.status_code == 200
-    assert events == ["refresh", "order_manager", "engine_init", "engine_start"]
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["reason_code"] == "live_position_ownership_unavailable"
+    assert events == []
+    assert refresh_calls == []
+
+
+@pytest.mark.asyncio
+async def test_live_order_refresh_ignores_each_strategy_owner_for_exchange_state(monkeypatch):
+    refresh_calls = []
+
+    async def fake_refresh(exchange, repository, strategy, symbols, timestamp_ms):
+        refresh_calls.append((strategy, symbols))
+
+    monkeypatch.setattr(
+        strategy_api,
+        "load_runtime_settings",
+        lambda: AppConfig(mode="live", exchange=ExchangeConfig(demo=True)),
+    )
+    monkeypatch.setattr(strategy_api, "create_live_order_handler", lambda settings: object())
+    monkeypatch.setattr(strategy_api, "refresh_okx_live_state", fake_refresh)
+
+    manager = strategy_api.create_order_manager(
+        repository=object(),
+        order_router_mode="live",
+    )
+
+    assert manager.live_state_refresher is not None
+    await manager.live_state_refresher("alpha", "BTC-USDT-SWAP")
+    await manager.live_state_refresher("beta", "ETH-USDT-SWAP")
+
     assert refresh_calls == [
-        (
-            "swap",
-            order_manager_repositories[0],
-            "live_test",
-            ["BTC-USDT-SWAP"],
-            1700000000000,
-        )
+        ("__exchange__", ["BTC-USDT-SWAP"]),
+        ("__exchange__", ["ETH-USDT-SWAP"]),
     ]
 
 
@@ -2078,8 +3974,8 @@ async def test_start_strategy_rejects_live_missing_credentials_before_creating_r
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.post("/api/strategies/ma_cross/start")
 
-    assert resp.status_code == 400
-    assert resp.json()["detail"] == "Live trading requires OKX api_key, secret, and passphrase"
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["reason_code"] == "live_position_ownership_unavailable"
     assert created_market_data_services == 0
     assert created_bot_engines == 0
 
@@ -2410,12 +4306,14 @@ async def test_start_persisted_strategy_config_broadcasts_startup_error(monkeypa
     assert messages == [
         {
             "type": "strategy_status",
+            "scope": "strategy",
             "strategy": "bad_ma_cross",
             "status": "stopped",
             "timestamp": 1700000000000,
         },
         {
             "type": "strategy_error",
+            "scope": "strategy",
             "strategy": "bad_ma_cross",
             "error": "fast_window must be less than or equal to slow_window",
             "timestamp": 1700000000000,
@@ -2428,7 +4326,7 @@ async def test_persisted_strategy_loop_fills_market_order_from_latest_bar(monkey
     class FakeMarketDataService:
         def __init__(self):
             self.callbacks = []
-            self.latest_bar = None
+            self.latest_bar = Bar(1, 50000.0, 50000.0, 50000.0, 50000.0, 1.0)
             self._running = False
 
         def subscribe(self, symbol, timeframe, callback):
@@ -2441,6 +4339,8 @@ async def test_persisted_strategy_loop_fills_market_order_from_latest_bar(monkey
 
         async def start(self):
             self._running = True
+            for callback in list(self.callbacks):
+                await callback(self.latest_bar)
 
         async def stop(self):
             self._running = False
@@ -2479,7 +4379,7 @@ async def test_persisted_strategy_loop_fills_market_order_from_latest_bar(monkey
         def get_strategy_configs(self):
             return [config]
 
-        def save_order(self, order):
+        def upsert_order(self, order):
             self.orders.append(order)
             return order
 
@@ -2542,10 +4442,15 @@ async def test_persisted_strategy_loop_fills_market_order_from_latest_bar(monkey
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         start_resp = await client.post("/api/strategies/market_buyer_btc/start")
-        market_data.latest_bar = Bar(1, 50000.0, 50000.0, 50000.0, 50000.0, 1.0)
-        await market_data.callbacks[0](market_data.latest_bar)
+        assert start_resp.status_code == 200
+        assert FakeRepository.orders == []
 
-    assert start_resp.status_code == 200
+        live_bar = Bar(1700003600000, 50000.0, 50000.0, 50000.0, 50000.0, 1.0)
+        market_data.latest_bar = live_bar
+        await market_data.callbacks[0](live_bar)
+
+    assert len(FakeRepository.orders) == 1
+    assert len(FakeRepository.trades) == 1
     assert FakeRepository.orders[0].status == "filled"
     assert FakeRepository.orders[0].fill_price == 50000.0
     assert FakeRepository.trades[0].price == 50000.0
@@ -2556,6 +4461,7 @@ async def test_runtime_risk_rejection_broadcasts_risk_event_before_trading_updat
     class FakeMarketDataService:
         def __init__(self):
             self.callbacks = []
+            self.ready_bars = [Bar(1, 50000.0, 50000.0, 50000.0, 50000.0, 1.0)]
             self.latest_bar = None
             self._running = False
 
@@ -2563,9 +4469,12 @@ async def test_runtime_risk_rejection_broadcasts_risk_event_before_trading_updat
             self.callbacks.append(callback)
 
         def get_recent_bars(self, symbol, timeframe, count=1):
-            if self.latest_bar is None:
-                return []
-            return [self.latest_bar]
+            bars = self.ready_bars + ([] if self.latest_bar is None else [self.latest_bar])
+            return bars[-count:]
+
+        async def wait_until_ready(self, symbol, timeframe, *, min_bars=1):
+            if len(self.get_recent_bars(symbol, timeframe, count=min_bars)) < min_bars:
+                raise TimeoutError
 
         async def start(self):
             self._running = True
@@ -2604,7 +4513,7 @@ async def test_runtime_risk_rejection_broadcasts_risk_event_before_trading_updat
         def get_strategy_configs(self):
             return [config]
 
-        def save_order(self, order):
+        def upsert_order(self, order):
             self.orders.append(order)
             return order
 
@@ -2613,7 +4522,21 @@ async def test_runtime_risk_rejection_broadcasts_risk_event_before_trading_updat
             return event
 
         def get_orders(self):
-            return self.orders
+            return self.orders + [
+                OrderRecord(
+                    order_id="beta-order",
+                    strategy="beta",
+                    symbol="ETH-USDT",
+                    side="buy",
+                    type="market",
+                    amount=1.0,
+                    price=3000.0,
+                    status="pending",
+                    fill_price=0.0,
+                    timestamp=1700000000001,
+                    updated_at=1700000000001,
+                )
+            ]
 
         def get_account(self, strategy=None):
             return None
@@ -2689,9 +4612,16 @@ async def test_runtime_risk_rejection_broadcasts_risk_event_before_trading_updat
     assert risk_event_notifier.payloads == [messages[0]]
     assert messages[1] == {
         "type": "orders",
+        "scope": "strategy",
+        "strategy": "oversized_buyer_btc",
         "orders": [order.model_dump() for order in FakeRepository.orders],
     }
-    assert messages[2] == {"type": "positions", "positions": []}
+    assert messages[2] == {
+        "type": "positions",
+        "scope": "strategy",
+        "strategy": "oversized_buyer_btc",
+        "positions": [],
+    }
 
 
 @pytest.mark.asyncio
@@ -2699,13 +4629,18 @@ async def test_runtime_bar_marks_open_position_and_broadcasts_positions_then_acc
     class FakeMarketDataService:
         def __init__(self):
             self.callbacks = []
+            self.ready_bars = [Bar(1, 50000.0, 50000.0, 50000.0, 50000.0, 1.0)]
             self._running = False
 
         def subscribe(self, symbol, timeframe, callback):
             self.callbacks.append(callback)
 
         def get_recent_bars(self, symbol, timeframe, count=1):
-            return []
+            return self.ready_bars[-count:]
+
+        async def wait_until_ready(self, symbol, timeframe, *, min_bars=1):
+            if len(self.get_recent_bars(symbol, timeframe, count=min_bars)) < min_bars:
+                raise TimeoutError
 
         async def start(self):
             self._running = True
@@ -2737,6 +4672,8 @@ async def test_runtime_bar_marks_open_position_and_broadcasts_positions_then_acc
         positions = {
             ("passive_btc", "BTC-USDT"): PositionRecord(
                 strategy="passive_btc",
+                source="paper",
+                runtime_mode="paper",
                 symbol="BTC-USDT",
                 side="long",
                 amount=0.1,
@@ -2748,6 +4685,8 @@ async def test_runtime_bar_marks_open_position_and_broadcasts_positions_then_acc
         accounts = {
             "passive_btc": AccountRecord(
                 strategy="passive_btc",
+                source="paper",
+                runtime_mode="paper",
                 initial_equity=100000.0,
                 cash_balance=95000.0,
                 equity=100000.0,
@@ -2796,6 +4735,8 @@ async def test_runtime_bar_marks_open_position_and_broadcasts_positions_then_acc
     FakeRepository.positions = {
         ("passive_btc", "BTC-USDT"): PositionRecord(
             strategy="passive_btc",
+            source="paper",
+            runtime_mode="paper",
             symbol="BTC-USDT",
             side="long",
             amount=0.1,
@@ -2807,6 +4748,8 @@ async def test_runtime_bar_marks_open_position_and_broadcasts_positions_then_acc
     FakeRepository.accounts = {
         "passive_btc": AccountRecord(
             strategy="passive_btc",
+            source="paper",
+            runtime_mode="paper",
             initial_equity=100000.0,
             cash_balance=95000.0,
             equity=100000.0,
@@ -2826,6 +4769,7 @@ async def test_runtime_bar_marks_open_position_and_broadcasts_positions_then_acc
     registry = StrategyRegistry()
     registry.register("passive", PassiveStrategy)
     monkeypatch.setattr(strategy_api, "create_strategy_registry", lambda: registry)
+    monkeypatch.setattr(strategy_api, "current_order_router_mode", lambda: "paper")
     monkeypatch.setattr(strategy_api, "Repository", FakeRepository, raising=False)
     monkeypatch.setattr(
         strategy_api,
@@ -2855,10 +4799,14 @@ async def test_runtime_bar_marks_open_position_and_broadcasts_positions_then_acc
     assert messages == [
         {
             "type": "positions",
+            "scope": "strategy",
+            "strategy": "passive_btc",
             "positions": [position.model_dump()],
         },
         {
             "type": "account",
+            "scope": "strategy",
+            "strategy": "passive_btc",
             "account": {
                 "cash_balance": 95000.0,
                 "available_balance": 0.0,
@@ -2868,6 +4816,8 @@ async def test_runtime_bar_marks_open_position_and_broadcasts_positions_then_acc
                 "daily_pnl": 0.0,
                 "fees_paid": 0.0,
                 "assets": [],
+                "scope": "strategy",
+                "strategy": "passive_btc",
             },
         },
     ]
@@ -2878,13 +4828,18 @@ async def test_runtime_bar_without_open_position_does_not_create_account_or_broa
     class FakeMarketDataService:
         def __init__(self):
             self.callbacks = []
+            self.ready_bars = [Bar(1, 50000.0, 50000.0, 50000.0, 50000.0, 1.0)]
             self._running = False
 
         def subscribe(self, symbol, timeframe, callback):
             self.callbacks.append(callback)
 
         def get_recent_bars(self, symbol, timeframe, count=1):
-            return []
+            return self.ready_bars[-count:]
+
+        async def wait_until_ready(self, symbol, timeframe, *, min_bars=1):
+            if len(self.get_recent_bars(symbol, timeframe, count=min_bars)) < min_bars:
+                raise TimeoutError
 
         async def start(self):
             self._running = True
@@ -3057,12 +5012,14 @@ async def test_start_persisted_strategy_stays_stopped_when_initial_bar_fails(mon
     assert messages == [
         {
             "type": "strategy_status",
+            "scope": "strategy",
             "strategy": "broken_on_start_btc",
             "status": "stopped",
             "timestamp": 1700000000000,
         },
         {
             "type": "strategy_error",
+            "scope": "strategy",
             "strategy": "broken_on_start_btc",
             "error": "boom",
             "timestamp": 1700000000000,
@@ -3076,6 +5033,7 @@ async def test_persisted_strategy_loop_broadcasts_error_and_stops_strategy(monke
         def __init__(self):
             self.callbacks = []
             self.subscription = None
+            self.ready_bars = [Bar(1, 50000.0, 50000.0, 50000.0, 50000.0, 1.0)]
             self._running = False
 
         def subscribe(self, symbol, timeframe, callback):
@@ -3089,6 +5047,13 @@ async def test_persisted_strategy_loop_broadcasts_error_and_stops_strategy(monke
                 ]
                 if not self.callbacks:
                     self.subscription = None
+
+        def get_recent_bars(self, symbol, timeframe, count=1):
+            return self.ready_bars[-count:]
+
+        async def wait_until_ready(self, symbol, timeframe, *, min_bars=1):
+            if len(self.get_recent_bars(symbol, timeframe, count=min_bars)) < min_bars:
+                raise TimeoutError
 
         async def start(self):
             self._running = True
@@ -3166,12 +5131,14 @@ async def test_persisted_strategy_loop_broadcasts_error_and_stops_strategy(monke
     assert messages[-2:] == [
         {
             "type": "strategy_status",
+            "scope": "strategy",
             "strategy": "broken_btc",
             "status": "stopped",
             "timestamp": 1700000000000,
         },
         {
             "type": "strategy_error",
+            "scope": "strategy",
             "strategy": "broken_btc",
             "error": "boom",
             "timestamp": 1700000000000,
@@ -3180,7 +5147,7 @@ async def test_persisted_strategy_loop_broadcasts_error_and_stops_strategy(monke
 
 
 @pytest.mark.asyncio
-async def test_start_and_stop_strategy(app):
+async def test_start_and_stop_strategy(app, deny_network_requests):
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         start_resp = await client.post("/api/strategies/ma_cross/start")
@@ -3194,6 +5161,101 @@ async def test_start_and_stop_strategy(app):
     assert stop_resp.status_code == 200
     assert stop_resp.json() == {"status": "stopped", "strategy": "ma_cross"}
     assert {"name": "ma_cross", "status": "stopped"} in stopped_resp.json()
+    assert deny_network_requests == []
+
+
+@pytest.mark.asyncio
+async def test_stop_strategy_failure_preserves_running_owner_and_status(
+    hermetic_persisted_builtin_strategy_api,
+    monkeypatch,
+):
+    environment = hermetic_persisted_builtin_strategy_api
+    created_engines = []
+
+    class StopFailureEngine:
+        def __init__(self, *args, **kwargs):
+            self.stop_calls = 0
+            self.running = False
+            self.market_data_service = kwargs["market_data_service"]
+            created_engines.append(self)
+
+        async def start(self):
+            self.running = True
+            self.market_data_service._running = True
+
+        async def stop(self):
+            self.stop_calls += 1
+            if self.stop_calls == 1:
+                raise RuntimeError("stop failed")
+            self.running = False
+
+    monkeypatch.setattr(strategy_api, "BotEngine", StopFailureEngine)
+    transport = ASGITransport(app=environment.app, raise_app_exceptions=False)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        start_response = await client.post("/api/strategies/ma_cross/start")
+        failed_stop_response = await client.post("/api/strategies/ma_cross/stop")
+
+    engine = created_engines[0]
+    assert start_response.status_code == 200
+    assert failed_stop_response.status_code == 500
+    assert environment.runtime.engines["ma_cross"] is engine
+    assert environment.runtime.strategy_status["ma_cross"] == "running"
+    assert engine.running is True
+    assert engine.stop_calls == 1
+    assert environment.market_data.stop_calls == 0
+    assert environment.market_data._running is True
+    assert not any(message.get("status") == "stopped" for message in environment.messages)
+
+
+@pytest.mark.asyncio
+async def test_stop_strategy_retries_same_owner_after_failure(
+    hermetic_persisted_builtin_strategy_api,
+    monkeypatch,
+):
+    environment = hermetic_persisted_builtin_strategy_api
+    created_engines = []
+
+    class RetryStopEngine:
+        def __init__(self, *args, **kwargs):
+            self.stop_calls = 0
+            self.running = False
+            self.market_data_service = kwargs["market_data_service"]
+            created_engines.append(self)
+
+        async def start(self):
+            self.running = True
+            self.market_data_service._running = True
+
+        async def stop(self):
+            self.stop_calls += 1
+            if self.stop_calls == 1:
+                raise RuntimeError("stop failed")
+            self.running = False
+
+    monkeypatch.setattr(strategy_api, "BotEngine", RetryStopEngine)
+    transport = ASGITransport(app=environment.app, raise_app_exceptions=False)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        start_response = await client.post("/api/strategies/ma_cross/start")
+        failed_stop_response = await client.post("/api/strategies/ma_cross/stop")
+        successful_stop_response = await client.post("/api/strategies/ma_cross/stop")
+
+    engine = created_engines[0]
+    assert start_response.status_code == 200
+    assert failed_stop_response.status_code == 500
+    assert successful_stop_response.status_code == 200
+    assert successful_stop_response.json() == {
+        "status": "stopped",
+        "strategy": "ma_cross",
+    }
+    assert environment.runtime.engines.get("ma_cross") is None
+    assert environment.runtime.strategy_status["ma_cross"] == "stopped"
+    assert engine.running is False
+    assert engine.stop_calls == 2
+    assert environment.market_data.stop_calls == 1
+    assert environment.market_data._running is False
+    assert sum(message.get("status") == "stopped" for message in environment.messages) == 1
 
 
 @pytest.mark.asyncio
@@ -3211,6 +5273,8 @@ async def test_start_strategy_clears_stale_error_before_successful_restart(monke
         async def on_bar(self, bar):
             pass
 
+    engine_kwargs = []
+
     class FakeBotEngine:
         async def start(self):
             pass
@@ -3219,7 +5283,7 @@ async def test_start_strategy_clears_stale_error_before_successful_restart(monke
             pass
 
         def __init__(self, *args, **kwargs):
-            pass
+            engine_kwargs.append(kwargs)
 
     registry = StrategyRegistry()
     registry.register("passive", PassiveStrategy)
@@ -3242,6 +5306,67 @@ async def test_start_strategy_clears_stale_error_before_successful_restart(monke
     assert runtime.strategy_errors == {}
     assert list(runtime.engines) == ["passive"]
     assert runtime.strategy_status["passive"] == "running"
+    assert "before_live_strategy_bar" in engine_kwargs[0]
+    assert "before_strategy_bar" not in engine_kwargs[0]
+
+
+@pytest.mark.asyncio
+async def test_live_strategy_start_disables_paper_mark_to_market_hook(monkeypatch):
+    class FakeRepository:
+        def get_strategy_configs(self):
+            return []
+
+        def get_strategy_config(self, name):
+            return None
+
+        def get_kill_switch(self):
+            return SimpleNamespace(engaged=False)
+
+    class PassiveStrategy(BaseStrategy):
+        name = "passive"
+        symbol = "BTC-USDT"
+
+        async def on_bar(self, bar):
+            pass
+
+    class Settings:
+        mode = "live"
+        exchange = SimpleNamespace(market_type="spot")
+
+    engine_kwargs = []
+
+    class FakeBotEngine:
+        def __init__(self, *args, **kwargs):
+            engine_kwargs.append(kwargs)
+
+        async def start(self):
+            pass
+
+        async def stop(self):
+            pass
+
+    async def fake_refresh(*args, **kwargs):
+        return SimpleNamespace(account=None, positions=[])
+
+    registry = StrategyRegistry()
+    registry.register("passive", PassiveStrategy)
+    runtime = strategy_api.StrategyRuntimeState(registry=registry)
+    monkeypatch.setattr(strategy_api, "Repository", FakeRepository, raising=False)
+    monkeypatch.setattr(strategy_api, "load_runtime_settings", lambda: Settings())
+    monkeypatch.setattr(strategy_api, "create_market_data_service", lambda: object())
+    monkeypatch.setattr(strategy_api, "create_order_manager", lambda **kwargs: object())
+    monkeypatch.setattr(strategy_api, "refresh_okx_live_state", fake_refresh)
+    monkeypatch.setattr(strategy_api, "BotEngine", FakeBotEngine)
+    app = FastAPI()
+    app.include_router(strategy_api.create_router(runtime=runtime), prefix="/api/strategies")
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/api/strategies/passive/start")
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["reason_code"] == "live_position_ownership_unavailable"
+    assert engine_kwargs == []
 
 
 @pytest.mark.asyncio
@@ -3486,6 +5611,9 @@ async def test_start_strategy_creates_market_data_service_after_router_creation(
         def subscribe(self, symbol, timeframe, callback):
             pass
 
+        async def wait_until_ready(self, symbol, timeframe, *, timeout=None, min_bars=1):
+            pass
+
         async def start(self):
             self._running = True
             started_api_keys.append(self.api_key)
@@ -3504,6 +5632,7 @@ async def test_start_strategy_creates_market_data_service_after_router_creation(
     registry = StrategyRegistry()
     registry.register("passive", PassiveStrategy)
     monkeypatch.setattr(strategy_api, "create_strategy_registry", lambda: registry)
+    monkeypatch.setattr(strategy_api, "current_order_router_mode", lambda: "paper")
     monkeypatch.setattr(strategy_api, "Repository", FakeRepository, raising=False)
     monkeypatch.setattr(
         strategy_api,
@@ -3560,6 +5689,9 @@ async def test_start_strategy_refreshes_market_data_service_after_all_strategies
         def subscribe(self, symbol, timeframe, callback):
             pass
 
+        async def wait_until_ready(self, symbol, timeframe, *, timeout=None, min_bars=1):
+            pass
+
         async def start(self):
             started_api_keys.append(self.api_key)
 
@@ -3578,6 +5710,7 @@ async def test_start_strategy_refreshes_market_data_service_after_all_strategies
     registry = StrategyRegistry()
     registry.register("passive", PassiveStrategy)
     monkeypatch.setattr(strategy_api, "create_strategy_registry", lambda: registry)
+    monkeypatch.setattr(strategy_api, "current_order_router_mode", lambda: "paper")
     monkeypatch.setattr(strategy_api, "Repository", FakeRepository, raising=False)
     monkeypatch.setattr(
         strategy_api,
@@ -3638,7 +5771,7 @@ async def test_start_strategy_wires_repository_backed_order_manager(monkeypatch)
         accounts = {}
         ledger = []
 
-        def save_order(self, order):
+        def upsert_order(self, order):
             self.orders.append(order)
             return order
 
@@ -3728,7 +5861,9 @@ async def test_start_strategy_wires_repository_backed_order_manager(monkeypatch)
         {
             "id": None,
             "exchange_trade_id": "",
-            "order_id": "",
+            "exchange_order_id": "",
+            "client_order_id": "",
+            "order_id": FakeRepository.orders[0].order_id,
             "strategy": "buyer",
             "symbol": "BTC-USDT",
             "side": "buy",
@@ -3736,6 +5871,9 @@ async def test_start_strategy_wires_repository_backed_order_manager(monkeypatch)
             "price": 50000.0,
             "fee": 2.5,
             "timestamp": 1700000000000,
+            "blank_trade_fingerprint": "",
+            "active": True,
+            "stale_at": None,
         }
     ]
     assert [position.model_dump() for position in FakeRepository.positions.values()] == [
@@ -3751,39 +5889,55 @@ async def test_start_strategy_wires_repository_backed_order_manager(monkeypatch)
             "mark_price": None,
             "realized_pnl": 0.0,
             "unrealized_pnl": 0.0,
+            "active": True,
+            "stale_at": None,
         }
     ]
     assert FakeRepository.accounts["buyer"].cash_balance == 94997.5
     assert FakeRepository.accounts["buyer"].equity == 99997.5
-    assert messages[:3] == [
-        {
-            "type": "orders",
-            "orders": [order.model_dump() for order in FakeRepository.orders],
-        },
-        {
-            "type": "positions",
-            "positions": [position.model_dump() for position in FakeRepository.positions.values()],
-        },
-        {
-            "type": "account",
-            "account": {
-                "cash_balance": 94997.5,
-                "available_balance": 0.0,
-                "equity": 99997.5,
-                "realized_pnl": 0.0,
-                "unrealized_pnl": 0.0,
-                "daily_pnl": 0.0,
-                "fees_paid": 2.5,
-                "assets": [],
-            },
-        },
-    ]
-    assert messages[3] == {
+    strategy_status = next(
+        message
+        for message in messages
+        if message.get("type") == "strategy_status"
+        and message.get("scope") == "strategy"
+    )
+    assert strategy_status == {
         "type": "strategy_status",
+        "scope": "strategy",
         "strategy": "buyer",
         "status": "running",
         "timestamp": 1700000000000,
     }
+
+    strategy_orders = next(
+        message
+        for message in messages
+        if message.get("type") == "orders" and message.get("scope") == "strategy"
+    )
+    assert strategy_orders == {
+        "type": "orders",
+        "scope": "strategy",
+        "strategy": "buyer",
+        "orders": [order.model_dump() for order in FakeRepository.orders],
+    }
+
+    strategy_positions = next(
+        message
+        for message in messages
+        if message.get("type") == "positions" and message.get("scope") == "strategy"
+    )
+    assert strategy_positions == {
+        "type": "positions",
+        "scope": "strategy",
+        "strategy": "buyer",
+        "positions": [position.model_dump() for position in FakeRepository.positions.values()],
+    }
+
+    assert all(
+        message.get("scope") == "strategy"
+        for message in messages
+        if message.get("type") in {"orders", "positions", "account"}
+    )
 
 
 @pytest.mark.asyncio
@@ -3850,6 +6004,204 @@ async def test_start_unknown_strategy_returns_404(app):
 
 
 @pytest.mark.asyncio
+async def test_run_backtest_accepts_persisted_strategy_config(monkeypatch):
+    class FakeRepository:
+        results = []
+        klines = [
+            KlineCache(
+                symbol="BTC-USDT",
+                timeframe="1h",
+                timestamp=1700002800000,
+                open=100.0,
+                high=101.0,
+                low=99.0,
+                close=100.0,
+                volume=10.0,
+                source="backtest",
+                runtime_mode="backtest",
+            ),
+            KlineCache(
+                symbol="BTC-USDT",
+                timeframe="1h",
+                timestamp=1700006400000,
+                open=110.0,
+                high=111.0,
+                low=109.0,
+                close=110.0,
+                volume=12.0,
+                source="backtest",
+                runtime_mode="backtest",
+            ),
+        ]
+
+        def get_strategy_config(self, name):
+            if name != "saved_config":
+                return None
+            return StrategyConfigRecord(
+                name="saved_config",
+                strategy_type="configured_type",
+                symbol="ETH-USDT",
+                timeframe="1h",
+                params={"amount": 2.5},
+                enabled=True,
+                created_at=1700000000000,
+                updated_at=1700000000000,
+            )
+
+        def get_klines(self, symbol, timeframe, start, end, **kwargs):
+            assert kwargs == {"source": "backtest", "runtime_mode": "backtest"}
+            return [
+                kline
+                for kline in self.klines
+                if kline.symbol == symbol
+                and kline.timeframe == timeframe
+                and start <= kline.timestamp <= end
+            ]
+
+        def save_backtest_result_with_trades(self, result, trades):
+            self.results.append(result)
+            return result
+
+    class ConfiguredStrategy(BaseStrategy):
+        amount_seen = None
+
+        def __init__(self, symbol, amount):
+            super().__init__()
+            self.symbol = symbol
+            self.__class__.amount_seen = amount
+
+        async def on_bar(self, bar):
+            return None
+
+    FakeRepository.results = []
+    ConfiguredStrategy.amount_seen = None
+    registry = StrategyRegistry()
+    registry.register("configured_type", ConfiguredStrategy)
+    monkeypatch.setattr(backtest_api, "Repository", FakeRepository, raising=False)
+    monkeypatch.setattr(backtest_api, "create_strategy_registry", lambda: registry, raising=False)
+    monkeypatch.setattr(backtest_api, "current_timestamp_ms", lambda: 1700007200000, raising=False)
+
+    transport = ASGITransport(app=create_app())
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/api/backtest/run",
+            json={
+                "strategy": "saved_config",
+                "symbol": "BTC-USDT",
+                "timeframe": "1h",
+                "start_time": 1700002800000,
+                "end_time": 1700006400000,
+                "initial_capital": 100000,
+            },
+        )
+
+    assert resp.status_code == 200
+    assert ConfiguredStrategy.amount_seen == 2.5
+    assert FakeRepository.results[0].strategy == "saved_config"
+
+
+@pytest.mark.asyncio
+async def test_run_backtest_prefers_persisted_config_when_name_matches_builtin(monkeypatch):
+    class BuiltinStrategy(BaseStrategy):
+        def __init__(self):
+            super().__init__()
+
+        async def on_bar(self, bar):
+            return None
+
+    class ConfiguredStrategy(BaseStrategy):
+        def __init__(self, symbol, amount):
+            super().__init__()
+            self.symbol = symbol
+            self.amount = amount
+
+        async def on_bar(self, bar):
+            return None
+
+    class FakeRepository:
+        results = []
+
+        def get_strategy_config(self, name):
+            if name != "ma_cross":
+                return None
+            return StrategyConfigRecord(
+                name="ma_cross",
+                strategy_type="configured_type",
+                symbol="ETH-USDT",
+                timeframe="1h",
+                params={"amount": 2.5},
+                enabled=True,
+                created_at=1700000000000,
+                updated_at=1700000000000,
+            )
+
+        def save_backtest_result_with_trades(self, result, trades):
+            self.results.append(result)
+            return result
+
+    class FakeBacktestEngine:
+        captured_strategy = None
+
+        def __init__(self, **kwargs):
+            pass
+
+        async def run(self, strategy, bars):
+            self.__class__.captured_strategy = strategy
+            return SimpleNamespace(
+                total_return=0.0,
+                sharpe_ratio=0.0,
+                max_drawdown=0.0,
+                win_rate=0.0,
+                total_trades=0,
+                trades=[],
+            )
+
+    registry = StrategyRegistry()
+    registry.register("ma_cross", BuiltinStrategy)
+    registry.register("configured_type", ConfiguredStrategy)
+    monkeypatch.setattr(backtest_api, "Repository", FakeRepository, raising=False)
+    monkeypatch.setattr(backtest_api, "create_strategy_registry", lambda: registry, raising=False)
+    async def fake_historical_bars(**kwargs):
+        return [
+            Bar(1700002800000, 100.0, 101.0, 99.0, 100.0, 10.0),
+            Bar(1700006400000, 101.0, 102.0, 100.0, 101.0, 12.0),
+        ]
+
+    monkeypatch.setattr(
+        backtest_api,
+        "ensure_historical_bars",
+        fake_historical_bars,
+        raising=False,
+    )
+    monkeypatch.setattr(backtest_api, "BacktestEngine", FakeBacktestEngine, raising=False)
+    monkeypatch.setattr(
+        backtest_api,
+        "load_backtest_config",
+        lambda: SimpleNamespace(slippage=0.0, fee_rate=0.0),
+        raising=False,
+    )
+    monkeypatch.setattr(backtest_api, "current_timestamp_ms", lambda: 1700007200000)
+
+    transport = ASGITransport(app=create_app())
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/backtest/run",
+            json={
+                "strategy": "ma_cross",
+                "symbol": "BTC-USDT",
+                "timeframe": "1h",
+                "start_time": 1700002800000,
+                "end_time": 1700006400000,
+                "initial_capital": 100000,
+            },
+        )
+
+    assert response.status_code == 200
+    assert isinstance(FakeBacktestEngine.captured_strategy, ConfiguredStrategy)
+    assert FakeBacktestEngine.captured_strategy.amount == 2.5
+
+
+@pytest.mark.asyncio
 async def test_run_backtest_uses_cached_bars_and_persists_summary(monkeypatch):
     class FakeRepository:
         results = []
@@ -3864,6 +6216,8 @@ async def test_run_backtest_uses_cached_bars_and_persists_summary(monkeypatch):
                 low=99.0,
                 close=100.0,
                 volume=10.0,
+                source="backtest",
+                runtime_mode="backtest",
             ),
             KlineCache(
                 symbol="BTC-USDT",
@@ -3874,10 +6228,13 @@ async def test_run_backtest_uses_cached_bars_and_persists_summary(monkeypatch):
                 low=109.0,
                 close=110.0,
                 volume=12.0,
+                source="backtest",
+                runtime_mode="backtest",
             ),
         ]
 
-        def get_klines(self, symbol, timeframe, start, end):
+        def get_klines(self, symbol, timeframe, start, end, **kwargs):
+            assert kwargs == {"source": "backtest", "runtime_mode": "backtest"}
             return [
                 kline
                 for kline in self.klines
@@ -4357,13 +6714,14 @@ async def test_get_backtest_result_detail_returns_result_klines_and_markers(monk
                 created_at=1700007200000,
             )
 
-        def get_klines(self, symbol, timeframe, start, end):
+        def get_klines(self, symbol, timeframe, start, end, **kwargs):
             assert (symbol, timeframe, start, end) == (
                 "BTC-USDT",
                 "1h",
                 1700000000000,
                 1700003600000,
             )
+            assert kwargs == {"source": "backtest", "runtime_mode": "backtest"}
             return [
                 KlineCache(
                     symbol="BTC-USDT",
@@ -4374,6 +6732,8 @@ async def test_get_backtest_result_detail_returns_result_klines_and_markers(monk
                     low=99.0,
                     close=100.5,
                     volume=10.0,
+                    source="backtest",
+                    runtime_mode="backtest",
                 )
             ]
 
@@ -4421,6 +6781,8 @@ async def test_get_backtest_result_detail_returns_result_klines_and_markers(monk
             "low": 99.0,
             "close": 100.5,
             "volume": 10.0,
+            "source": "backtest",
+            "runtime_mode": "backtest",
         }
     ]
     assert data["markers"] == [
@@ -4436,6 +6798,45 @@ async def test_get_backtest_result_detail_returns_result_klines_and_markers(monk
             "pnl": -10.01,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_backtest_detail_rejects_legacy_repository_without_provenance(monkeypatch):
+    class LegacyRepository:
+        def get_backtest_result(self, result_id):
+            return BacktestResultRecord(
+                id=result_id,
+                strategy="ma_cross",
+                symbol="BTC-USDT",
+                timeframe="1h",
+                start_time=1,
+                end_time=2,
+                initial_capital=100.0,
+                created_at=3,
+            )
+
+        def get_klines(self, symbol, timeframe, start, end):
+            return [KlineCache(
+                symbol=symbol,
+                timeframe=timeframe,
+                timestamp=start,
+                open=100.0,
+                high=101.0,
+                low=99.0,
+                close=100.5,
+                volume=1.0,
+            )]
+
+        def get_backtest_trades(self, result_id):
+            return []
+
+    monkeypatch.setattr(backtest_api, "Repository", LegacyRepository, raising=False)
+    transport = ASGITransport(app=create_app())
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/api/backtest/results/result")
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "repository does not support scoped backtest kline queries"
 
 
 @pytest.mark.asyncio
@@ -4477,31 +6878,43 @@ async def test_get_backtest_result_detail_returns_404_for_missing_result(monkeyp
 
 def test_websocket_accepts_connection_and_sends_snapshot(monkeypatch):
     class FakeRepository:
-        def get_account(self, strategy=None):
-            return {
-                "cash_balance": 100000.0,
-                "equity": 100100.0,
-                "realized_pnl": 100.0,
-                "unrealized_pnl": 0.0,
-                "daily_pnl": 100.0,
-                "fees_paid": 1.5,
-            }
+        def get_account(self, strategy=None, **kwargs):
+            assert kwargs == {"source": "live_exchange", "runtime_mode": "live"}
+            return AccountRecord(
+                strategy="__exchange__",
+                initial_equity=100000.0,
+                cash_balance=100000.0,
+                equity=100100.0,
+                realized_pnl=100.0,
+                unrealized_pnl=0.0,
+                daily_pnl=100.0,
+                fees_paid=1.5,
+                updated_at=1,
+                source="live_exchange",
+                runtime_mode="live",
+            )
 
-        def get_open_positions(self, strategy=None):
+        def get_open_positions(self, strategy=None, **kwargs):
+            assert kwargs == {"source": "live_exchange", "runtime_mode": "live"}
             return []
 
-        def get_orders(self):
+        def get_orders(self, **kwargs):
+            assert kwargs == {"source": "live_exchange", "runtime_mode": "live"}
             return []
 
     monkeypatch.setattr(web_app, "Repository", FakeRepository, raising=False)
 
     with TestClient(create_app()) as client:
-        with client.websocket_connect("/ws") as websocket:
+        with client.websocket_connect("/ws?scope=exchange") as websocket:
             snapshot = websocket.receive_json()
 
     assert snapshot == {
         "type": "snapshot",
+        "scope": "exchange",
+        "strategy": "__exchange__",
         "data": {
+            "scope": "exchange",
+            "strategy": "__exchange__",
             "account": {
                 "cash_balance": 100000.0,
                 "available_balance": 0.0,
@@ -4511,14 +6924,207 @@ def test_websocket_accepts_connection_and_sends_snapshot(monkeypatch):
                 "daily_pnl": 100.0,
                 "fees_paid": 1.5,
                 "assets": [],
+                "scope": "exchange",
+                "strategy": "__exchange__",
             },
             "positions": [],
             "orders": [],
-            "strategies": [{"name": "ma_cross", "status": "stopped"}],
-            "strategy_configs": [],
-            "strategy_errors": {},
         },
     }
+
+
+def test_websocket_scope_is_explicit_and_strategy_scope_requires_strategy(monkeypatch):
+    class FakeRepository:
+        def get_account(self, strategy, **kwargs):
+            return None
+
+        def get_open_positions(self, strategy=None, **kwargs):
+            return []
+
+        def get_orders(self, **kwargs):
+            return []
+
+        def get_strategy_configs(self):
+            return []
+
+    monkeypatch.setattr(web_app, "Repository", FakeRepository, raising=False)
+
+    with TestClient(create_app()) as client:
+        with client.websocket_connect("/ws?scope=exchange") as exchange_ws:
+            assert exchange_ws.receive_json()["scope"] == "exchange"
+        with pytest.raises(WebSocketDisconnect) as missing_scope:
+            with client.websocket_connect("/ws"):
+                pass
+        assert missing_scope.value.code == 1008
+        with pytest.raises(WebSocketDisconnect) as missing_strategy:
+            with client.websocket_connect("/ws?scope=strategy"):
+                pass
+        assert missing_strategy.value.code == 1008
+        with client.websocket_connect("/ws?scope=strategy&strategy=ma_cross") as strategy_ws:
+            assert strategy_ws.receive_json()["scope"] == "strategy"
+
+
+def test_websocket_strategy_wildcard_snapshot_contains_all_strategies(monkeypatch):
+    class FakeRepository:
+        def get_strategy_configs(self):
+            return [
+                StrategyConfigRecord(
+                    name="alpha", strategy_type="ma_cross", symbol="BTC-USDT",
+                    timeframe="1h", params={}, enabled=True, created_at=1, updated_at=1,
+                ),
+                StrategyConfigRecord(
+                    name="beta", strategy_type="ma_cross", symbol="ETH-USDT",
+                    timeframe="1h", params={}, enabled=True, created_at=1, updated_at=1,
+                ),
+            ]
+
+    monkeypatch.setattr(web_app, "Repository", FakeRepository, raising=False)
+    app = create_app()
+    app.state.test_strategy_runtime = None
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws?scope=strategy&strategy=*") as websocket:
+            snapshot = websocket.receive_json()
+
+    assert snapshot["scope"] == "strategy"
+    assert snapshot["strategy"] == "*"
+    assert [item["name"] for item in snapshot["data"]["strategy_configs"]] == ["alpha", "beta"]
+    assert snapshot["data"]["scope"] == "strategy"
+    assert "account" not in snapshot["data"]
+
+
+def test_exchange_snapshot_uses_only_live_exchange_provenance(monkeypatch):
+    rows = [
+        OrderRecord(
+            order_id="paper-order", strategy="__exchange__", symbol="BTC-USDT",
+            side="buy", type="limit", amount=1.0, price=100.0, status="open",
+            fill_price=0.0, timestamp=1, updated_at=1,
+            source="paper", runtime_mode="paper",
+        ),
+        OrderRecord(
+            order_id="live-order", strategy="__exchange__", symbol="BTC-USDT",
+            side="buy", type="limit", amount=2.0, price=100.0, status="open",
+            fill_price=0.0, timestamp=2, updated_at=2,
+            source="live_exchange", runtime_mode="live",
+        ),
+    ]
+    accounts = [
+        AccountRecord(
+            strategy="__exchange__", source="paper", runtime_mode="paper",
+            initial_equity=100.0, cash_balance=100.0, equity=100.0,
+            realized_pnl=0.0, unrealized_pnl=0.0, daily_pnl=0.0, fees_paid=0.0,
+            updated_at=1,
+        ),
+        AccountRecord(
+            strategy="__exchange__", source="live_exchange", runtime_mode="live",
+            initial_equity=1000.0, cash_balance=1000.0, equity=1000.0,
+            realized_pnl=0.0, unrealized_pnl=0.0, daily_pnl=0.0, fees_paid=0.0,
+            updated_at=2,
+        ),
+    ]
+
+    class FakeRepository:
+        def get_open_positions(self, strategy, **kwargs):
+            assert kwargs in ({"source": "live_exchange", "runtime_mode": "live"}, {
+                "source": "unknown", "runtime_mode": "unknown"
+            })
+            return []
+
+        def get_orders(self, **kwargs):
+            assert kwargs in ({"source": "live_exchange", "runtime_mode": "live"}, {
+                "source": "unknown", "runtime_mode": "unknown"
+            })
+            return [row for row in rows if row.source == kwargs["source"]]
+
+        def get_account(self, strategy, **kwargs):
+            assert kwargs in ({"source": "live_exchange", "runtime_mode": "live"}, {
+                "source": "unknown", "runtime_mode": "unknown"
+            })
+            return accounts[1] if kwargs["source"] == "live_exchange" else None
+
+    snapshot = ops_api.exchange_snapshot(FakeRepository())
+
+    assert snapshot["data"]["account"]["equity"] == 1000.0
+    assert [row["order_id"] for row in snapshot["data"]["orders"]] == ["live-order"]
+
+
+def test_exchange_snapshot_does_not_fallback_to_unknown_legacy_rows():
+    legacy_account = AccountRecord(
+        strategy="__exchange__", initial_equity=100.0, cash_balance=100.0,
+        equity=100.0, realized_pnl=0.0, unrealized_pnl=0.0, daily_pnl=0.0,
+        fees_paid=0.0, updated_at=1, source="unknown", runtime_mode="unknown",
+    )
+    legacy_order = OrderRecord(
+        order_id="legacy", strategy="__exchange__", symbol="BTC-USDT", side="buy",
+        type="limit", amount=1.0, price=100.0, status="open", timestamp=1,
+        updated_at=1, source="unknown", runtime_mode="unknown",
+    )
+
+    class LegacyOnlyRepository:
+        def get_open_positions(self, strategy, **kwargs):
+            return []
+
+        def get_orders(self, **kwargs):
+            return (
+                [legacy_order]
+                if kwargs == {"source": "unknown", "runtime_mode": "unknown"}
+                else []
+            )
+
+        def get_account(self, strategy, **kwargs):
+            return (
+                legacy_account
+                if kwargs == {"source": "unknown", "runtime_mode": "unknown"}
+                else None
+            )
+
+    snapshot = ops_api.exchange_snapshot(LegacyOnlyRepository())
+
+    assert snapshot["data"]["account"]["equity"] == 0.0
+    assert snapshot["data"]["orders"] == []
+
+
+def test_websocket_snapshot_orders_use_public_rest_allowlist(monkeypatch):
+    order = OrderRecord(
+        order_id="local-1", exchange_order_id="exchange-secret", client_order_id="client-secret",
+        strategy="__exchange__", symbol="BTC-USDT", side="buy", type="limit", amount=1.0,
+        price=100.0, status="partially_filled", fill_price=100.0, timestamp=1,
+        updated_at=2, filled_amount=0.5, remaining_amount=0.5,
+        source="live_exchange", runtime_mode="live",
+    )
+
+    class FakeRepository:
+        def get_account(self, strategy=None):
+            return None
+
+        def get_open_positions(self, strategy=None):
+            return []
+
+        def get_orders(self):
+            return [order]
+
+    monkeypatch.setattr(web_app, "Repository", FakeRepository, raising=False)
+
+    with TestClient(create_app()) as client:
+        with client.websocket_connect("/ws?scope=exchange") as websocket:
+            snapshot = websocket.receive_json()
+
+    assert snapshot["data"]["orders"] == [
+        {
+            "id": None,
+            "order_id": "local-1",
+            "strategy": "__exchange__",
+            "symbol": "BTC-USDT",
+            "side": "buy",
+            "type": "limit",
+            "amount": 1.0,
+            "price": 100.0,
+            "status": "partially_filled",
+            "fill_price": 100.0,
+            "timestamp": 1,
+            "filled_amount": 0.5,
+            "remaining_amount": 0.5,
+        }
+    ]
 
 
 def test_websocket_snapshot_reflects_running_strategy_status():
@@ -4526,7 +7132,7 @@ def test_websocket_snapshot_reflects_running_strategy_status():
 
     with TestClient(app) as client:
         resp = client.post("/api/strategies/ma_cross/start")
-        with client.websocket_connect("/ws") as websocket:
+        with client.websocket_connect("/ws?scope=strategy&strategy=ma_cross") as websocket:
             snapshot = websocket.receive_json()
 
     assert resp.status_code == 200
@@ -4561,7 +7167,7 @@ def test_websocket_snapshot_includes_persisted_strategy_configs(monkeypatch):
     monkeypatch.setattr(web_app, "Repository", FakeRepository, raising=False)
 
     with TestClient(create_app()) as client:
-        with client.websocket_connect("/ws") as websocket:
+        with client.websocket_connect("/ws?scope=strategy&strategy=ma_cross_btc") as websocket:
             snapshot = websocket.receive_json()
 
     assert {"name": "ma_cross_btc", "status": "stopped"} in snapshot["data"]["strategies"]
@@ -4585,6 +7191,7 @@ async def test_strategy_start_broadcasts_status_event(monkeypatch):
     assert messages == [
         {
             "type": "strategy_status",
+            "scope": "strategy",
             "strategy": "ma_cross",
             "status": "running",
             "timestamp": 1700000000000,
@@ -4837,6 +7444,8 @@ async def test_get_positions_returns_persisted_position_records(monkeypatch, app
                 "entry_price": 65000.0,
                 "leverage": 3,
                 "timestamp": 1700000000000,
+                "source": "live_exchange",
+                "runtime_mode": "live",
             }
 
     class FakeRepository:
@@ -4848,7 +7457,7 @@ async def test_get_positions_returns_persisted_position_records(monkeypatch, app
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.get("/api/trading/positions")
+        resp = await client.get("/api/trading/positions?runtime_mode=live")
 
     assert resp.status_code == 200
     assert resp.json() == [
@@ -4863,6 +7472,189 @@ async def test_get_positions_returns_persisted_position_records(monkeypatch, app
             "timestamp": 1700000000000,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_get_positions_excludes_exchange_scope_and_keeps_strategy_filter(monkeypatch, app):
+    positions = [
+        PositionRecord(
+            strategy="__exchange__", symbol="BTC-USDT-SWAP", side="long", amount=1.0,
+            entry_price=100.0, leverage=1, timestamp=2,
+            source="live_exchange", runtime_mode="live",
+        ),
+        PositionRecord(
+            strategy="alpha", symbol="BTC-USDT-SWAP", side="long", amount=2.0,
+            entry_price=100.0, leverage=1, timestamp=1,
+            source="live_exchange", runtime_mode="live",
+        ),
+        PositionRecord(
+            strategy="beta", symbol="ETH-USDT-SWAP", side="long", amount=3.0,
+            entry_price=100.0, leverage=1, timestamp=1,
+            source="live_exchange", runtime_mode="live",
+        ),
+    ]
+
+    class FakeRepository:
+        def get_open_positions(self, strategy=None, **kwargs):
+            return [
+                position
+                for position in positions
+                if strategy is None or position.strategy == strategy
+            ]
+
+    monkeypatch.setattr(trading_api, "Repository", FakeRepository, raising=False)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        all_positions = await client.get("/api/trading/positions?runtime_mode=live")
+        alpha_positions = await client.get(
+            "/api/trading/positions?strategy=alpha&runtime_mode=live"
+        )
+
+    assert [row["strategy"] for row in all_positions.json()] == ["alpha", "beta"]
+    assert [row["strategy"] for row in alpha_positions.json()] == ["alpha"]
+
+
+@pytest.mark.asyncio
+async def test_get_positions_exchange_scope_returns_only_exchange_positions(monkeypatch, app):
+    positions = [
+        PositionRecord(
+            strategy="__exchange__", symbol="BTC-USDT-SWAP", side="long", amount=1.0,
+            entry_price=100.0, leverage=1, timestamp=2,
+            source="live_exchange", runtime_mode="live",
+        ),
+        PositionRecord(
+            strategy="alpha", symbol="BTC-USDT-SWAP", side="long", amount=2.0,
+            entry_price=100.0, leverage=1, timestamp=1,
+            source="paper", runtime_mode="paper",
+        ),
+    ]
+
+    class FakeRepository:
+        def get_open_positions(self, strategy=None, **kwargs):
+            return [
+                position for position in positions
+                if strategy is None or position.strategy == strategy
+            ]
+
+    monkeypatch.setattr(trading_api, "Repository", FakeRepository, raising=False)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/api/trading/positions?scope=exchange")
+
+    assert response.status_code == 200
+    assert [row["strategy"] for row in response.json()] == ["__exchange__"]
+
+
+@pytest.mark.asyncio
+async def test_get_positions_rejects_strategy_and_exchange_scope_together(monkeypatch, app):
+    monkeypatch.setattr(trading_api, "Repository", lambda: object(), raising=False)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/api/trading/positions?scope=exchange&strategy=alpha")
+
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_get_account_rejects_exchange_strategy_outside_exchange_scope(monkeypatch, app):
+    monkeypatch.setattr(trading_api, "Repository", lambda: object(), raising=False)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        default_scope = await client.get("/api/trading/account?strategy=__exchange__")
+        strategy_scope = await client.get(
+            "/api/trading/account?scope=strategy&strategy=__exchange__"
+        )
+        mixed_scope = await client.get(
+            "/api/trading/account?scope=exchange&strategy=__exchange__"
+        )
+
+    assert default_scope.status_code == 422
+    assert strategy_scope.status_code == 422
+    assert mixed_scope.status_code == 422
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["account", "positions", "orders", "trades"])
+async def test_trading_strategy_scope_rejects_unknown_strategy(monkeypatch, app, endpoint):
+    class EmptyRepository:
+        def get_strategy_configs(self):
+            return []
+
+    monkeypatch.setattr(trading_api, "Repository", EmptyRepository, raising=False)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            f"/api/trading/{endpoint}?scope=strategy&strategy=does-not-exist"
+        )
+
+    assert response.status_code in {404, 422}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["account", "positions", "orders", "trades"])
+async def test_trading_scope_rejects_exchange_strategy_consistently(monkeypatch, app, endpoint):
+    monkeypatch.setattr(trading_api, "Repository", lambda: object(), raising=False)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            f"/api/trading/{endpoint}?scope=strategy&strategy=__exchange__"
+        )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "__exchange__ requires exchange scope"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["account", "positions", "orders", "trades"])
+async def test_trading_scope_rejects_strategy_parameter_for_exchange_consistently(
+    monkeypatch, app, endpoint
+):
+    monkeypatch.setattr(trading_api, "Repository", lambda: object(), raising=False)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            f"/api/trading/{endpoint}?scope=exchange&strategy=__exchange__"
+        )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "strategy is not valid for exchange scope"
+
+
+@pytest.mark.asyncio
+async def test_get_account_requires_explicit_exchange_scope_for_global_account(monkeypatch, app):
+    exchange = AccountRecord(
+        strategy="__exchange__", initial_equity=1000.0, cash_balance=900.0,
+        equity=1000.0, realized_pnl=0.0, unrealized_pnl=0.0,
+        daily_pnl=0.0, fees_paid=0.0, updated_at=1,
+        source="live_exchange", runtime_mode="live",
+    )
+    strategy = AccountRecord(
+        strategy="alpha", initial_equity=100.0, cash_balance=90.0,
+        equity=110.0, realized_pnl=10.0, unrealized_pnl=0.0,
+        daily_pnl=10.0, fees_paid=1.0, updated_at=1,
+        source="live_exchange", runtime_mode="live",
+    )
+
+    class FakeRepository:
+        def get_accounts(self):
+            return [exchange, strategy]
+
+        def get_account(self, name=None, **kwargs):
+            return exchange if name == "__exchange__" else strategy if name == "alpha" else None
+
+    monkeypatch.setattr(trading_api, "Repository", FakeRepository, raising=False)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        aggregate = await client.get("/api/trading/account?runtime_mode=live")
+        global_account = await client.get(
+            "/api/trading/account?scope=exchange&runtime_mode=live"
+        )
+
+    assert aggregate.json()["scope"] == "aggregate"
+    assert aggregate.json()["equity"] == 110.0
+    assert global_account.json()["scope"] == "exchange"
+    assert global_account.json()["strategy"] == "__exchange__"
+    assert global_account.json()["equity"] == 1000.0
 
 
 @pytest.mark.asyncio
@@ -4881,6 +7673,10 @@ async def test_get_orders_returns_persisted_order_records(monkeypatch, app):
                 "status": "open",
                 "fill_price": 0.0,
                 "timestamp": 1700000000000,
+                "filled_amount": 0.0,
+                "remaining_amount": 0.2,
+                "source": "live_exchange",
+                "runtime_mode": "live",
             }
 
     class FakeRepository:
@@ -4891,7 +7687,7 @@ async def test_get_orders_returns_persisted_order_records(monkeypatch, app):
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.get("/api/trading/orders")
+        resp = await client.get("/api/trading/orders?runtime_mode=live")
 
     assert resp.status_code == 200
     assert resp.json() == [
@@ -4907,8 +7703,63 @@ async def test_get_orders_returns_persisted_order_records(monkeypatch, app):
             "status": "open",
             "fill_price": 0.0,
             "timestamp": 1700000000000,
+            "filled_amount": 0.0,
+            "remaining_amount": 0.2,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_get_orders_serializes_real_order_record_with_legacy_public_shape(monkeypatch, app):
+    order = OrderRecord(
+        id=7,
+        order_id="order-real",
+        exchange_order_id="exchange-internal",
+        client_order_id="client-internal",
+        strategy="ma_cross",
+        symbol="BTC-USDT",
+        side="buy",
+        type="limit",
+        amount=0.3,
+        price=65000.0,
+        status="partially_filled",
+        fill_price=64900.0,
+        timestamp=1700000000000,
+        updated_at=1700000000100,
+        filled_amount=0.2,
+        remaining_amount=0.1,
+        source="live_exchange",
+        runtime_mode="live",
+    )
+
+    class FakeRepository:
+        def get_orders(self):
+            return [order]
+
+    monkeypatch.setattr(trading_api, "Repository", FakeRepository, raising=False)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/trading/orders?runtime_mode=live")
+
+    assert resp.status_code == 200
+    body = resp.json()[0]
+    assert body == {
+        "id": 7,
+        "order_id": "order-real",
+        "strategy": "ma_cross",
+        "symbol": "BTC-USDT",
+        "side": "buy",
+        "type": "limit",
+        "amount": 0.3,
+        "price": 65000.0,
+        "status": "partially_filled",
+        "fill_price": 64900.0,
+        "timestamp": 1700000000000,
+        "filled_amount": body["filled_amount"],
+        "remaining_amount": 0.1,
+    }
+    assert body["filled_amount"] == pytest.approx(0.2)
 
 
 @pytest.mark.asyncio
@@ -4922,6 +7773,8 @@ async def test_get_account_returns_paper_account_state(monkeypatch, app):
         fees_paid = 2.5
         available_balance = 94000.0
         assets = [{"ccy": "USDT", "avail_bal": 94000.0}]
+        source = "paper"
+        runtime_mode = "paper"
 
     class FakeRepository:
         def get_account(self, strategy=None):
@@ -4932,7 +7785,7 @@ async def test_get_account_returns_paper_account_state(monkeypatch, app):
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.get("/api/trading/account")
+        resp = await client.get("/api/trading/account?runtime_mode=paper")
 
     assert resp.status_code == 200
     assert resp.json() == {
@@ -4944,7 +7797,94 @@ async def test_get_account_returns_paper_account_state(monkeypatch, app):
         "fees_paid": 2.5,
         "available_balance": 94000.0,
         "assets": [{"ccy": "USDT", "avail_bal": 94000.0}],
+        "scope": "aggregate",
     }
+
+
+@pytest.mark.asyncio
+async def test_get_account_asset_serialization_uses_public_allowlist(monkeypatch, app):
+    class Account:
+        cash_balance = 1.0
+        equity = 1.0
+        realized_pnl = 0.0
+        unrealized_pnl = 0.0
+        daily_pnl = 0.0
+        fees_paid = 0.0
+        available_balance = 1.0
+        assets = [{
+            "ccy": "USDT",
+            "cash_bal": 1.0,
+            "eq": 1.0,
+            "eq_utd": 1.0,
+            "avail_bal": 1.0,
+            "upl": 0.0,
+            "secret": "must-not-leak",
+            "api_key": "also-must-not-leak",
+        }]
+        source = "paper"
+        runtime_mode = "paper"
+
+    class FakeRepository:
+        def get_account(self, strategy=None):
+            return Account()
+
+    monkeypatch.setattr(trading_api, "Repository", FakeRepository, raising=False)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/api/trading/account?runtime_mode=paper")
+
+    assert response.status_code == 200
+    assert response.json()["assets"] == [{
+        "ccy": "USDT",
+        "cash_bal": 1.0,
+        "eq": 1.0,
+        "eq_utd": 1.0,
+        "avail_bal": 1.0,
+        "upl": 0.0,
+    }]
+    assert "secret" not in response.text
+    assert "api_key" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_get_account_serializes_deeply_immutable_assets_with_public_allowlist(
+    monkeypatch, app
+):
+    account = AccountRecord(
+        strategy="__exchange__",
+        initial_equity=1.0,
+        cash_balance=1.0,
+        equity=1.0,
+        realized_pnl=0.0,
+        unrealized_pnl=0.0,
+        daily_pnl=0.0,
+        fees_paid=0.0,
+        updated_at=1,
+        assets=[{
+            "ccy": "USDT",
+            "avail_bal": 1.0,
+            "metadata": {"levels": [{"name": "cash"}]},
+            "tags": {"primary"},
+        }],
+        source="paper",
+        runtime_mode="paper",
+    )
+
+    class FakeRepository:
+        def get_account(self, strategy=None):
+            return account
+
+    monkeypatch.setattr(trading_api, "Repository", FakeRepository, raising=False)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/api/trading/account?runtime_mode=paper")
+
+    assert response.status_code == 200
+    assert response.json()["assets"] == [{"ccy": "USDT", "avail_bal": 1.0}]
+    assert "metadata" not in response.text
+    assert "tags" not in response.text
 
 
 @pytest.mark.asyncio
@@ -4970,7 +7910,320 @@ async def test_get_account_returns_zero_state_with_assets_when_account_absent(mo
         "fees_paid": 0.0,
         "available_balance": 0.0,
         "assets": [],
+        "scope": "aggregate",
     }
+
+
+def test_repository_get_accounts_and_get_account_prefers_exchange_account(tmp_path):
+    repo = SqliteRepository(db_path=str(tmp_path / "bot.db"))
+    repo.upsert_account(
+        AccountRecord(
+            strategy="alpha",
+            source="paper",
+            runtime_mode="paper",
+            initial_equity=100.0,
+            cash_balance=90.0,
+            available_balance=80.0,
+            equity=110.0,
+            realized_pnl=10.0,
+            unrealized_pnl=1.0,
+            daily_pnl=5.0,
+            fees_paid=0.5,
+            updated_at=1,
+        )
+    )
+    repo.upsert_account(
+        AccountRecord(
+            strategy="__exchange__",
+            initial_equity=1000.0,
+            cash_balance=900.0,
+            available_balance=850.0,
+            equity=1010.0,
+            realized_pnl=10.0,
+            unrealized_pnl=20.0,
+            daily_pnl=5.0,
+            fees_paid=1.0,
+            updated_at=3,
+            assets=[{"ccy": "USDT", "avail_bal": 850.0}],
+        )
+    )
+    repo.upsert_account(
+        AccountRecord(
+            strategy="beta",
+            initial_equity=200.0,
+            cash_balance=180.0,
+            available_balance=170.0,
+            equity=210.0,
+            realized_pnl=20.0,
+            unrealized_pnl=2.0,
+            daily_pnl=6.0,
+            fees_paid=0.7,
+            updated_at=2,
+        )
+    )
+
+    accounts = repo.get_accounts()
+
+    assert len(accounts) == 3
+    assert {account.strategy for account in accounts} == {"alpha", "beta", "__exchange__"}
+    assert repo.get_account("alpha").cash_balance == 90.0
+    account = repo.get_account()
+    assert account is not None
+    assert account.strategy == "__exchange__"
+    assert account.cash_balance == 900.0
+    assert account.assets == [{"ccy": "USDT", "avail_bal": 850.0}]
+
+
+@pytest.mark.asyncio
+async def test_get_strategy_performance_returns_aggregated_rows(monkeypatch, app):
+    accounts = [
+        AccountRecord(
+            strategy="alpha",
+            source="paper",
+            runtime_mode="paper",
+            initial_equity=100.0,
+            cash_balance=90.0,
+            available_balance=80.0,
+            equity=110.0,
+            realized_pnl=10.0,
+            unrealized_pnl=1.0,
+            daily_pnl=5.0,
+            fees_paid=0.5,
+            updated_at=1,
+        ),
+        AccountRecord(
+            strategy="alpha",
+            source="live_exchange",
+            runtime_mode="paper",
+            initial_equity=999.0,
+            cash_balance=999.0,
+            available_balance=999.0,
+            equity=999.0,
+            realized_pnl=999.0,
+            unrealized_pnl=0.0,
+            daily_pnl=0.0,
+            fees_paid=999.0,
+            updated_at=99,
+        ),
+        AccountRecord(
+            strategy="__exchange__",
+            initial_equity=1000.0,
+            cash_balance=900.0,
+            available_balance=850.0,
+            equity=1010.0,
+            realized_pnl=10.0,
+            unrealized_pnl=20.0,
+            daily_pnl=5.0,
+            fees_paid=1.0,
+            updated_at=3,
+        ),
+    ]
+    positions = [
+        PositionRecord(
+            strategy="alpha",
+            symbol="BTC-USDT-SWAP",
+            side="long",
+            amount=2.0,
+            entry_price=100.0,
+            leverage=1,
+            timestamp=10,
+            mark_price=120.0,
+        ),
+        PositionRecord(
+            strategy="__exchange__",
+            symbol="BTC-USDT-SWAP",
+            side="long",
+            amount=1.0,
+            entry_price=100.0,
+            leverage=1,
+            timestamp=11,
+            mark_price=101.0,
+        ),
+    ]
+    orders = [
+        OrderRecord(
+            order_id="o-1",
+            exchange_order_id="",
+            client_order_id="",
+            strategy="alpha",
+            symbol="BTC-USDT-SWAP",
+            side="buy",
+            type="market",
+            amount=1.0,
+            price=100.0,
+            status="filled",
+            fill_price=101.0,
+            filled_amount=1.0,
+            remaining_amount=0.0,
+            timestamp=150,
+            updated_at=160,
+        ),
+        OrderRecord(
+            order_id="o-2",
+            exchange_order_id="",
+            client_order_id="",
+            strategy="order_only",
+            symbol="ETH-USDT-SWAP",
+            side="sell",
+            type="limit",
+            amount=1.0,
+            price=200.0,
+            status="open",
+            fill_price=0.0,
+            timestamp=250,
+            updated_at=260,
+        ),
+        OrderRecord(
+            order_id="o-3",
+            exchange_order_id="",
+            client_order_id="",
+            strategy="__exchange__",
+            symbol="BTC-USDT-SWAP",
+            side="buy",
+            type="market",
+            amount=1.0,
+            price=100.0,
+            status="open",
+            fill_price=0.0,
+            timestamp=50,
+            updated_at=50,
+        ),
+    ]
+    trades = [
+        TradeRecord(
+            exchange_trade_id="t-1",
+            order_id="o-1",
+            strategy="alpha",
+            symbol="BTC-USDT-SWAP",
+            side="buy",
+            amount=2.0,
+            price=100.0,
+            fee=1.0,
+            timestamp=101,
+        ),
+        TradeRecord(
+            exchange_trade_id="t-2",
+            order_id="o-3",
+            strategy="__exchange__",
+            symbol="BTC-USDT-SWAP",
+            side="buy",
+            amount=1.0,
+            price=100.0,
+            fee=1.0,
+            timestamp=102,
+        ),
+    ]
+
+    class FakeRepository:
+        def get_accounts(self):
+            return accounts
+
+        def get_positions(self, strategy=None):
+            assert strategy is None
+            return positions
+
+        def get_orders(self):
+            return orders
+
+        def get_trades(self, strategy=None):
+            assert strategy is None
+            return trades
+
+    monkeypatch.setattr(trading_api, "Repository", FakeRepository, raising=False)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/trading/strategy-performance?runtime_mode=paper")
+
+    expected = [
+        asdict(performance)
+        for performance in build_strategy_performance(
+            accounts, positions, orders, trades, runtime_modes={"paper"}
+        )
+    ]
+    assert resp.status_code == 200
+    assert resp.json() == expected
+    assert [row["strategy"] for row in resp.json()] == ["alpha"]
+    alpha = resp.json()[0]
+    assert alpha["initial_equity"] == 100.0
+    assert alpha["equity"] == 110.0
+    assert alpha["positions"] == []
+    assert alpha["recent_orders"] == []
+    assert alpha["order_count"] == 0
+    assert alpha["trade_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_strategy_performance_accepts_configured_backtest_runtime(monkeypatch, app):
+    monkeypatch.setattr(
+        trading_api,
+        "load_runtime_settings",
+        lambda: SimpleNamespace(mode="backtest"),
+    )
+
+    class FakeRepository:
+        def get_accounts(self):
+            return []
+
+        def get_positions(self):
+            return []
+
+        def get_orders(self):
+            return []
+
+        def get_trades(self):
+            return []
+
+    monkeypatch.setattr(trading_api, "Repository", FakeRepository, raising=False)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/trading/strategy-performance")
+
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+@pytest.mark.asyncio
+async def test_strategy_performance_demo_alias_serializes_paper_rows(monkeypatch, app):
+    monkeypatch.setattr(
+        trading_api,
+        "load_runtime_settings",
+        lambda: SimpleNamespace(mode="demo"),
+    )
+
+    class FakeRepository:
+        def get_accounts(self):
+            return [AccountRecord(
+                strategy="alpha", source="paper", runtime_mode="paper",
+                initial_equity=100.0, cash_balance=100.0, equity=105.0,
+                realized_pnl=5.0, unrealized_pnl=0.0, daily_pnl=0.0,
+                fees_paid=0.0, updated_at=1,
+            )]
+
+        def get_positions(self):
+            return [PositionRecord(
+                strategy="alpha", source="paper", runtime_mode="paper",
+                symbol="BTC-USD-SWAP", side="long",
+                amount=200.0, entry_price=50000.0, mark_price=60000.0,
+                leverage=1, timestamp=1, quantity=2.0, contracts=2.0,
+                quantity_unit="contracts", notional_value=None, is_inverse=True,
+                contract_size=100.0,
+            )]
+
+        def get_orders(self):
+            return []
+
+        def get_trades(self):
+            return []
+
+    monkeypatch.setattr(trading_api, "Repository", FakeRepository, raising=False)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/trading/strategy-performance?runtime_mode=demo")
+
+    assert resp.status_code == 200
+    assert resp.json()[0]["position_notional"] == 200.0
+    assert resp.json()[0]["positions"][0]["notional_value"] == 200.0
 
 
 @pytest.mark.asyncio
@@ -4978,7 +8231,7 @@ async def test_get_positions_forwards_strategy_filter(monkeypatch, app):
     calls = []
 
     class FakeRepository:
-        def get_open_positions(self, strategy=None):
+        def get_open_positions(self, strategy=None, **kwargs):
             calls.append(strategy)
             return []
 
@@ -5006,6 +8259,8 @@ async def test_get_positions_filters_flat_rows_without_open_position_method(monk
                 "symbol": self.symbol,
                 "amount": self.amount,
                 "timestamp": self.timestamp,
+                "source": "live_exchange",
+                "runtime_mode": "live",
             }
 
     class FakeRepository:
@@ -5016,7 +8271,7 @@ async def test_get_positions_filters_flat_rows_without_open_position_method(monk
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.get("/api/trading/positions")
+        resp = await client.get("/api/trading/positions?runtime_mode=live")
 
     assert resp.status_code == 200
     assert resp.json() == [
@@ -5068,6 +8323,8 @@ async def test_get_trades_returns_persisted_trade_records(monkeypatch, app):
                     price=68000.0,
                     fee=1.2,
                     timestamp=1700000000000,
+                    source="live_exchange",
+                    runtime_mode="live",
                 )
             ]
 
@@ -5075,7 +8332,7 @@ async def test_get_trades_returns_persisted_trade_records(monkeypatch, app):
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.get("/api/trading/trades")
+        resp = await client.get("/api/trading/trades?runtime_mode=live")
 
     assert resp.status_code == 200
     assert resp.json() == [
@@ -5093,11 +8350,57 @@ async def test_get_trades_returns_persisted_trade_records(monkeypatch, app):
 
 
 @pytest.mark.asyncio
+async def test_get_trades_serializes_real_trade_record_with_legacy_public_allowlist(
+    monkeypatch, app
+):
+    trade = TradeRecord(
+        id=1,
+        exchange_trade_id="exchange-trade-secret",
+        exchange_order_id="exchange-order-secret",
+        client_order_id="client-order-secret",
+        order_id="local-order",
+        strategy="ma_cross",
+        symbol="BTC-USDT",
+        side="buy",
+        amount=0.1,
+        price=68000.0,
+        fee=1.2,
+        timestamp=1700000000000,
+        source="live_exchange",
+        runtime_mode="live",
+        blank_trade_fingerprint="internal-fingerprint",
+    )
+
+    class FakeRepository:
+        def get_trades(self, strategy=None):
+            return [trade]
+
+    monkeypatch.setattr(trading_api, "Repository", FakeRepository, raising=False)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/trading/trades?runtime_mode=live")
+
+    assert resp.status_code == 200
+    assert resp.json() == [{
+        "id": 1,
+        "order_id": "local-order",
+        "strategy": "ma_cross",
+        "symbol": "BTC-USDT",
+        "side": "buy",
+        "amount": 0.1,
+        "price": 68000.0,
+        "fee": 1.2,
+        "timestamp": 1700000000000,
+    }]
+
+
+@pytest.mark.asyncio
 async def test_get_trades_forwards_strategy_filter(monkeypatch, app):
     calls = []
 
     class FakeRepository:
-        def get_trades(self, strategy=None):
+        def get_trades(self, strategy=None, **kwargs):
             calls.append(strategy)
             return []
 
@@ -5128,6 +8431,8 @@ async def test_get_trades_returns_newest_first(monkeypatch, app):
                 "price": 68000.0,
                 "fee": 1.2,
                 "timestamp": self.timestamp,
+                "source": "live_exchange",
+                "runtime_mode": "live",
             }
 
     class FakeRepository:
@@ -5138,7 +8443,7 @@ async def test_get_trades_returns_newest_first(monkeypatch, app):
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.get("/api/trading/trades")
+        resp = await client.get("/api/trading/trades?runtime_mode=live")
 
     assert resp.status_code == 200
     assert [trade["timestamp"] for trade in resp.json()] == [1700100000000, 1700000000000]
@@ -5304,6 +8609,34 @@ async def test_market_klines_rejects_empty_symbol(app):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source", "runtime_mode"),
+    [("paper", "paper"), ("live_exchange", "live"), ("backtest", "backtest"), ("other", "other")],
+)
+async def test_market_klines_rejects_non_market_scope(monkeypatch, app, source, runtime_mode):
+    class UnexpectedRepository:
+        def __init__(self):
+            raise AssertionError("non-market scoped klines must not read another domain")
+
+    monkeypatch.setattr(market_api, "Repository", UnexpectedRepository, raising=False)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            "/api/market/klines",
+            params={
+                "symbol": "BTC-USDT",
+                "timeframe": "1h",
+                "start_time": 1,
+                "end_time": 2,
+                "source": source,
+                "runtime_mode": runtime_mode,
+            },
+        )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
 async def test_market_klines_with_time_range_returns_cached_rows(monkeypatch, app):
     events = []
 
@@ -5311,8 +8644,9 @@ async def test_market_klines_with_time_range_returns_cached_rows(monkeypatch, ap
         def __init__(self) -> None:
             events.append(("repo_init",))
 
-        def get_klines(self, symbol: str, timeframe: str, start: int, end: int):
-            events.append(("get_klines", symbol, timeframe, start, end))
+        def get_klines(self, symbol: str, timeframe: str, start: int, end: int, **kwargs):
+            events.append(("get_klines", symbol, timeframe, start, end, kwargs))
+            assert kwargs == {"source": "market", "runtime_mode": "market"}
             return [
                 KlineCache(
                     symbol="ETH-USDT",
@@ -5323,6 +8657,8 @@ async def test_market_klines_with_time_range_returns_cached_rows(monkeypatch, ap
                     low=1.0,
                     close=1.2,
                     volume=10.5,
+                    source="market",
+                    runtime_mode="market",
                 ),
                 KlineCache(
                     symbol="ETH-USDT",
@@ -5333,6 +8669,8 @@ async def test_market_klines_with_time_range_returns_cached_rows(monkeypatch, ap
                     low=1.1,
                     close=1.3,
                     volume=11.5,
+                    source="market",
+                    runtime_mode="market",
                 ),
             ]
 
@@ -5375,7 +8713,14 @@ async def test_market_klines_with_time_range_returns_cached_rows(monkeypatch, ap
     ]
     assert events == [
         ("repo_init",),
-        ("get_klines", "ETH-USDT", "1h", 1700000000000, 1700003600000),
+        (
+            "get_klines",
+            "ETH-USDT",
+            "1h",
+            1700000000000,
+            1700003600000,
+            {"source": "market", "runtime_mode": "market"},
+        ),
     ]
 
 
@@ -5389,6 +8734,53 @@ async def test_market_klines_rejects_incomplete_time_range(app):
 
     assert resp.status_code == 422
     assert resp.json()["detail"] == "start_time and end_time must be provided together"
+
+
+@pytest.mark.asyncio
+async def test_market_klines_rejects_scoped_latest_request(monkeypatch, app):
+    class UnexpectedOKXSpotAdapter:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("scoped latest klines must not fetch live data")
+
+    monkeypatch.setattr(market_api, "OKXSpotAdapter", UnexpectedOKXSpotAdapter, raising=False)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            "/api/market/klines?symbol=ETH-USDT&timeframe=1h"
+            "&source=market&runtime_mode=market"
+        )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "scoped market klines require start_time and end_time"
+
+
+@pytest.mark.asyncio
+async def test_market_klines_unscoped_cache_filters_unknown_rows(monkeypatch):
+    class FakeRepository:
+        def get_klines(self, symbol, timeframe, start, end, **kwargs):
+            assert kwargs == {"source": "market", "runtime_mode": "market"}
+            return [
+                KlineCache(
+                    symbol=symbol, timeframe=timeframe, timestamp=1,
+                    open=1.0, high=2.0, low=0.5, close=1.5, volume=1.0,
+                    source="unknown", runtime_mode="unknown",
+                ),
+                KlineCache(
+                    symbol=symbol, timeframe=timeframe, timestamp=2,
+                    open=2.0, high=3.0, low=1.5, close=2.5, volume=2.0,
+                    source="market", runtime_mode="market",
+                ),
+            ]
+
+    monkeypatch.setattr(market_api, "Repository", FakeRepository, raising=False)
+    transport = ASGITransport(app=create_app())
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            "/api/market/klines?symbol=BTC-USDT&timeframe=1h&start_time=1&end_time=2"
+        )
+
+    assert response.status_code == 200
+    assert [item["timestamp"] for item in response.json()] == [2]
 
 
 @pytest.mark.asyncio
@@ -5568,3 +8960,616 @@ async def test_get_market_data(monkeypatch, app):
     assert tickers_resp.status_code == 200
     tickers = tickers_resp.json()
     assert {"symbol": "BTC-USDT"}.items() <= tickers[0].items()
+
+
+def test_runtime_snapshot_exchange_scope_excludes_strategy_orders(monkeypatch):
+    orders = [
+        OrderRecord(
+            order_id="exchange-order",
+            strategy="__exchange__",
+            symbol="BTC-USDT",
+            side="buy",
+            type="market",
+            amount=1.0,
+            price=100.0,
+            status="open",
+            fill_price=0.0,
+            timestamp=2,
+            updated_at=2,
+            source="live_exchange", runtime_mode="live",
+        ),
+        OrderRecord(
+            order_id="alpha-order",
+            strategy="alpha",
+            symbol="BTC-USDT",
+            side="buy",
+            type="market",
+            amount=2.0,
+            price=100.0,
+            status="open",
+            fill_price=0.0,
+            timestamp=1,
+            updated_at=1,
+        ),
+    ]
+
+    class FakeRepository:
+        def get_open_positions(self, strategy):
+            return []
+
+        def get_orders(self):
+            return orders
+
+        def get_account(self, strategy):
+            return None
+
+        def get_strategy_configs(self):
+            return []
+
+    monkeypatch.setattr(web_app, "Repository", FakeRepository)
+    snapshot = web_app.runtime_snapshot(strategies.StrategyRuntimeState())
+
+    assert [order["strategy"] for order in snapshot["data"]["orders"]] == ["__exchange__"]
+    assert snapshot["scope"] == "exchange"
+    assert snapshot["strategy"] == "__exchange__"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scope", ["strategy", "exchange"])
+@pytest.mark.parametrize("endpoint", ["account", "positions", "orders", "trades"])
+async def test_trading_strict_scope_does_not_fallback_to_unfiltered_repository_rows(
+    monkeypatch, app, endpoint, scope
+):
+    live_account = AccountRecord(
+        strategy="__exchange__" if scope == "exchange" else "alpha",
+        initial_equity=100.0,
+        cash_balance=90.0,
+        equity=100.0,
+        realized_pnl=0.0,
+        unrealized_pnl=0.0,
+        daily_pnl=0.0,
+        fees_paid=0.0,
+        updated_at=1,
+        source="live_exchange",
+        runtime_mode="live",
+    )
+    live_position = PositionRecord(
+        strategy="__exchange__" if scope == "exchange" else "alpha",
+        symbol="BTC-USDT-SWAP",
+        side="long",
+        amount=1.0,
+        entry_price=100.0,
+        leverage=1,
+        timestamp=1,
+        source="live_exchange",
+        runtime_mode="live",
+    )
+    live_order = OrderRecord(
+        order_id="live-order",
+        strategy="__exchange__" if scope == "exchange" else "alpha",
+        symbol="BTC-USDT",
+        side="buy",
+        type="market",
+        amount=1.0,
+        price=100.0,
+        status="open",
+        fill_price=0.0,
+        timestamp=1,
+        updated_at=1,
+        source="live_exchange",
+        runtime_mode="live",
+    )
+    live_trade = TradeRecord(
+        exchange_trade_id="live-trade",
+        order_id="live-order",
+        strategy="__exchange__" if scope == "exchange" else "alpha",
+        symbol="BTC-USDT",
+        side="buy",
+        amount=1.0,
+        price=100.0,
+        fee=0.0,
+        timestamp=1,
+        source="live_exchange",
+        runtime_mode="live",
+    )
+
+    class FakeRepository:
+        def get_account(self, strategy=None):
+            return live_account
+
+        def get_open_positions(self, strategy=None):
+            return [live_position]
+
+        def get_orders(self):
+            return [live_order]
+
+        def get_trades(self, strategy=None):
+            return [live_trade]
+
+    monkeypatch.setattr(trading_api, "Repository", FakeRepository, raising=False)
+    transport = ASGITransport(app=app)
+    params = {"scope": scope, "runtime_mode": "live"}
+    if scope == "strategy":
+        params["strategy"] = "alpha"
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(f"/api/trading/{endpoint}", params=params)
+
+    assert response.status_code == 200
+    assert response.json() == [] if endpoint != "account" else response.json()["equity"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_trading_aggregate_fallback_filters_to_explicit_runtime_rows(
+    monkeypatch, app
+):
+    legacy_account = AccountRecord(
+        strategy="alpha",
+        initial_equity=1.0,
+        cash_balance=1.0,
+        equity=1.0,
+        realized_pnl=0.0,
+        unrealized_pnl=0.0,
+        daily_pnl=0.0,
+        fees_paid=0.0,
+        updated_at=1,
+    )
+    live_account = AccountRecord(
+        strategy="alpha",
+        initial_equity=100.0,
+        cash_balance=90.0,
+        equity=100.0,
+        realized_pnl=0.0,
+        unrealized_pnl=0.0,
+        daily_pnl=0.0,
+        fees_paid=0.0,
+        updated_at=2,
+        source="live_exchange",
+        runtime_mode="live",
+    )
+    legacy_position = PositionRecord(
+        strategy="alpha", symbol="LEGACY", side="long", amount=1.0,
+        entry_price=1.0, leverage=1, timestamp=1,
+    )
+    live_position = PositionRecord(
+        strategy="alpha", symbol="LIVE", side="long", amount=1.0,
+        entry_price=1.0, leverage=1, timestamp=2,
+        source="live_exchange", runtime_mode="live",
+    )
+    legacy_order = OrderRecord(
+        order_id="legacy-order", strategy="alpha", symbol="BTC-USDT", side="buy",
+        type="market", amount=1.0, price=1.0, status="open", fill_price=0.0,
+        timestamp=1, updated_at=1,
+    )
+    live_order = OrderRecord(
+        order_id="live-order", strategy="alpha", symbol="BTC-USDT", side="buy",
+        type="market", amount=1.0, price=1.0, status="open", fill_price=0.0,
+        timestamp=2, updated_at=2, source="live_exchange", runtime_mode="live",
+    )
+    legacy_trade = TradeRecord(
+        exchange_trade_id="legacy-trade", order_id="legacy-order", strategy="alpha",
+        symbol="BTC-USDT", side="buy", amount=1.0, price=1.0, fee=0.0, timestamp=1,
+    )
+    live_trade = TradeRecord(
+        exchange_trade_id="live-trade", order_id="live-order", strategy="alpha",
+        symbol="BTC-USDT", side="buy", amount=1.0, price=1.0, fee=0.0, timestamp=2,
+        source="live_exchange", runtime_mode="live",
+    )
+
+    class FakeRepository:
+        def get_accounts(self):
+            return [legacy_account, live_account]
+
+        def get_open_positions(self, strategy=None):
+            return [legacy_position, live_position]
+
+        def get_orders(self):
+            return [legacy_order, live_order]
+
+        def get_trades(self, strategy=None):
+            return [legacy_trade, live_trade]
+
+    monkeypatch.setattr(trading_api, "Repository", FakeRepository, raising=False)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        responses = await asyncio.gather(*(
+            client.get(f"/api/trading/{endpoint}?runtime_mode=live")
+            for endpoint in ("account", "positions", "orders", "trades")
+        ))
+
+    assert responses[0].json()["equity"] == 100.0
+    assert [row["symbol"] for row in responses[1].json()] == ["LIVE"]
+    assert [row["order_id"] for row in responses[2].json()] == ["live-order"]
+    assert [row["order_id"] for row in responses[3].json()] == ["live-order"]
+
+
+@pytest.mark.asyncio
+async def test_get_orders_supports_exchange_and_strategy_scopes(monkeypatch, app):
+    orders = [
+        OrderRecord(
+            order_id="exchange-order",
+            strategy="__exchange__",
+            symbol="BTC-USDT",
+            side="buy",
+            type="market",
+            amount=1.0,
+            price=100.0,
+            status="open",
+            fill_price=0.0,
+            timestamp=3,
+            updated_at=3,
+            source="live_exchange", runtime_mode="live",
+        ),
+        OrderRecord(
+            order_id="alpha-order",
+            strategy="alpha",
+            symbol="BTC-USDT",
+            side="buy",
+            type="market",
+            amount=2.0,
+            price=100.0,
+            status="open",
+            fill_price=0.0,
+            timestamp=2,
+            updated_at=2,
+            source="live_exchange", runtime_mode="live",
+        ),
+        OrderRecord(
+            order_id="beta-order",
+            strategy="beta",
+            symbol="ETH-USDT",
+            side="sell",
+            type="limit",
+            amount=3.0,
+            price=200.0,
+            status="open",
+            fill_price=0.0,
+            timestamp=1,
+            updated_at=1,
+            source="live_exchange", runtime_mode="live",
+        ),
+    ]
+
+    class FakeRepository:
+        def get_orders(self, **kwargs):
+            return orders
+
+    monkeypatch.setattr(trading_api, "Repository", FakeRepository, raising=False)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        exchange = await client.get(
+            "/api/trading/orders?scope=exchange&runtime_mode=live"
+        )
+        alpha = await client.get(
+            "/api/trading/orders?scope=strategy&strategy=alpha&runtime_mode=live"
+        )
+        default = await client.get("/api/trading/orders?runtime_mode=live")
+
+    assert [row["strategy"] for row in exchange.json()] == ["__exchange__"]
+    assert [row["strategy"] for row in alpha.json()] == ["alpha"]
+    assert [row["strategy"] for row in default.json()] == ["alpha", "beta"]
+
+
+@pytest.mark.asyncio
+async def test_get_orders_rejects_invalid_scope_combinations(monkeypatch, app):
+    monkeypatch.setattr(trading_api, "Repository", lambda: object(), raising=False)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        exchange_with_strategy = await client.get(
+            "/api/trading/orders?scope=exchange&strategy=alpha"
+        )
+        strategy_without_name = await client.get(
+            "/api/trading/orders?scope=strategy"
+        )
+
+    assert exchange_with_strategy.status_code == 422
+    assert strategy_without_name.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_trading_aggregate_defaults_to_configured_runtime_and_strategy_runtime_scope(
+    monkeypatch, app
+):
+    monkeypatch.setattr(
+        trading_api,
+        "load_runtime_settings",
+        lambda: SimpleNamespace(mode="live"),
+        raising=False,
+    )
+    rows = [
+        OrderRecord(
+            order_id="live-order", strategy="alpha", symbol="BTC-USDT", side="buy",
+            type="market", amount=1.0, price=100.0, status="pending", fill_price=0.0,
+            timestamp=2, updated_at=2, source="live_exchange", runtime_mode="live",
+        ),
+        OrderRecord(
+            order_id="paper-order", strategy="alpha", symbol="BTC-USDT", side="buy",
+            type="market", amount=1.0, price=100.0, status="pending", fill_price=0.0,
+            timestamp=1, updated_at=1, source="paper", runtime_mode="paper",
+        ),
+    ]
+    calls = []
+
+    class FakeRepository:
+        def get_orders(self, **kwargs):
+            calls.append(kwargs)
+            return [row for row in rows if (
+                kwargs.get("runtime_mode") is None
+                or row.runtime_mode == kwargs["runtime_mode"]
+            )]
+
+    monkeypatch.setattr(trading_api, "Repository", FakeRepository, raising=False)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        aggregate = await client.get("/api/trading/orders")
+        strategy = await client.get(
+            "/api/trading/orders?scope=strategy&strategy=alpha"
+        )
+
+    assert [row["order_id"] for row in aggregate.json()] == ["live-order"]
+    assert [row["order_id"] for row in strategy.json()] == ["live-order"]
+    assert calls == [{"source": "live_exchange", "runtime_mode": "live"}] * 2
+
+
+@pytest.mark.asyncio
+async def test_trading_aggregate_runtime_isolates_same_strategy_across_all_record_types(
+    monkeypatch, app
+):
+    monkeypatch.setattr(
+        trading_api,
+        "load_runtime_settings",
+        lambda: SimpleNamespace(mode="live"),
+        raising=False,
+    )
+    accounts = [
+        AccountRecord(
+            strategy="alpha", initial_equity=900.0, cash_balance=900.0,
+            equity=900.0, realized_pnl=0.0, unrealized_pnl=0.0,
+            daily_pnl=0.0, fees_paid=0.0, updated_at=1,
+            source="paper", runtime_mode="paper",
+        ),
+        AccountRecord(
+            strategy="alpha", initial_equity=100.0, cash_balance=100.0,
+            equity=100.0, realized_pnl=0.0, unrealized_pnl=0.0,
+            daily_pnl=0.0, fees_paid=0.0, updated_at=2,
+            source="live_exchange", runtime_mode="live",
+        ),
+    ]
+    positions = [
+        PositionRecord(
+            strategy="alpha", symbol="BTC-USDT", side="long", amount=9.0,
+            entry_price=90.0, leverage=1, timestamp=1,
+            source="paper", runtime_mode="paper",
+        ),
+        PositionRecord(
+            strategy="alpha", symbol="BTC-USDT", side="long", amount=1.0,
+            entry_price=100.0, leverage=1, timestamp=2,
+            source="live_exchange", runtime_mode="live",
+        ),
+    ]
+    orders = [
+        OrderRecord(
+            order_id="paper-order", strategy="alpha", symbol="BTC-USDT", side="buy",
+            type="market", amount=9.0, price=90.0, status="pending", fill_price=0.0,
+            timestamp=1, updated_at=1, source="paper", runtime_mode="paper",
+        ),
+        OrderRecord(
+            order_id="live-order", strategy="alpha", symbol="BTC-USDT", side="buy",
+            type="market", amount=1.0, price=100.0, status="pending", fill_price=0.0,
+            timestamp=2, updated_at=2, source="live_exchange", runtime_mode="live",
+        ),
+    ]
+    trades = [
+        TradeRecord(
+            exchange_trade_id="paper-trade", order_id="paper-order", strategy="alpha",
+            symbol="BTC-USDT", side="buy", amount=9.0, price=90.0, fee=0.0, timestamp=1,
+            source="paper", runtime_mode="paper",
+        ),
+        TradeRecord(
+            exchange_trade_id="live-trade", order_id="live-order", strategy="alpha",
+            symbol="BTC-USDT", side="buy", amount=1.0, price=100.0, fee=0.0, timestamp=2,
+            source="live_exchange", runtime_mode="live",
+        ),
+    ]
+
+    class FakeRepository:
+        def get_accounts(self, **kwargs):
+            return accounts
+
+        def get_open_positions(self, strategy=None, **kwargs):
+            return positions
+
+        def get_orders(self, **kwargs):
+            return orders
+
+        def get_trades(self, strategy=None, **kwargs):
+            return trades
+
+    monkeypatch.setattr(trading_api, "Repository", FakeRepository, raising=False)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        account = await client.get("/api/trading/account")
+        positions_response = await client.get("/api/trading/positions")
+        orders_response = await client.get("/api/trading/orders")
+        trades_response = await client.get("/api/trading/trades")
+
+    assert account.json()["equity"] == 100.0
+    assert [row["amount"] for row in positions_response.json()] == [1.0]
+    assert [row["order_id"] for row in orders_response.json()] == ["live-order"]
+    assert [row["order_id"] for row in trades_response.json()] == ["live-order"]
+
+
+@pytest.mark.asyncio
+async def test_get_trades_applies_exchange_and_strategy_scope_without_leaking_exchange_rows(
+    monkeypatch, app
+):
+    rows = [
+        TradeRecord(
+            exchange_trade_id="e1", order_id="exchange-order", strategy="__exchange__",
+            symbol="BTC-USDT", side="buy", amount=1.0, price=100.0, fee=0.1, timestamp=3,
+            source="live_exchange", runtime_mode="live",
+        ),
+        TradeRecord(
+            exchange_trade_id="a1", order_id="alpha-order", strategy="alpha",
+            symbol="BTC-USDT", side="buy", amount=1.0, price=100.0, fee=0.1, timestamp=2,
+            source="live_exchange", runtime_mode="live",
+        ),
+        TradeRecord(
+            exchange_trade_id="b1", order_id="beta-order", strategy="beta",
+            symbol="ETH-USDT", side="sell", amount=1.0, price=50.0, fee=0.1, timestamp=1,
+            source="live_exchange", runtime_mode="live",
+        ),
+    ]
+
+    class FakeRepository:
+        def get_trades(self, strategy=None, **kwargs):
+            return [row for row in rows if strategy is None or row.strategy == strategy]
+
+    monkeypatch.setattr(trading_api, "Repository", FakeRepository, raising=False)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        aggregate = await client.get("/api/trading/trades?runtime_mode=live")
+        exchange = await client.get(
+            "/api/trading/trades?scope=exchange&runtime_mode=live"
+        )
+        alpha = await client.get(
+            "/api/trading/trades?scope=strategy&strategy=alpha&runtime_mode=live"
+        )
+        invalid = await client.get("/api/trading/trades?scope=exchange&strategy=alpha")
+        missing = await client.get("/api/trading/trades?scope=strategy")
+
+    assert [row["strategy"] for row in aggregate.json()] == ["alpha", "beta"]
+    assert [row["strategy"] for row in exchange.json()] == ["__exchange__"]
+    assert [row["strategy"] for row in alpha.json()] == ["alpha"]
+    assert invalid.status_code == 422
+    assert missing.status_code == 422
+
+
+def test_live_strategy_ws_state_requires_real_strategy_owned_data():
+    assert strategies.has_real_strategy_owned_data([], None, []) is False
+    assert strategies.has_real_strategy_owned_data(
+        [], None, [SimpleNamespace(strategy="alpha")]
+    ) is True
+
+
+def test_strategy_ws_legacy_fallback_rejects_unknown_rows_and_account():
+    unknown_row = SimpleNamespace(strategy="alpha", source="unknown", runtime_mode="unknown")
+    unknown_account = SimpleNamespace(strategy="alpha", source="unknown", runtime_mode="unknown")
+
+    assert strategies.filter_strategy_ws_fallback_rows(
+        [unknown_row], strategy="alpha", source="live_exchange", runtime_mode="live"
+    ) == []
+    assert strategies.filter_strategy_ws_fallback_account(
+        unknown_account, strategy="alpha", source="live_exchange", runtime_mode="live"
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_live_strategy_start_rejects_without_explicit_position_ownership(monkeypatch, app):
+    monkeypatch.setattr(strategy_api, "current_order_router_mode", lambda: "live")
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/api/strategies/ma_cross/start")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "live_position_ownership_unavailable",
+        "message": "Live position ownership is unavailable",
+        "reason_code": "live_position_ownership_unavailable",
+    }
+
+
+def test_websocket_strategy_snapshot_contains_only_requested_strategy(monkeypatch):
+    class FakeRepository:
+        def get_strategy_configs(self):
+            return [
+                StrategyConfigRecord(
+                    name="alpha", strategy_type="ma_cross", symbol="BTC-USDT",
+                    timeframe="1h", params={}, enabled=True, created_at=1, updated_at=1,
+                ),
+                StrategyConfigRecord(
+                    name="beta", strategy_type="ma_cross", symbol="ETH-USDT",
+                    timeframe="1h", params={}, enabled=True, created_at=1, updated_at=1,
+                ),
+            ]
+
+    monkeypatch.setattr(web_app, "Repository", FakeRepository, raising=False)
+    with TestClient(create_app()) as client:
+        with client.websocket_connect("/ws?scope=strategy&strategy=alpha") as websocket:
+            snapshot = websocket.receive_json()
+
+    assert [item["name"] for item in snapshot["data"]["strategies"]] == ["alpha"]
+    assert [item["name"] for item in snapshot["data"]["strategy_configs"]] == ["alpha"]
+    assert set(snapshot["data"]["strategy_errors"]) <= {"alpha"}
+
+
+def test_websocket_unknown_strategy_is_rejected(monkeypatch):
+    class FakeRepository:
+        def get_strategy_configs(self):
+            return []
+
+    monkeypatch.setattr(web_app, "Repository", FakeRepository, raising=False)
+    with TestClient(create_app()) as client:
+        with pytest.raises(Exception):
+            with client.websocket_connect("/ws?scope=strategy&strategy=unknown"):
+                pass
+
+
+@pytest.mark.asyncio
+async def test_backtest_detail_reads_only_backtest_klines(monkeypatch):
+    requested = {}
+
+    class FakeRepository:
+        def get_backtest_result(self, result_id):
+            return BacktestResultRecord(
+                id=result_id, strategy="ma_cross", symbol="BTC-USDT", timeframe="1h",
+                start_time=1, end_time=2, initial_capital=100.0, created_at=3,
+            )
+
+        def get_klines(self, *args, **kwargs):
+            requested.update(kwargs)
+            return []
+
+        def get_backtest_trades(self, result_id):
+            return []
+
+    monkeypatch.setattr(backtest_api, "Repository", FakeRepository, raising=False)
+    transport = ASGITransport(app=create_app())
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/api/backtest/results/result")
+
+    assert response.status_code == 200
+    assert requested == {
+        "symbol": "BTC-USDT",
+        "timeframe": "1h",
+        "start": 1,
+        "end": 2,
+        "source": "backtest",
+        "runtime_mode": "backtest",
+    }
+
+
+@pytest.mark.asyncio
+async def test_market_kline_scope_rejects_backtest_and_legacy_repository(monkeypatch):
+    class FakeRepository:
+        def get_klines(self, symbol, timeframe, start, end):
+            return [KlineCache(
+                symbol=symbol, timeframe=timeframe, timestamp=start,
+                open=100.0, high=101.0, low=99.0, close=100.5, volume=1.0,
+            )]
+
+    monkeypatch.setattr(market_api, "Repository", FakeRepository, raising=False)
+    transport = ASGITransport(app=create_app())
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        market = await client.get(
+            "/api/market/klines?symbol=BTC-USDT&timeframe=1h&start_time=1&end_time=2"
+            "&source=market&runtime_mode=market"
+        )
+        backtest = await client.get(
+            "/api/market/klines?symbol=BTC-USDT&timeframe=1h&start_time=1&end_time=2"
+            "&source=backtest&runtime_mode=backtest"
+        )
+
+    assert market.status_code == 422
+    assert "scope" in market.json()["detail"]
+    assert backtest.status_code == 422

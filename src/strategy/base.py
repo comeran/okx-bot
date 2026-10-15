@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from typing import Any
 
 from src.core.types import Bar, Order, OrderSide, OrderType, Position
@@ -10,6 +11,19 @@ class BaseStrategy(ABC):
     def __init__(self) -> None:
         self._order_manager: Any = None
         self._capital_pct = 0.1
+        self._orders_enabled = True
+
+    def required_warmup_bars(self) -> int:
+        return 0
+
+    async def warmup(self, bars: Sequence[Bar]) -> None:
+        previous_orders_enabled = self._orders_enabled
+        self._orders_enabled = False
+        try:
+            for bar in bars:
+                await self.on_bar(bar)
+        finally:
+            self._orders_enabled = previous_orders_enabled
 
     def set_order_manager(self, manager: Any) -> None:
         self._order_manager = manager
@@ -62,10 +76,31 @@ class BaseStrategy(ABC):
             raise RuntimeError("Order manager not set")
         return await self._order_manager.cancel(order_id, symbol)
 
-    def get_position(self, symbol: str) -> Any:
+    def get_position(self, symbol: str, side: str | None = None) -> Any:
         if self._order_manager is None:
             return None
-        return self._order_manager.get_position(self.name, symbol)
+        if side is None:
+            return self._order_manager.get_position(self.name, symbol)
+        try:
+            return self._order_manager.get_position(self.name, symbol, side=side)
+        except TypeError:
+            return next(
+                (
+                    position
+                    for position in self.get_positions(symbol)
+                    if str(getattr(position, "side", "")).lower() == side.lower()
+                ),
+                None,
+            )
+
+    def get_positions(self, symbol: str) -> list[Any]:
+        if self._order_manager is None:
+            return []
+        get_positions = getattr(self._order_manager, "get_positions", None)
+        if callable(get_positions):
+            return list(get_positions(self.name, symbol))
+        position = self._order_manager.get_position(self.name, symbol)
+        return [] if position is None else [position]
 
     def get_balance(self) -> float:
         if self._order_manager is None:
@@ -81,6 +116,8 @@ class BaseStrategy(ABC):
         stop_loss: float | None = None,
         take_profit: float | None = None,
     ) -> Any:
+        if not self._orders_enabled:
+            return None
         if self._order_manager is None:
             raise RuntimeError("Order manager not set")
 

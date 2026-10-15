@@ -1,9 +1,23 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import en from './locales/en';
+import zhCN from './locales/zh-CN';
 import { createI18nInstance, getSavedLocale, setLocale } from './i18n';
+
+function collectKeyPaths(value: unknown, prefix = ''): string[] {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
+
+  return Object.entries(value as Record<string, unknown>).flatMap(([key, nextValue]) => {
+    const path = prefix ? `${prefix}.${key}` : key;
+    return typeof nextValue === 'object' && nextValue !== null && !Array.isArray(nextValue)
+      ? [path, ...collectKeyPaths(nextValue, path)]
+      : [path];
+  });
+}
 
 describe('i18n', () => {
   const storage = new Map<string, string>();
+  const requiredBranches = ['app', 'common', 'dashboard', 'strategies', 'market', 'backtest', 'trades', 'settings'] as const;
 
   beforeEach(() => {
     storage.clear();
@@ -11,6 +25,18 @@ describe('i18n', () => {
       getItem: (key: string) => storage.get(key) ?? null,
       setItem: (key: string, value: string) => storage.set(key, value),
     });
+  });
+
+  it('keeps locale key structure aligned between English and Simplified Chinese', () => {
+    const englishKeys = collectKeyPaths(en);
+    const chineseKeys = collectKeyPaths(zhCN);
+
+    for (const branch of requiredBranches) {
+      expect(englishKeys.some((key) => key === branch || key.startsWith(`${branch}.`))).toBe(true);
+      expect(chineseKeys.some((key) => key === branch || key.startsWith(`${branch}.`))).toBe(true);
+    }
+
+    expect(chineseKeys).toEqual(englishKeys);
   });
 
   it('defaults to English and switches to Simplified Chinese with persistence', () => {

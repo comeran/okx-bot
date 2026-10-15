@@ -171,14 +171,14 @@ onBeforeUnmount(() => {
 }
 
 .code-editor__label {
-  margin-bottom: 6px;
+  margin-bottom: var(--ui-space-6);
   font-weight: 600;
 }
 
 .code-editor__description {
   margin: 0 0 8px;
-  color: #606266;
-  font-size: 13px;
+  color: var(--ui-color-text-secondary);
+  font-size: var(--ui-font-size-13);
 }
 
 .code-editor__surface {
@@ -186,13 +186,13 @@ onBeforeUnmount(() => {
   min-width: 0;
   max-width: 100%;
   overflow: hidden;
-  border: 1px solid #303133;
-  border-radius: 4px;
+  border: var(--ui-border-width-thin) solid var(--ui-color-text);
+  border-radius: var(--ui-radius-4);
 }
 
-@media (max-width: 600px) {
+@media (max-width: 767px) {
   .code-editor__surface {
-    min-height: 280px;
+    min-height: 360px;
   }
 }
 </style>

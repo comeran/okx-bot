@@ -59,6 +59,38 @@ describe('useWebSocket', () => {
     expect(MockWebSocket.instances[1].url).toBe('ws://localhost:3000/ws');
   });
 
+  it('preserves strategy scope query parameters in the websocket URL', () => {
+    installBrowserGlobals();
+
+    const websocket = useWebSocket('/ws?scope=strategy&strategy=alpha');
+    websocket.connect();
+
+    expect(MockWebSocket.instances[0].url).toBe(
+      'ws://localhost:3000/ws?scope=strategy&strategy=alpha',
+    );
+  });
+
+  it('ignores an old socket close after a new connection is established', () => {
+    vi.useFakeTimers();
+    installBrowserGlobals();
+
+    const websocket = useWebSocket('/ws', { reconnectDelayMs: 100 });
+    websocket.connect();
+    const oldSocket = MockWebSocket.instances[0];
+
+    websocket.disconnect();
+    websocket.connect();
+    const currentSocket = MockWebSocket.instances[1];
+    currentSocket.onopen?.();
+
+    oldSocket.onclose?.();
+
+    expect(websocket.connected.value).toBe(true);
+    expect(MockWebSocket.instances).toHaveLength(2);
+    vi.advanceTimersByTime(100);
+    expect(MockWebSocket.instances).toHaveLength(2);
+  });
+
   it('does not reconnect after manual disconnect', () => {
     vi.useFakeTimers();
     installBrowserGlobals();

@@ -7,6 +7,8 @@ export interface Kline {
   low: number;
   close: number;
   volume: number;
+  source?: string;
+  runtime_mode?: string;
 }
 
 export interface RawKline {
@@ -20,6 +22,8 @@ export interface RawKline {
   close?: number | string;
   volume?: number | string;
   vol?: number | string;
+  source?: string;
+  runtime_mode?: string;
 }
 
 export interface RawMarketTicker {
@@ -45,4 +49,6 @@ export interface KlineQuery {
   start_time?: number;
   end_time?: number;
   market_type?: string;
+  source?: string;
+  runtime_mode?: string;
 }
