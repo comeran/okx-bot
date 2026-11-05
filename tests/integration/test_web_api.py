@@ -2571,7 +2571,7 @@ async def test_persisted_builtin_strategy_configs_share_start_stop_lifecycle(
         },
     ]
     assert not any(message["type"] == "strategy_error" for message in environment.messages)
-    assert environment.notifier_factory_calls == [True]
+    assert environment.notifier_factory_calls == []
 
 
 @pytest.mark.asyncio
@@ -4165,6 +4165,35 @@ def test_create_risk_manager_live_enforces_loss_and_drawdown(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_create_order_manager_forwards_the_repository_kill_switch(monkeypatch):
+    monkeypatch.setattr(strategy_api, "load_runtime_settings", lambda: AppConfig(mode="paper"))
+    repository = SqliteRepository()
+    repository.set_kill_switch(True, "test", 1)
+    risk_events = []
+
+    async def on_risk_event(payload):
+        risk_events.append(payload)
+
+    manager = strategy_api.create_order_manager(
+        repository=repository,
+        on_risk_event=on_risk_event,
+        kill_switch_checker=lambda: repository.get_kill_switch().engaged,
+        order_router_mode="paper",
+    )
+
+    order = await manager.submit(
+        symbol="BTC-USDT",
+        side=OrderSide.BUY,
+        order_type=OrderType.MARKET,
+        amount=1.0,
+        strategy_name="ma_cross",
+    )
+
+    assert order.status == OrderStatus.REJECTED
+    assert risk_events[0]["reason_code"] == "kill_switch_engaged"
+
+
+@pytest.mark.asyncio
 async def test_strategy_config_api_rejects_unsupported_strategy_type(monkeypatch):
     class FakeRepository:
         def get_strategy_configs(self):
@@ -4346,7 +4375,11 @@ async def test_start_persisted_strategy_config_broadcasts_startup_error(monkeypa
         strategies_resp = await client.get("/api/strategies")
 
     assert start_resp.status_code == 400
-    assert {"name": "bad_ma_cross", "status": "stopped"} in strategies_resp.json()
+    assert {
+        "name": "bad_ma_cross",
+        "status": "stopped",
+        "error": "fast_window must be less than or equal to slow_window",
+    } in strategies_resp.json()
     assert messages == [
         {
             "type": "strategy_status",
@@ -4658,7 +4691,7 @@ async def test_runtime_risk_rejection_broadcasts_risk_event_before_trading_updat
         "type": "orders",
         "scope": "strategy",
         "strategy": "oversized_buyer_btc",
-        "orders": [order.model_dump() for order in FakeRepository.orders],
+        "orders": [trading_api.serialize_order_record(order) for order in FakeRepository.orders],
     }
     assert messages[2] == {
         "type": "positions",
@@ -5052,7 +5085,11 @@ async def test_start_persisted_strategy_stays_stopped_when_initial_bar_fails(mon
 
     assert start_resp.status_code == 400
     assert start_resp.json()["detail"] == "boom"
-    assert {"name": "broken_on_start_btc", "status": "stopped"} in strategies_resp.json()
+    assert {
+        "name": "broken_on_start_btc",
+        "status": "stopped",
+        "error": "boom",
+    } in strategies_resp.json()
     assert messages == [
         {
             "type": "strategy_status",
@@ -5171,7 +5208,11 @@ async def test_persisted_strategy_loop_broadcasts_error_and_stops_strategy(monke
     assert start_resp.status_code == 200
     assert market_data.subscription is None
     assert market_data.callbacks == []
-    assert {"name": "broken_btc", "status": "stopped"} in strategies_resp.json()
+    assert {
+        "name": "broken_btc",
+        "status": "stopped",
+        "error": "boom",
+    } in strategies_resp.json()
     assert messages[-2:] == [
         {
             "type": "strategy_status",
@@ -5962,7 +6003,7 @@ async def test_start_strategy_wires_repository_backed_order_manager(monkeypatch)
         "type": "orders",
         "scope": "strategy",
         "strategy": "buyer",
-        "orders": [order.model_dump() for order in FakeRepository.orders],
+        "orders": [trading_api.serialize_order_record(order) for order in FakeRepository.orders],
     }
 
     strategy_positions = next(
@@ -6455,6 +6496,26 @@ async def test_run_backtest_fetches_missing_historical_bars_before_running(monke
     assert trade.fee == pytest.approx(0.055055)
     assert trade.pnl == 0.0
     assert trade.timestamp == 1700006400000
+
+
+@pytest.mark.asyncio
+async def test_run_backtest_rejects_range_above_bar_limit(app):
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/api/backtest/run",
+            json={
+                "strategy": "ma_cross",
+                "symbol": "BTC-USDT",
+                "timeframe": "1m",
+                "start_time": 0,
+                "end_time": 13_000_000_000,
+                "initial_capital": 100000,
+            },
+        )
+
+    assert resp.status_code == 422
+    assert "backtest range exceeds" in resp.json()["detail"]
 
 
 @pytest.mark.asyncio
@@ -7504,6 +7565,25 @@ async def test_settings_persist_across_app_instances(tmp_path, monkeypatch):
         "telegram_chat_id": "654321",
     }
     assert saved["web"] == {"host": "127.0.0.1", "port": 9000}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"mode": "turbo"},
+        {"exchange": {"market_type": "futures2"}},
+        {"backtest": {"initial_capital": 0}},
+        {"risk": {"max_daily_loss_pct": -0.1}},
+        {"web": {"host": "127.0.0.1", "port": 70000}},
+    ],
+)
+async def test_settings_update_rejects_invalid_values(app, payload):
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.put("/api/settings", json=payload)
+
+    assert response.status_code == 422
 
 
 @pytest.mark.asyncio
@@ -8800,6 +8880,69 @@ async def test_market_klines_with_time_range_returns_cached_rows(monkeypatch, ap
 
 
 @pytest.mark.asyncio
+async def test_market_klines_with_time_range_fetches_and_caches_exchange_rows(monkeypatch, app):
+    saved = []
+
+    class FakeRepository:
+        def __init__(self) -> None:
+            pass
+
+        def get_klines(self, symbol: str, timeframe: str, start: int, end: int, **kwargs):
+            return []
+
+        def save_kline(self, kline):
+            saved.append(kline)
+            return kline
+
+    class FakeAdapter:
+        def __init__(self, api_key: str, secret: str, passphrase: str) -> None:
+            self.calls = []
+
+        async def fetch_ohlcv(self, symbol, timeframe, limit=100, since=None):
+            self.calls.append((symbol, timeframe, limit, since))
+            return [
+                SimpleNamespace(
+                    timestamp=1700000000000,
+                    open=1.1,
+                    high=1.3,
+                    low=1.0,
+                    close=1.2,
+                    volume=10.5,
+                )
+            ]
+
+        async def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(market_api, "Repository", FakeRepository, raising=False)
+    monkeypatch.setattr(market_api, "OKXSpotAdapter", FakeAdapter, raising=False)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get(
+            "/api/market/klines"
+            "?symbol=ETH-USDT&timeframe=1h&start_time=1700000000000&end_time=1700003600000"
+        )
+
+    assert resp.status_code == 200
+    assert resp.json() == [
+        {
+            "symbol": "ETH-USDT",
+            "timeframe": "1h",
+            "timestamp": 1700000000000,
+            "open": 1.1,
+            "high": 1.3,
+            "low": 1.0,
+            "close": 1.2,
+            "volume": 10.5,
+        }
+    ]
+    assert len(saved) == 1
+    assert saved[0].source == "market"
+    assert saved[0].runtime_mode == "market"
+
+
+@pytest.mark.asyncio
 async def test_market_klines_rejects_incomplete_time_range(app):
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -9471,6 +9614,26 @@ async def test_trading_aggregate_runtime_isolates_same_strategy_across_all_recor
     assert [row["amount"] for row in positions_response.json()] == [1.0]
     assert [row["order_id"] for row in orders_response.json()] == ["live-order"]
     assert [row["order_id"] for row in trades_response.json()] == ["live-order"]
+
+
+def test_serialize_trade_record_includes_derivative_notional():
+    record = TradeRecord(
+        exchange_trade_id="e-notional",
+        order_id="order-notional",
+        strategy="alpha",
+        symbol="BTC-USDT-SWAP",
+        side="buy",
+        amount=0.5,
+        price=100.0,
+        fee=0.1,
+        timestamp=1,
+        quantity=0.5,
+        quantity_unit="base",
+    )
+
+    payload = trading_api.serialize_trade_record(record)
+
+    assert payload["notional_value"] == 50.0
 
 
 @pytest.mark.asyncio

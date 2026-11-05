@@ -18,10 +18,13 @@ from src.core.config import BacktestConfig
 from src.core.runtime_settings import load_runtime_settings
 from src.data.models import BacktestResultRecord, BacktestTradeRecord
 from src.data.repository import Repository
+from src.exchange.okx_client import OKX_RUNTIME_TIMEFRAME_MILLISECONDS
 from src.exchange.okx_spot import OKXSpotAdapter
 from src.web.api.strategies import create_strategy_registry
 
 router = APIRouter()
+
+MAX_BACKTEST_BARS = 200_000
 
 
 class BacktestRequest(BaseModel):
@@ -39,6 +42,14 @@ async def run_backtest(req: BacktestRequest) -> dict[str, float | int]:
         raise HTTPException(status_code=422, detail="end_time must be after start_time")
     if req.initial_capital <= 0:
         raise HTTPException(status_code=422, detail="initial_capital must be greater than 0")
+    timeframe_ms = OKX_RUNTIME_TIMEFRAME_MILLISECONDS.get(req.timeframe)
+    if timeframe_ms:
+        requested_bars = (req.end_time - req.start_time) // timeframe_ms + 1
+        if requested_bars > MAX_BACKTEST_BARS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"backtest range exceeds {MAX_BACKTEST_BARS} bars",
+            )
 
     registry = create_strategy_registry()
     repository = Repository()

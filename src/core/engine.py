@@ -264,6 +264,11 @@ class BotEngine:
             await self._finish_strategy_activation(initialized)
             if self._stop_cleanup_task is not None:
                 await self._await_stop_cleanup(self._stop_cleanup_task)
+                if unregister_health_listener is not None:
+                    try:
+                        unregister_health_listener()
+                    except BaseException as exc:
+                        self._record_cleanup_error(exc)
                 return
             await self._commit_strategy_activation(initialized)
         except BaseException:

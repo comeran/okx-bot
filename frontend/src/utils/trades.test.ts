@@ -69,6 +69,29 @@ describe('trades utils', () => {
     expect(filterTrades(trades, { ...createTradeFilters(), strategy: 'missing' })).toEqual([]);
   });
 
+  it('does not let dropdown filters match superstring values', () => {
+    const superset: TradeRecord[] = [
+      ...trades,
+      {
+        id: 4,
+        strategy: 'ma_cross_v2',
+        symbol: 'BTC-USDT-SWAPPER',
+        side: 'sell',
+        amount: 1,
+        price: 100,
+        fee: 0.1,
+        timestamp: 1700010800000,
+      },
+    ];
+
+    expect(
+      filterTrades(superset, { ...createTradeFilters(), strategy: 'ma_cross' }).map((trade) => trade.id),
+    ).toEqual([1]);
+    expect(
+      filterTrades(superset, { ...createTradeFilters(), symbol: 'BTC-USDT' }).map((trade) => trade.id),
+    ).toEqual([1]);
+  });
+
   it('summarizes total notional and fees while marking PnL counts unavailable', () => {
     expect(summarizeTrades(trades)).toEqual({
       totalTrades: 3,
@@ -77,6 +100,24 @@ describe('trades utils', () => {
       positivePnlCount: null,
       negativePnlCount: null,
     });
+  });
+
+  it('uses the server-provided notional for derivative trades', () => {
+    const summary = summarizeTrades([
+      {
+        id: 5,
+        strategy: 'swap_strategy',
+        symbol: 'BTC-USDT-SWAP',
+        side: 'buy',
+        amount: 10,
+        price: 50000,
+        fee: 0.1,
+        timestamp: 1700020000000,
+        notional_value: 1000,
+      },
+    ]);
+
+    expect(summary.totalNotional).toBe(1000);
   });
 
   it('keeps nullable financial values as missing instead of fabricating zeros', () => {

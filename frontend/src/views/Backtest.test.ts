@@ -228,7 +228,7 @@ describe('Backtest view', () => {
     ]);
   });
 
-  it('disables colliding saved configs and explains the backtest resolution rule', async () => {
+  it('disables the shadowed built-in when a saved config has the same name', async () => {
     services.listStrategyConfigs.mockResolvedValueOnce([
       {
         name: 'ma_cross',
@@ -265,18 +265,24 @@ describe('Backtest view', () => {
     const form = wrapper.find((node) => node.type === 'backtest-form-stub');
     expect(form.props['data-strategy-options']).toBe(5);
     expect(form.props['data-strategy-conflict-message']).toContain('ma_cross');
-    expect(form.props['data-strategy-conflict-message']).toContain('backtest API resolves plain names to built-ins first');
-    expect(form.props.strategyOptions).toContainEqual(strategyOption('ma_cross', 'ma_cross · Built-in strategy · Stopped', undefined, 'ma_cross', 'builtin:ma_cross'));
+    expect(form.props['data-strategy-conflict-message']).toContain('Saved configs take precedence');
     expect(form.props.strategyOptions).toContainEqual(strategyOption(
-      'config:ma_cross',
-      'ma_cross · Saved config · Stopped · Disabled',
+      'builtin:ma_cross',
+      'ma_cross · Built-in strategy · Stopped · Disabled',
       true,
+      'ma_cross',
+      'builtin:ma_cross',
+    ));
+    expect(form.props.strategyOptions).toContainEqual(strategyOption(
+      'ma_cross',
+      'ma_cross · Saved config · Stopped',
+      false,
       'ma_cross',
       'config:ma_cross',
     ));
     const savedConfigOption = (form.props.strategyOptions as ReturnType<typeof strategyOption>[])
       .find((option) => option.label.includes('Saved config'));
-    expect(savedConfigOption?.disabled).toBe(true);
+    expect(savedConfigOption?.disabled).toBe(false);
   });
 
   it('treats the strategy catalog as unavailable until retry restores it', async () => {
@@ -367,11 +373,11 @@ describe('Backtest view', () => {
     const recoveredForm = wrapper.find((node) => node.type === 'backtest-form-stub');
     expect(recoveredForm.props['data-strategy-catalog-unavailable']).toBe(false);
     expect(recoveredForm.props['data-strategy-options']).toBe(6);
-    expect(recoveredForm.props['data-strategy-conflict-message']).toContain('backtest API resolves plain names to built-ins first');
+    expect(recoveredForm.props['data-strategy-conflict-message']).toContain('Saved configs take precedence');
     expect(recoveredForm.props.strategyOptions).toContainEqual(strategyOption(
-      'ma_cross',
-      'ma_cross · Built-in strategy · Stopped',
-      undefined,
+      'builtin:ma_cross',
+      'ma_cross · Built-in strategy · Stopped · Disabled',
+      true,
       'ma_cross',
       'builtin:ma_cross',
     ));
@@ -383,9 +389,9 @@ describe('Backtest view', () => {
       'config:saved_bollinger',
     ));
     expect(recoveredForm.props.strategyOptions).toContainEqual(strategyOption(
-      'config:ma_cross',
-      'ma_cross · Saved config · Stopped · Disabled',
-      true,
+      'ma_cross',
+      'ma_cross · Saved config · Stopped',
+      false,
       'ma_cross',
       'config:ma_cross',
     ));
@@ -489,27 +495,26 @@ describe('Backtest view', () => {
     expect(recoveredForm.props['data-strategies-loading']).toBe(false);
     expect(recoveredForm.props['data-strategy-catalog-unavailable']).toBe(false);
     expect(recoveredForm.props['data-strategy-options']).toBe(5);
-    expect(recoveredForm.props['data-strategy-conflict-message']).toContain('backtest API resolves plain names to built-ins first');
-    expect(recoveredForm.props.strategyOptions).toContainEqual(strategyOption('ma_cross', 'ma_cross · Built-in strategy · Stopped', undefined, 'ma_cross', 'builtin:ma_cross'));
+    expect(recoveredForm.props['data-strategy-conflict-message']).toContain('Saved configs take precedence');
+    expect(recoveredForm.props.strategyOptions).toContainEqual(strategyOption('builtin:ma_cross', 'ma_cross · Built-in strategy · Stopped · Disabled', true, 'ma_cross', 'builtin:ma_cross'));
     expect(recoveredForm.props.strategyOptions).toContainEqual(strategyOption(
-      'config:ma_cross',
-      'ma_cross · Saved config · Stopped · Disabled',
-      true,
+      'ma_cross',
+      'ma_cross · Saved config · Stopped',
+      false,
       'ma_cross',
       'config:ma_cross',
     ));
 
-    (recoveredForm.props.form as { strategy: string }).strategy = 'config:ma_cross';
+    (recoveredForm.props.form as { strategy: string }).strategy = 'ma_cross';
     await wrapper.flush();
     await wrapper.invoke(wrapper.find((node) => node.type === 'backtest-form-stub'), 'onRun');
 
-    expect(services.runBacktest).not.toHaveBeenCalled();
-    expect(services.messageError).toHaveBeenCalledWith(
-      'Saved configs with names that match built-in strategies are disabled because the backtest API resolves plain names to built-ins first: ma_cross.',
+    expect(services.runBacktest).toHaveBeenLastCalledWith(
+      expect.objectContaining({ strategy: 'ma_cross' }),
     );
   });
 
-  it('blocks running a colliding saved config even when the option is forced', async () => {
+  it('runs a colliding saved config when it is selected', async () => {
     const collidingConfig = {
       name: 'ma_cross',
       strategy_type: 'bollinger_mean_reversion',
@@ -544,15 +549,14 @@ describe('Backtest view', () => {
     await wrapper.flush();
 
     const form = wrapper.find((node) => node.type === 'backtest-form-stub');
-    (form.props.form as { strategy: string }).strategy = 'config:ma_cross';
+    (form.props.form as { strategy: string }).strategy = 'ma_cross';
     await wrapper.flush();
 
     const refreshedForm = wrapper.find((node) => node.type === 'backtest-form-stub');
     await wrapper.invoke(refreshedForm, 'onRun');
 
-    expect(services.runBacktest).not.toHaveBeenCalled();
-    expect(services.messageError).toHaveBeenCalledWith(
-      'Saved configs with names that match built-in strategies are disabled because the backtest API resolves plain names to built-ins first: ma_cross.',
+    expect(services.runBacktest).toHaveBeenCalledWith(
+      expect.objectContaining({ strategy: 'ma_cross' }),
     );
   });
 

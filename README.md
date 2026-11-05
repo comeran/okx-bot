@@ -45,6 +45,8 @@ TG_CHAT_ID=
 
 Backtests can run with public OKX historical market data; private trading/account features require valid OKX credentials.
 
+Set `OKX_BOT_DB_PATH` to override the default SQLite path (`data/bot.db`); the test suite uses this to keep tests off the real database.
+
 ## Run locally
 
 Start the backend API on port 8080:

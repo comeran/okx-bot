@@ -83,6 +83,16 @@ const dashboardStatusAlerts = computed<DashboardAlert[]>(() => {
     });
   }
 
+  if (strategies.error) {
+    const hasVisibleStrategies = strategies.runtimeSummaries.length > 0;
+    alerts.push({
+      key: 'strategies-error',
+      title: hasVisibleStrategies ? t('common.stale') : t('dashboard.strategyLoadError'),
+      description: hasVisibleStrategies ? strategies.error : undefined,
+      type: hasVisibleStrategies ? 'warning' : 'error',
+    });
+  }
+
   return alerts;
 });
 
@@ -101,6 +111,10 @@ function refreshAll() {
 }
 
 function retryAccountOverview() {
+  if (dashboard.error) {
+    void dashboard.loadInitialData();
+    return;
+  }
   void dashboard.refreshAccountOverview();
 }
 
@@ -187,7 +201,7 @@ onMounted(() => {
       <el-col :xs="24" :sm="12" :lg="4">
         <MetricCard
           :label="t('dashboard.activeStrategies')"
-          :value="String(strategies.activeStrategyCount)"
+          :value="strategies.error && strategies.runtimeSummaries.length === 0 ? '—' : String(strategies.activeStrategyCount)"
           tone="primary"
           :loading="strategies.loadingInitial && strategies.runtimeSummaries.length === 0"
         />

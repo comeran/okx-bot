@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 
+from src.data.models import KlineCache
 from src.data.repository import Repository
 from src.exchange.okx_futures import OKXFuturesAdapter
 from src.exchange.okx_options import OKXOptionsAdapter
 from src.exchange.okx_spot import OKXSpotAdapter
 from src.exchange.okx_swap import OKXSwapAdapter
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -64,6 +68,32 @@ def _serialize_kline(
         payload["source"] = source
         payload["runtime_mode"] = runtime_mode
     return payload
+
+
+async def _fetch_market_range(
+    adapter,
+    symbol: str,
+    timeframe: str,
+    start_time: int,
+    end_time: int,
+) -> list[Any]:
+    bars: dict[int, Any] = {}
+    cursor = start_time
+    for _ in range(50):
+        rows = await adapter.fetch_ohlcv(symbol, timeframe, limit=300, since=cursor)
+        if not rows:
+            break
+        for bar in rows:
+            if start_time <= bar.timestamp <= end_time:
+                bars[bar.timestamp] = bar
+        newest = max(bar.timestamp for bar in rows)
+        if newest >= end_time:
+            break
+        next_cursor = newest + 1
+        if next_cursor <= cursor:
+            break
+        cursor = next_cursor
+    return sorted(bars.values(), key=lambda bar: bar.timestamp)
 
 
 @router.get("/klines")
@@ -133,15 +163,51 @@ async def get_klines(
             if getattr(kline, "source", "unknown") == requested_source
             and getattr(kline, "runtime_mode", "unknown") == requested_runtime_mode
         ]
+        fetched: list[Any] = []
+        try:
+            adapter = create_public_market_adapter(resolved_market_type)
+            try:
+                fetched = await _fetch_market_range(
+                    adapter,
+                    symbol,
+                    timeframe,
+                    start_time,
+                    end_time,
+                )
+            finally:
+                await adapter.close()
+        except Exception:
+            logger.warning(
+                "Failed to fetch market kline range; returning cached rows",
+                exc_info=True,
+            )
+        for bar in fetched:
+            repository.save_kline(
+                KlineCache(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    timestamp=bar.timestamp,
+                    open=bar.open,
+                    high=bar.high,
+                    low=bar.low,
+                    close=bar.close,
+                    volume=bar.volume,
+                    source=requested_source,
+                    runtime_mode=requested_runtime_mode,
+                )
+            )
+        merged = {kline.timestamp: kline for kline in klines}
+        for bar in fetched:
+            merged[bar.timestamp] = bar
         return [
             _serialize_kline(
-                kline.symbol,
-                kline.timeframe,
-                kline,
+                symbol,
+                timeframe,
+                item,
                 source=source,
                 runtime_mode=runtime_mode,
             )
-            for kline in klines
+            for item in sorted(merged.values(), key=lambda item: item.timestamp)
         ]
 
     adapter = create_public_market_adapter(resolved_market_type)

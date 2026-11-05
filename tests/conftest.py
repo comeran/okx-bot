@@ -9,6 +9,11 @@ def isolate_settings_path(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def isolate_repository_database(tmp_path, monkeypatch):
+    monkeypatch.setenv("OKX_BOT_DB_PATH", str(tmp_path / "bot.db"))
+
+
+@pytest.fixture(autouse=True)
 def deny_network_requests(monkeypatch):
     attempts = []
 

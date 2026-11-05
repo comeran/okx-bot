@@ -2,6 +2,7 @@ import hashlib
 import json
 import logging
 import math
+import os
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -925,8 +926,9 @@ def _upsert_trade_in_session(session: Session, trade: TradeRecord) -> TradeRecor
 class Repository:
     _MIGRATED_SQLITE_DATABASES: set[str] = set()
 
-    def __init__(self, engine: Engine | None = None, db_path: str = "data/bot.db"):
+    def __init__(self, engine: Engine | None = None, db_path: str | None = None):
         if engine is None:
+            db_path = db_path or os.environ.get("OKX_BOT_DB_PATH", "data/bot.db")
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
             engine = create_engine(f"sqlite:///{db_path}", echo=False)
             self._enable_wal(engine)
@@ -1976,10 +1978,49 @@ class Repository:
             )
             return None
         with Session(self.engine) as session:
-            session.add(kline)
+            existing = self._find_active_kline(session, kline)
+            if existing is None:
+                session.add(kline)
+                try:
+                    session.commit()
+                except IntegrityError:
+                    session.rollback()
+                    existing = self._find_active_kline(session, kline)
+                    if existing is None:
+                        raise
+                    self._apply_kline_values(existing, kline)
+                    session.add(existing)
+                    session.commit()
+                else:
+                    session.refresh(kline)
+                    return kline
+            self._apply_kline_values(existing, kline)
+            session.add(existing)
             session.commit()
-            session.refresh(kline)
-            return kline
+            session.refresh(existing)
+            return existing
+
+    @staticmethod
+    def _find_active_kline(session: Session, kline: KlineCache) -> KlineCache | None:
+        return session.exec(
+            select(KlineCache)
+            .where(KlineCache.symbol == kline.symbol)
+            .where(KlineCache.timeframe == kline.timeframe)
+            .where(KlineCache.source == kline.source)
+            .where(KlineCache.runtime_mode == kline.runtime_mode)
+            .where(KlineCache.timestamp == kline.timestamp)
+            .where(or_(KlineCache.active.is_(True), KlineCache.active.is_(None)))
+            .order_by(KlineCache.id.desc())
+        ).first()
+
+    @staticmethod
+    def _apply_kline_values(target: KlineCache, source: KlineCache) -> None:
+        target.open = source.open
+        target.high = source.high
+        target.low = source.low
+        target.close = source.close
+        target.volume = source.volume
+        target.active = True
 
     def get_klines(
         self,
@@ -2223,6 +2264,52 @@ class Repository:
                         name,
                         exc_info=True,
                     )
+
+            lookup_indexes = (
+                (
+                    "ix_positionrecord_scope_lookup",
+                    "positionrecord",
+                    "strategy, symbol, side, active",
+                ),
+                (
+                    "ix_traderecord_strategy_order",
+                    "traderecord",
+                    "strategy, order_id",
+                ),
+                (
+                    "ix_klinecache_scope_timestamp",
+                    "klinecache",
+                    "symbol, timeframe, source, runtime_mode, timestamp",
+                ),
+            )
+            for name, table, columns in lookup_indexes:
+                columns_present = {
+                    row[1] for row in connection.execute(text(f"PRAGMA table_info({table})"))
+                }
+                required = {column.strip() for column in columns.split(",")}
+                if not required <= columns_present:
+                    continue
+                connection.execute(
+                    text(f'CREATE INDEX IF NOT EXISTS "{name}" ON {table} ({columns})')
+                )
+
+            kline_columns = {
+                row[1] for row in connection.execute(text("PRAGMA table_info(klinecache)"))
+            }
+            if {"symbol", "timeframe", "source", "runtime_mode", "timestamp", "active"} <= (
+                kline_columns
+            ):
+                connection.execute(text(
+                    "UPDATE klinecache SET active = 0 WHERE active = 1 AND id NOT IN ("
+                    "SELECT MAX(id) FROM klinecache WHERE active = 1 "
+                    "GROUP BY symbol, timeframe, COALESCE(source, 'unknown'), "
+                    "COALESCE(runtime_mode, 'unknown'), timestamp)"
+                ))
+                connection.execute(text(
+                    'CREATE UNIQUE INDEX IF NOT EXISTS "uq_klinecache_active_identity" '
+                    "ON klinecache (symbol, timeframe, COALESCE(source, 'unknown'), "
+                    "COALESCE(runtime_mode, 'unknown'), timestamp) WHERE active = 1"
+                ))
 
     @staticmethod
     def _migrate_sqlite_schema(engine: Engine) -> None:

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 from src.core.config import (
     AppConfig,
@@ -13,28 +15,36 @@ from src.core.config import (
 )
 from src.core.runtime_settings import load_runtime_settings, save_runtime_settings
 
+MarketType = Literal["spot", "swap", "future", "futures", "option", "options"]
+RuntimeMode = Literal["backtest", "paper", "demo", "live"]
+
 
 class ExchangeSettingsUpdate(BaseModel):
     api_key: str = ""
     secret: str = ""
     passphrase: str = ""
-    market_type: str = "spot"
+    market_type: MarketType = "spot"
     demo: bool = True
+
+    @field_validator("market_type", mode="before")
+    @classmethod
+    def normalize_market_type(cls, value: object) -> object:
+        return value.strip().lower() if isinstance(value, str) else value
 
 
 class BacktestSettings(BaseModel):
-    initial_capital: float = 100000
-    fee_rate: float = 0.0005
-    slippage: float = 0.001
+    initial_capital: float = Field(default=100000, gt=0, allow_inf_nan=False)
+    fee_rate: float = Field(default=0.0005, ge=0, lt=1, allow_inf_nan=False)
+    slippage: float = Field(default=0.001, ge=0, lt=1, allow_inf_nan=False)
     data_cache_dir: str = "./data"
 
 
 class RiskSettings(BaseModel):
-    max_daily_loss_pct: float = 0.05
-    max_drawdown_pct: float = 0.15
-    max_total_position_pct: float = 0.8
+    max_daily_loss_pct: float = Field(default=0.05, ge=0, le=1, allow_inf_nan=False)
+    max_drawdown_pct: float = Field(default=0.15, ge=0, le=1, allow_inf_nan=False)
+    max_total_position_pct: float = Field(default=0.8, ge=0, le=1, allow_inf_nan=False)
     allow_live_open_orders: bool = False
-    live_max_order_notional: float = 0.0
+    live_max_order_notional: float = Field(default=0.0, ge=0, allow_inf_nan=False)
 
 
 class NotifySettingsUpdate(BaseModel):
@@ -44,16 +54,21 @@ class NotifySettingsUpdate(BaseModel):
 
 class WebSettings(BaseModel):
     host: str = "127.0.0.1"
-    port: int = 8080
+    port: int = Field(default=8080, ge=1, le=65535)
 
 
 class SettingsUpdate(BaseModel):
-    mode: str = "backtest"
+    mode: RuntimeMode = "backtest"
     exchange: ExchangeSettingsUpdate = ExchangeSettingsUpdate()
     backtest: BacktestSettings = BacktestSettings()
     risk: RiskSettings = RiskSettings()
     notify: NotifySettingsUpdate = NotifySettingsUpdate()
     web: WebSettings = WebSettings()
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def normalize_mode(cls, value: object) -> object:
+        return value.strip().lower() if isinstance(value, str) else value
 
 
 class SecretSetting(BaseModel):

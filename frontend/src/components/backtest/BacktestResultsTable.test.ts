@@ -98,6 +98,13 @@ describe('BacktestResultsTable', () => {
     await wrapper.invoke(table, 'onRowClick', results[0], {}, {});
     expect(onSelectResult).toHaveBeenCalledWith('result-a');
 
+    const viewButton = wrapper
+      .findAll((node) => node.type === 'el-button')
+      .find((node) => String(node.props['aria-label'] ?? '').startsWith('查看:'));
+    expect(viewButton).toBeDefined();
+    await wrapper.invoke(viewButton!, 'onClick', { stopPropagation: () => undefined });
+    expect(onSelectResult).toHaveBeenLastCalledWith('result-a');
+
     const refreshButton = wrapper.find((node) => node.type === 'el-button');
     await wrapper.invoke(refreshButton, 'onClick', {});
     expect(onRefresh).toHaveBeenCalledTimes(1);
