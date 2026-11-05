@@ -4,7 +4,7 @@ import threading
 
 import pytest
 
-from src.core.engine import BotEngine
+from src.core.engine import BotEngine, EngineStartStopped
 from src.core.types import Bar
 
 
@@ -2213,6 +2213,25 @@ async def test_stop_during_slow_start_does_not_leave_running_subscription():
     assert ("BTC-USDT", "1m") not in market_data.subscriptions
     assert market_data.start_count == 1
     assert market_data.stop_count == 1
+
+
+async def test_start_raises_when_a_stop_completes_before_commit(monkeypatch):
+    market_data = FakeMarketDataService()
+    engine = BotEngine([RecordingStrategy("ma_cross")], market_data_service=market_data)
+    original_finish = engine._finish_strategy_activation
+
+    async def finish_then_mark_stopped(initialized):
+        result = await original_finish(initialized)
+        cleanup = asyncio.get_running_loop().create_future()
+        cleanup.set_result(None)
+        engine._stop_cleanup_task = cleanup
+        engine.running = False
+        return result
+
+    monkeypatch.setattr(engine, "_finish_strategy_activation", finish_then_mark_stopped)
+
+    with pytest.raises(EngineStartStopped):
+        await engine.start()
 
 
 async def test_concurrent_engine_starts_create_one_market_data_runtime():

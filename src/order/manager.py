@@ -104,6 +104,8 @@ def _position_has_explicit_ownership(repository: Any, position: Any, strategy: s
 
 
 class UnifiedOrderManager:
+    _live_state_max_age_ms = 60_000
+
     def __init__(
         self,
         router: OrderRouter,
@@ -919,6 +921,15 @@ class UnifiedOrderManager:
                     account = None
             positions = self.get_positions(state_owner, state_symbol)
 
+        if self.router.mode == "live" and self.live_state_refresher is not None:
+            stale_reason = self._stale_live_state_reason(account, positions)
+            if stale_reason is not None:
+                return RiskGateResult(
+                    False,
+                    stale_reason,
+                    effective_price=order.price,
+                )
+
         order_price = order.price
         if order_price is None and self.price_provider is not None:
             order_price = self.price_provider(order.symbol)
@@ -1182,6 +1193,29 @@ class UnifiedOrderManager:
             )
 
         return RiskGateResult(True, order_value=order_value, effective_price=order_price)
+
+    def _stale_live_state_reason(
+        self,
+        account: Any,
+        positions: list[Any],
+    ) -> str | None:
+        if account is None:
+            return None
+        now = self.timestamp_ms()
+        account_timestamp = int(getattr(account, "updated_at", 0) or 0)
+        if (
+            account_timestamp <= 0
+            or now - account_timestamp > self._live_state_max_age_ms
+        ):
+            return "Live account state is stale"
+        for position in positions:
+            timestamp = max(
+                int(getattr(position, "updated_at", 0) or 0),
+                int(getattr(position, "timestamp", 0) or 0),
+            )
+            if timestamp <= 0 or now - timestamp > self._live_state_max_age_ms:
+                return "Live position state is stale"
+        return None
 
     def _other_position_notional(self, strategy_name: str, symbol: str) -> float:
         if self.repository is None or not hasattr(self.repository, "get_open_positions"):

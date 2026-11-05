@@ -2100,6 +2100,7 @@ async def test_live_submit_keeps_accepted_order_when_post_submit_refresh_fails()
     manager = UnifiedOrderManager(
         router=OrderRouter(backtest=None, live=AcceptedFilledHandler(), mode="live"),
         repository=repository,
+        timestamp_ms=lambda: 1700000000000,
         risk_manager=RiskManager(max_position_pct=0.8, max_daily_loss_pct=0.05),
         live_safeguards=True,
         live_state_refresher=refresh_state,
@@ -4164,3 +4165,122 @@ def test_live_other_position_notional_ignores_paper_rows():
     )
 
     assert manager._other_position_notional("__exchange__", "BTC-USDT") == 200.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("account_age_ms", "position_age_ms", "expected_reason"),
+    [
+        (61_000, 0, "Live account state is stale"),
+        (0, 61_000, "Live position state is stale"),
+    ],
+)
+async def test_live_order_rejects_stale_account_or_position_state(
+    account_age_ms,
+    position_age_ms,
+    expected_reason,
+):
+    now = 1_700_000_000_000
+    repository = FakeRepository()
+    repository.accounts["__exchange__"] = AccountRecord(
+        strategy="__exchange__",
+        initial_equity=100000.0,
+        cash_balance=100000.0,
+        equity=100000.0,
+        realized_pnl=0.0,
+        unrealized_pnl=0.0,
+        daily_pnl=0.0,
+        fees_paid=0.0,
+        updated_at=now - account_age_ms,
+        source="live_exchange",
+        runtime_mode="live",
+    )
+    repository.positions[("__exchange__", "BTC-USDT-SWAP")] = PositionRecord(
+        strategy="__exchange__",
+        symbol="BTC-USDT-SWAP",
+        side="long",
+        amount=1.0,
+        entry_price=100.0,
+        leverage=1,
+        timestamp=now - position_age_ms,
+        source="live_exchange",
+        runtime_mode="live",
+    )
+    handler = MockHandler()
+    risk_events = []
+
+    async def on_risk_event(payload):
+        risk_events.append(payload)
+
+    async def refresher(strategy: str, symbol: str) -> None:
+        return None
+
+    manager = UnifiedOrderManager(
+        router=OrderRouter(backtest=None, live=handler, mode="live"),
+        repository=repository,
+        timestamp_ms=lambda: now,
+        risk_manager=RiskManager(max_position_pct=2.0),
+        price_provider=lambda symbol: 50000.0,
+        live_safeguards=True,
+        live_market_type="swap",
+        live_state_refresher=refresher,
+        allow_live_open_orders=True,
+        on_risk_event=on_risk_event,
+    )
+
+    order = await manager.submit(
+        "BTC-USDT-SWAP",
+        OrderSide.BUY,
+        OrderType.MARKET,
+        0.1,
+        strategy_name="__exchange__",
+    )
+
+    assert order.status == OrderStatus.REJECTED
+    assert handler.submitted == []
+    assert risk_events[0]["reason"] == expected_reason
+
+
+@pytest.mark.asyncio
+async def test_live_submit_rejects_when_submission_lease_is_unavailable():
+    class LeaseDenyingRepository(FakeRepository):
+        def __init__(self):
+            super().__init__()
+            self.acquire_calls = []
+
+        def acquire_live_submission_lease(self, owner, timeout=1.0, lease_seconds=10.0):
+            self.acquire_calls.append((owner, timeout, lease_seconds))
+            return False
+
+    class ShouldNotSubmitHandler(OrderHandler):
+        async def submit(self, order: Order) -> Order:
+            raise AssertionError("orders must not reach the router without the live lease")
+
+        async def cancel(self, order_id: str, symbol: str | None = None) -> bool:
+            return True
+
+    repository = LeaseDenyingRepository()
+    handler = ShouldNotSubmitHandler()
+    risk_events = []
+
+    async def on_risk_event(payload):
+        risk_events.append(payload)
+
+    manager = UnifiedOrderManager(
+        router=OrderRouter(backtest=None, live=handler, mode="live"),
+        repository=repository,
+        timestamp_ms=lambda: 1700000000000,
+        on_risk_event=on_risk_event,
+    )
+
+    order = await manager.submit(
+        "BTC-USDT-SWAP",
+        OrderSide.BUY,
+        OrderType.MARKET,
+        0.1,
+        strategy_name="ma_cross",
+    )
+
+    assert order.status == OrderStatus.REJECTED
+    assert len(repository.acquire_calls) == 1
+    assert risk_events[0]["reason"] == "Live submission lock unavailable"

@@ -52,6 +52,10 @@ class _CallbackCoroutine(Coroutine[Any, Any, None]):
             self._coroutine.close()
 
 
+class EngineStartStopped(RuntimeError):
+    """Raised when a stop interleaves with strategy activation."""
+
+
 class _LegacyMarketDataLease:
     def __init__(self, service: Any, task: asyncio.Future, stop_on_stop: bool) -> None:
         self.service = service
@@ -270,7 +274,7 @@ class BotEngine:
                         unregister_health_listener()
                     except BaseException as exc:
                         self._record_cleanup_error(exc)
-                return
+                raise EngineStartStopped("engine start was stopped during activation")
             await self._commit_strategy_activation(initialized)
         except BaseException:
             if unregister_health_listener is not None:

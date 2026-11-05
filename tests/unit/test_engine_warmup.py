@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from src.core.engine import BotEngine
+from src.core.engine import BotEngine, EngineStartStopped
 from src.core.types import Bar
 from src.market.health import MarketFeedHealth
 from src.market.service import MarketDataService
@@ -1848,7 +1848,8 @@ async def test_historical_warmup_can_await_engine_stop_without_deadlock():
     try:
         done, _ = await asyncio.wait({start_task}, timeout=0.1)
         assert done == {start_task}, "reentrant stop deadlocked startup cleanup"
-        await start_task
+        with pytest.raises(EngineStartStopped):
+            await start_task
 
         assert strategy.stop_returned.is_set()
         assert engine.running is False
