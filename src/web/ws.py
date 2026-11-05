@@ -66,7 +66,7 @@ class WebSocketManager:
 
     async def broadcast(self, data: dict[str, object]) -> None:
         disconnected = []
-        for conn, connection in self._connections.items():
+        for conn, connection in list(self._connections.items()):
             if not self._matches(connection, data):
                 continue
             try:

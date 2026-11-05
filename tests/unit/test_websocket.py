@@ -103,6 +103,31 @@ async def test_strategy_scoped_risk_event_is_filtered_by_strategy_even_without_s
 
 
 @pytest.mark.asyncio
+async def test_broadcast_tolerates_connections_changing_mid_iteration():
+    manager = WebSocketManager()
+    first = FakeWebSocket()
+    second = FakeWebSocket()
+    late = FakeWebSocket()
+    await manager.connect(first, scope="exchange")
+    await manager.connect(second, scope="exchange")
+
+    original_send = first.send_json
+
+    async def mutating_send(payload):
+        manager.disconnect(second)
+        await manager.connect(late, scope="exchange")
+        await original_send(payload)
+
+    first.send_json = mutating_send
+
+    event = {"type": "snapshot", "scope": "exchange"}
+    await manager.broadcast(event)
+
+    assert first.sent == [event]
+    assert late.sent == []
+
+
+@pytest.mark.asyncio
 async def test_exchange_risk_event_without_scope_reaches_only_exchange_connection():
     manager = WebSocketManager()
     strategy = FakeWebSocket()

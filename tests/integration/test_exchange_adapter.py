@@ -1,6 +1,7 @@
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+from ccxt.base.errors import OrderNotFound
 
 from src.core.types import (
     AccountSnapshot,
@@ -492,6 +493,26 @@ async def test_cancel_requires_symbol_for_okx():
         await adapter.cancel("exchange-order-1")
 
     exchange.cancel_order.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cancel_falls_back_to_algo_endpoint_for_trigger_orders():
+    with patch("src.exchange.base.create_okx_client") as ccxt:
+        exchange = AsyncMock()
+        exchange.set_sandbox_mode = Mock()
+        exchange.cancel_order.side_effect = [
+            OrderNotFound("regular order endpoint does not know this id"),
+            {"id": "algo-1", "status": "canceled"},
+        ]
+        ccxt.return_value = exchange
+        adapter = OKXSpotAdapter("api-key", "secret", "passphrase")
+
+        result = await adapter.cancel("algo-1", symbol="BTC-USDT")
+
+    assert result == {"id": "algo-1", "status": "canceled"}
+    assert exchange.cancel_order.await_args_list[-1].kwargs == {
+        "params": {"trigger": True}
+    }
 
 
 @pytest.mark.asyncio

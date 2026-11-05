@@ -50,7 +50,7 @@ Backtests can run with public OKX historical market data; private trading/accoun
 Start the backend API on port 8080:
 
 ```bash
-uv run uvicorn src.web.app:app --host 0.0.0.0 --port 8080 --reload
+uv run uvicorn src.web.app:app --host 127.0.0.1 --port 8080 --reload
 ```
 
 Start the frontend dashboard on port 3000:
@@ -60,6 +60,8 @@ npm --prefix frontend run dev
 ```
 
 The Vite dev server proxies `/api` and `/ws` to the backend at `127.0.0.1:8080`.
+
+Set `OKX_BOT_API_TOKEN` before starting the backend to require an `Authorization: Bearer <token>` (or `X-API-Token`) header on `/api` and a `token` query parameter on `/ws`. Without it, the API relies on the localhost bind and the local-origin CORS/WebSocket checks; do not expose the port beyond the local machine.
 
 ## Verification
 

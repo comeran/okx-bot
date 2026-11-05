@@ -6,6 +6,8 @@ from dataclasses import asdict, dataclass
 from src.core.types import (
     AccountSnapshot,
     PositionSnapshot,
+    PositionSnapshotResult,
+    daily_pnl_state,
     has_trusted_account_snapshot_provenance,
 )
 from src.data.models import EXCHANGE_STRATEGY, AccountRecord, PositionRecord
@@ -70,6 +72,33 @@ def _canonical_symbol_for_adapter(adapter, symbol: object) -> str:
     return canonical_symbol(symbol, market_type=market_type)
 
 
+class UntrustedLiveStateError(RuntimeError):
+    """The provider did not supply a timestamped live snapshot usable for risk."""
+
+
+def _daily_pnl_state(
+    existing: AccountRecord | None,
+    equity: float,
+    timestamp_ms: int,
+) -> tuple[float, int, float]:
+    if existing is None:
+        return equity, timestamp_ms, 0.0
+    return daily_pnl_state(
+        existing.day_start_equity or 0.0,
+        existing.day_start_at or 0,
+        equity,
+        timestamp_ms,
+        previous_equity=existing.equity,
+        previous_daily_pnl=existing.daily_pnl,
+        previous_updated_at=existing.updated_at,
+    )
+
+
+def _peak_equity(existing: AccountRecord | None, equity: float) -> float:
+    previous = existing.peak_equity if existing is not None else 0.0
+    return max(previous, equity)
+
+
 def _normalize_symbols(adapter, symbols: list[str] | None) -> list[str] | None:
     if symbols is None:
         return None
@@ -85,13 +114,6 @@ def _normalize_symbols(adapter, symbols: list[str] | None) -> list[str] | None:
             normalized.append(value)
             seen.add(value)
     return normalized
-
-
-@dataclass(frozen=True)
-class PositionSnapshotResult:
-    positions: list[PositionSnapshot]
-    complete_snapshot: bool = False
-    snapshot_timestamp: int = 0
 
 
 @dataclass(frozen=True)
@@ -206,18 +228,19 @@ class LiveStateSyncService:
             if existing is not None and not _has_live_provenance(existing):
                 existing = None
         if not has_trusted_account_snapshot_provenance(snapshot):
-            logger.warning(
-                "Skipping account update for %s without trusted timestamp; "
-                "account state cannot be used as current live risk state",
-                strategy,
+            raise UntrustedLiveStateError(
+                f"account snapshot for {strategy} has no trusted provider timestamp"
             )
-            return existing
         if existing is None:
             logger.info(
                 "No strict live account exists for %s; creating a new live row while "
                 "retaining non-live rows for audit",
                 strategy,
             )
+        snapshot_timestamp = max(snapshot.updated_at, snapshot.timestamp)
+        day_start_equity, day_start_at, daily_pnl = _daily_pnl_state(
+            existing, snapshot.equity, snapshot_timestamp
+        )
         account = AccountRecord(
             strategy=strategy,
             source="live_exchange",
@@ -232,9 +255,12 @@ class LiveStateSyncService:
             equity=snapshot.equity,
             realized_pnl=snapshot.realized_pnl,
             unrealized_pnl=snapshot.unrealized_pnl,
-            daily_pnl=existing.daily_pnl if existing is not None else 0.0,
+            daily_pnl=daily_pnl,
             fees_paid=existing.fees_paid if existing is not None else 0.0,
-            updated_at=snapshot.updated_at or snapshot.timestamp,
+            day_start_equity=day_start_equity,
+            day_start_at=day_start_at,
+            peak_equity=_peak_equity(existing, snapshot.equity),
+            updated_at=snapshot_timestamp,
             assets=[asdict(asset) for asset in snapshot.assets],
         )
         return repository.upsert_account(account)

@@ -323,6 +323,19 @@ describe('Settings view', () => {
     expect(wrapper.text()).not.toContain('common.stale');
   });
 
+  it('does not save defaults after the initial settings load fails', async () => {
+    mocks.getSettings.mockRejectedValueOnce(new Error('unavailable'));
+    const wrapper = await mount(Settings, { components });
+    await wrapper.flush();
+
+    const save = control(wrapper, 'el-button', 1);
+    expect(save.props.disabled).toBe(true);
+
+    await wrapper.trigger(save, 'click');
+
+    expect(mocks.updateSettings).not.toHaveBeenCalled();
+  });
+
   it('ignores stale reload responses while a newer settings load is pending', async () => {
     const initialLoad = deferred<AppSettingsView>();
     const reloadLoad = deferred<AppSettingsView>();

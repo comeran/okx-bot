@@ -83,6 +83,44 @@ def test_kill_switch_reason_code_is_specific():
 
 
 @pytest.mark.asyncio
+async def test_kill_switch_engaged_during_state_refresh_rejects_order():
+    class FakeRouter:
+        mode = "demo"
+
+        def __init__(self):
+            self.submitted = []
+
+        async def submit(self, order):
+            self.submitted.append(order)
+            return order
+
+    state = {"engaged": False}
+    router = FakeRouter()
+
+    async def refresher(strategy, symbol):
+        state["engaged"] = True
+
+    manager = UnifiedOrderManager(
+        router=router,
+        timestamp_ms=lambda: 1700000000000,
+        kill_switch_checker=lambda: state["engaged"],
+        live_safeguards=True,
+        live_state_refresher=refresher,
+    )
+
+    order = await manager.submit(
+        symbol="BTC/USDT",
+        side=OrderSide.BUY,
+        order_type=OrderType.MARKET,
+        amount=1.0,
+        strategy_name="ma_cross",
+    )
+
+    assert order.status == OrderStatus.REJECTED
+    assert router.submitted == []
+
+
+@pytest.mark.asyncio
 async def test_strategy_submit_rejects_unsafe_limit_order_values():
     class TestStrategy(BaseStrategy):
         name = "test_strategy"

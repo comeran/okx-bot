@@ -38,9 +38,9 @@ class OrderMatcher:
 
         if order.type == OrderType.STOP:
             if order.side == OrderSide.SELL and bar.low <= order.price:
-                return order.price
+                return bar.open if bar.open <= order.price else order.price
             if order.side == OrderSide.BUY and bar.high >= order.price:
-                return order.price
+                return bar.open if bar.open >= order.price else order.price
 
         return None
 

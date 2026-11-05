@@ -40,3 +40,37 @@ def test_report_empty_trades() -> None:
     assert report.total_return == 0
     assert report.total_trades == 0
     assert report.win_rate == 0
+
+
+def test_report_uses_round_trip_pnls_when_available() -> None:
+    report = generate_report(
+        initial_capital=10000,
+        trades=[{"pnl": -100}, {"pnl": 110}],
+        equity_curve=[10000, 10010],
+        round_trip_pnls=[10],
+    )
+
+    assert report.total_trades == 1
+    assert report.win_rate == 1
+    assert report.profit_factor == 0
+
+
+def test_sharpe_annualizes_with_supplied_bar_frequency() -> None:
+    equity_curve = [10000, 10100, 10050, 10250, 10220]
+
+    default = generate_report(initial_capital=10000, trades=[], equity_curve=equity_curve)
+    daily = generate_report(
+        initial_capital=10000,
+        trades=[],
+        equity_curve=equity_curve,
+        bars_per_year=252,
+    )
+    hourly = generate_report(
+        initial_capital=10000,
+        trades=[],
+        equity_curve=equity_curve,
+        bars_per_year=252 * 24,
+    )
+
+    assert default.sharpe_ratio == pytest.approx(daily.sharpe_ratio)
+    assert hourly.sharpe_ratio / daily.sharpe_ratio == pytest.approx(24**0.5)

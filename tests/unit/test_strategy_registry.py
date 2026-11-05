@@ -611,3 +611,16 @@ def test_normalize_config_rejects_all_system_prefixed_strategy_names() -> None:
         )
 
     assert issue_codes(error.value) == {"reserved_name"}
+
+
+def test_normalize_config_rejects_path_separators_in_strategy_name() -> None:
+    with pytest.raises(StrategyConfigValidationError) as error:
+        make_registry().normalize_config(
+            name="btc/ma",
+            strategy_type="ma_cross",
+            symbol="BTC-USDT",
+            timeframe="1h",
+            params={},
+        )
+
+    assert issue_codes(error.value) == {"invalid_name"}

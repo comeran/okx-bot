@@ -81,6 +81,8 @@ class _ServiceTaskLease:
 class MarketDataService:
     _poll_interval_seconds = 1
     _max_retry_delay_seconds = 8
+    _history_page_limit = 300
+    _max_backfill_pages = 4
 
     def __init__(
         self,
@@ -101,7 +103,9 @@ class MarketDataService:
         self._exchange_closed = False
         self._subscriptions: dict[str, list[BarCallback]] = {}
         self._buffers: dict[str, deque[Bar]] = {}
+        self._current_bars: dict[str, Bar] = {}
         self._last_bar_timestamps: dict[str, int] = {}
+        self._required_bars: dict[str, int] = {}
         self._subscriber_last_bar_timestamps: dict[str, dict[int, int]] = {}
         self._health: dict[str, MarketFeedHealth] = {}
         self._health_conditions: dict[str, asyncio.Condition] = {}
@@ -190,6 +194,124 @@ class MarketDataService:
 
     def _buffered_bars(self, key: str) -> int:
         return len(self._ensure_feed_state(key))
+
+    def _append_bar_once(self, key: str, bar: Bar) -> None:
+        state = self._ensure_feed_state(key)
+        if state and bar.timestamp <= state[-1].timestamp:
+            return
+        state.append(bar)
+
+    def _parse_ohlcv_rows(self, rows: object, key: str) -> list[Bar]:
+        try:
+            materialized = list(rows)  # type: ignore[arg-type]
+        except TypeError:
+            raise
+        parsed_bars: list[Bar] = []
+        for row in materialized:
+            if not isinstance(row, (list, tuple)) or len(row) < 6:
+                logger.warning("Skipping invalid OHLCV row for %s: %r", key, row)
+                raise MalformedProviderData(f"Malformed OHLCV batch for {key}")
+            bar = safe_ohlcv_bar(row)
+            if bar is None:
+                logger.warning("Skipping invalid OHLCV row for %s: %r", key, row)
+                raise MalformedProviderData(f"Malformed OHLCV batch for {key}")
+            parsed_bars.append(bar)
+        return parsed_bars
+
+    async def _call_fetch_ohlcv(
+        self,
+        fetch_ohlcv: Callable[..., Awaitable[object]],
+        symbol: str,
+        timeframe: str,
+        *,
+        since: int | None = None,
+    ) -> object:
+        if since is None:
+            try:
+                return await fetch_ohlcv(
+                    symbol, timeframe, limit=self._history_page_limit
+                )
+            except TypeError:
+                return await fetch_ohlcv(symbol, timeframe)
+        try:
+            return await fetch_ohlcv(
+                symbol,
+                timeframe,
+                since=since,
+                limit=self._history_page_limit,
+            )
+        except TypeError:
+            return await fetch_ohlcv(symbol, timeframe)
+
+    async def _backfill_bars(
+        self,
+        fetch_ohlcv: Callable[..., Awaitable[object]] | None,
+        symbol: str,
+        timeframe: str,
+        key: str,
+        recent_bars: list[Bar],
+    ) -> list[Bar]:
+        if fetch_ohlcv is None:
+            return recent_bars
+        interval = self._timeframe_milliseconds(timeframe)
+        merged = {bar.timestamp: bar for bar in recent_bars}
+        if not merged:
+            return recent_bars
+
+        last_delivered = self._last_bar_timestamps.get(key, 0)
+        if last_delivered:
+            cursor = last_delivered + interval
+            for _ in range(self._max_backfill_pages):
+                earliest = min(merged)
+                if cursor >= earliest:
+                    break
+                try:
+                    rows = await self._call_fetch_ohlcv(
+                        fetch_ohlcv, symbol, timeframe, since=cursor
+                    )
+                    page = [
+                        bar
+                        for bar in self._parse_ohlcv_rows(rows, key)
+                        if last_delivered < bar.timestamp < earliest
+                    ]
+                except (MalformedProviderData, TypeError, ValueError):
+                    logger.warning("Skipping malformed backfill page for %s", key)
+                    break
+                if not page:
+                    break
+                for bar in page:
+                    merged[bar.timestamp] = bar
+                newest = max(bar.timestamp for bar in page)
+                if newest + interval <= cursor:
+                    break
+                cursor = newest + interval
+
+        required = self._required_bars.get(key, 0)
+        if required:
+            needed_start = int(self._current_time() * 1000) - required * interval
+            for _ in range(self._max_backfill_pages):
+                earliest = min(merged)
+                if earliest <= needed_start:
+                    break
+                since = max(0, earliest - self._history_page_limit * interval)
+                try:
+                    rows = await self._call_fetch_ohlcv(
+                        fetch_ohlcv, symbol, timeframe, since=since
+                    )
+                    page = [
+                        bar
+                        for bar in self._parse_ohlcv_rows(rows, key)
+                        if bar.timestamp < earliest
+                    ]
+                except (MalformedProviderData, TypeError, ValueError):
+                    logger.warning("Skipping malformed warmup backfill page for %s", key)
+                    break
+                if not page:
+                    break
+                for bar in page:
+                    merged[bar.timestamp] = bar
+
+        return sorted(merged.values(), key=lambda bar: bar.timestamp)
 
     def _last_bar_timestamp(self, key: str, fallback: int | None = None) -> int | None:
         return self._last_bar_timestamps.get(key, fallback)
@@ -389,6 +511,14 @@ class MarketDataService:
         key = self._health_key(symbol, timeframe)
         return list(self._ensure_feed_state(key))[-count:]
 
+    def latest_price(self, symbol: str, timeframe: str) -> float | None:
+        key = self._health_key(symbol, timeframe)
+        current = self._current_bars.get(key)
+        if current is not None:
+            return current.close
+        bars = self.get_recent_bars(symbol, timeframe, count=1)
+        return bars[-1].close if bars else None
+
     def get_feed_health(self, symbol: str, timeframe: str) -> MarketFeedHealth:
         return self._ensure_health(symbol, timeframe)
 
@@ -421,6 +551,15 @@ class MarketDataService:
         key = self._health_key(symbol, timeframe)
         condition = self._ensure_health_condition(key)
         deadline = loop.time() + timeout
+        max_retained = self._ensure_feed_state(key).maxlen or 0
+        if min_bars > max_retained:
+            logger.warning(
+                "Requested warmup of %s bars exceeds the %s-bar feed buffer for %s",
+                min_bars,
+                max_retained,
+                key,
+            )
+        self._required_bars[key] = max(self._required_bars.get(key, 0), min_bars)
 
         async with condition:
             while True:
@@ -462,9 +601,9 @@ class MarketDataService:
                 except NotSupported:
                     if not callable(fetch_ohlcv):
                         raise RuntimeError("Exchange does not support OHLCV data") from None
-                    rows = await fetch_ohlcv(symbol, timeframe)
+                    rows = await self._call_fetch_ohlcv(fetch_ohlcv, symbol, timeframe)
             elif callable(fetch_ohlcv):
-                rows = await fetch_ohlcv(symbol, timeframe)
+                rows = await self._call_fetch_ohlcv(fetch_ohlcv, symbol, timeframe)
             else:
                 raise RuntimeError("Exchange does not support OHLCV data")
         except asyncio.CancelledError:
@@ -475,27 +614,24 @@ class MarketDataService:
 
         callback_errors: list[Exception] = []
         try:
-            try:
-                rows = list(rows)
-            except TypeError:
-                raise
-            parsed_bars: list[Bar] = []
-            for row in rows:
-                if not isinstance(row, (list, tuple)) or len(row) < 6:
-                    logger.warning("Skipping invalid OHLCV row for %s: %r", key, row)
-                    raise MalformedProviderData(f"Malformed OHLCV batch for {key}")
-                bar = safe_ohlcv_bar(row)
-                if bar is None:
-                    logger.warning("Skipping invalid OHLCV row for %s: %r", key, row)
-                    raise MalformedProviderData(f"Malformed OHLCV batch for {key}")
-                parsed_bars.append(bar)
-
+            parsed_bars = self._parse_ohlcv_rows(rows, key)
+            parsed_bars = await self._backfill_bars(
+                fetch_ohlcv if callable(fetch_ohlcv) else None,
+                symbol,
+                timeframe,
+                key,
+                parsed_bars,
+            )
             parsed_bars.sort(key=lambda bar: bar.timestamp)
             for bar in parsed_bars:
                 if bar.timestamp <= self._last_bar_timestamps.get(key, 0):
                     continue
                 if not self._is_closed_bar(bar.timestamp, timeframe):
                     continue
+                # Expose the in-flight bar to price providers before callbacks;
+                # delivery watermarks and the shared buffer only advance after
+                # subscribers accept the bar.
+                self._current_bars[key] = bar
                 bar_callback_errors: list[Exception] = []
                 callbacks = list(self._subscriptions.get(key, []))
                 subscriber_state = self._subscriber_last_bar_timestamps.setdefault(key, {})
@@ -523,7 +659,7 @@ class MarketDataService:
                     for callback in active_callbacks
                 ):
                     self._last_bar_timestamps[key] = bar.timestamp
-                    self._ensure_feed_state(key).append(bar)
+                    self._append_bar_once(key, bar)
         except asyncio.CancelledError:
             raise
         except Exception:

@@ -43,7 +43,7 @@ class NotifySettingsUpdate(BaseModel):
 
 
 class WebSettings(BaseModel):
-    host: str = "0.0.0.0"
+    host: str = "127.0.0.1"
     port: int = 8080
 
 
@@ -80,11 +80,11 @@ def _serialize_settings(settings: SettingsUpdate) -> dict[str, object]:
     return {
         "mode": settings.mode,
         "exchange": {
-            "api_key": _mask_secret(settings.exchange.api_key),
+            "api_key": "",
             "api_key_set": bool(settings.exchange.api_key),
-            "secret": _mask_secret(settings.exchange.secret),
+            "secret": "",
             "secret_set": bool(settings.exchange.secret),
-            "passphrase": _mask_secret(settings.exchange.passphrase),
+            "passphrase": "",
             "passphrase_set": bool(settings.exchange.passphrase),
             "market_type": settings.exchange.market_type,
             "demo": settings.exchange.demo,
@@ -92,7 +92,7 @@ def _serialize_settings(settings: SettingsUpdate) -> dict[str, object]:
         "backtest": settings.backtest.model_dump(),
         "risk": settings.risk.model_dump(),
         "notify": {
-            "telegram_bot_token": _mask_secret(settings.notify.telegram_bot_token),
+            "telegram_bot_token": "",
             "telegram_bot_token_set": bool(settings.notify.telegram_bot_token),
             "telegram_chat_id": settings.notify.telegram_chat_id,
         },

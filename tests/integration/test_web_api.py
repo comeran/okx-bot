@@ -557,8 +557,39 @@ async def test_cors_preflight_does_not_allow_credentials(app):
         )
 
     assert resp.status_code == 200
-    assert resp.headers["access-control-allow-origin"] == "*"
+    assert resp.headers["access-control-allow-origin"] == "http://localhost:5173"
     assert "access-control-allow-credentials" not in resp.headers
+
+
+@pytest.mark.asyncio
+async def test_cors_preflight_rejects_external_origin(app):
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.options(
+            "/api/health",
+            headers={
+                "Origin": "https://evil.example",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+
+    assert "access-control-allow-origin" not in resp.headers
+
+
+@pytest.mark.asyncio
+async def test_api_token_is_required_when_configured(app, monkeypatch):
+    monkeypatch.setenv("OKX_BOT_API_TOKEN", "secret-token")
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        unauthorized = await client.get("/api/settings")
+        health = await client.get("/api/health")
+        authorized = await client.get(
+            "/api/settings", headers={"Authorization": "Bearer secret-token"}
+        )
+
+    assert unauthorized.status_code == 401
+    assert health.status_code == 200
+    assert authorized.status_code == 200
 
 
 @pytest.mark.asyncio
@@ -4120,6 +4151,19 @@ def test_create_risk_manager_without_settings_uses_max_position_only(monkeypatch
     assert manager.enforce_drawdown is False
 
 
+def test_create_risk_manager_live_enforces_loss_and_drawdown(monkeypatch):
+    monkeypatch.setattr(
+        strategy_api,
+        "load_runtime_settings",
+        lambda: AppConfig(),
+    )
+
+    manager = strategy_api.create_risk_manager(live=True)
+
+    assert manager.enforce_daily_loss is True
+    assert manager.enforce_drawdown is True
+
+
 @pytest.mark.asyncio
 async def test_strategy_config_api_rejects_unsupported_strategy_type(monkeypatch):
     class FakeRepository:
@@ -6288,7 +6332,7 @@ async def test_run_backtest_uses_cached_bars_and_persists_summary(monkeypatch):
 
     assert resp.status_code == 200
     data = resp.json()
-    assert data["total_trades"] == 1
+    assert data["total_trades"] == 0
     assert data["total_return"] < 0
     assert isinstance(data["sharpe_ratio"], float)
     assert len(FakeRepository.results) == 1
@@ -6297,7 +6341,7 @@ async def test_run_backtest_uses_cached_bars_and_persists_summary(monkeypatch):
     assert saved.symbol == "BTC-USDT"
     assert saved.timeframe == "1h"
     assert saved.initial_capital == 100000
-    assert saved.total_trades == 1
+    assert saved.total_trades == 0
     assert saved.created_at == 1700007200000
     assert len(FakeRepository.trades) == 1
     trade = FakeRepository.trades[0]
@@ -6305,10 +6349,10 @@ async def test_run_backtest_uses_cached_bars_and_persists_summary(monkeypatch):
     assert trade.symbol == "BTC-USDT"
     assert trade.side == "buy"
     assert trade.amount == 1.0
-    assert trade.price == 100.1
-    assert trade.fee == 0.05005
-    assert trade.pnl == -100.15005
-    assert trade.timestamp == 1700002800000
+    assert trade.price == pytest.approx(110.11)
+    assert trade.fee == pytest.approx(0.055055)
+    assert trade.pnl == 0.0
+    assert trade.timestamp == 1700006400000
 
 
 @pytest.mark.asyncio
@@ -6394,7 +6438,7 @@ async def test_run_backtest_fetches_missing_historical_bars_before_running(monke
         )
 
     assert resp.status_code == 200
-    assert resp.json()["total_trades"] == 1
+    assert resp.json()["total_trades"] == 0
     assert FakeAdapter.calls == [
         {"symbol": "BTC-USDT", "timeframe": "1h", "limit": 2, "since": 1700002800000}
     ]
@@ -6407,10 +6451,10 @@ async def test_run_backtest_fetches_missing_historical_bars_before_running(monke
     assert trade.symbol == "BTC-USDT"
     assert trade.side == "buy"
     assert trade.amount == 1.0
-    assert trade.price == 100.1
-    assert trade.fee == 0.05005
-    assert trade.pnl == -100.15005
-    assert trade.timestamp == 1700002800000
+    assert trade.price == pytest.approx(110.11)
+    assert trade.fee == pytest.approx(0.055055)
+    assert trade.pnl == 0.0
+    assert trade.timestamp == 1700006400000
 
 
 @pytest.mark.asyncio
@@ -6933,6 +6977,37 @@ def test_websocket_accepts_connection_and_sends_snapshot(monkeypatch):
     }
 
 
+def test_websocket_rejects_external_origin(monkeypatch):
+    monkeypatch.setattr(web_app, "Repository", lambda: object(), raising=False)
+
+    with TestClient(create_app()) as client:
+        with pytest.raises(WebSocketDisconnect) as rejection:
+            with client.websocket_connect(
+                "/ws?scope=exchange",
+                headers={"Origin": "https://evil.example"},
+            ):
+                pass
+
+    assert rejection.value.code == 1008
+    assert rejection.value.reason == "origin not allowed"
+
+
+def test_websocket_requires_token_when_configured(monkeypatch):
+    monkeypatch.setenv("OKX_BOT_API_TOKEN", "ws-token")
+    monkeypatch.setattr(web_app, "Repository", lambda: object(), raising=False)
+
+    with TestClient(create_app()) as client:
+        with pytest.raises(WebSocketDisconnect) as rejection:
+            with client.websocket_connect(
+                "/ws?scope=exchange",
+                headers={"Origin": "http://localhost:3000"},
+            ):
+                pass
+
+    assert rejection.value.code == 1008
+    assert rejection.value.reason == "unauthorized"
+
+
 def test_websocket_scope_is_explicit_and_strategy_scope_requires_strategy(monkeypatch):
     class FakeRepository:
         def get_account(self, strategy, **kwargs):
@@ -7240,11 +7315,11 @@ async def test_get_and_update_settings(app):
     saved = saved_resp.json()
     assert saved["mode"] == "paper"
     assert saved["exchange"] == {
-        "api_key": "ok*******ey",
+        "api_key": "",
         "api_key_set": True,
-        "secret": "ok************ue",
+        "secret": "",
         "secret_set": True,
-        "passphrase": "ok**********se",
+        "passphrase": "",
         "passphrase_set": True,
         "market_type": "spot",
         "demo": True,
@@ -7254,7 +7329,7 @@ async def test_get_and_update_settings(app):
     assert saved["risk"]["allow_live_open_orders"] is True
     assert saved["risk"]["live_max_order_notional"] == 2500.0
     assert saved["notify"] == {
-        "telegram_bot_token": "te**********en",
+        "telegram_bot_token": "",
         "telegram_bot_token_set": True,
         "telegram_chat_id": "123456",
     }
@@ -7291,17 +7366,17 @@ async def test_settings_defaults_load_project_config_environment(monkeypatch):
     assert resp.status_code == 200
     settings = resp.json()
     assert settings["exchange"] == {
-        "api_key": "en*******ey",
+        "api_key": "",
         "api_key_set": True,
-        "secret": "en************ue",
+        "secret": "",
         "secret_set": True,
-        "passphrase": "en**********se",
+        "passphrase": "",
         "passphrase_set": True,
         "market_type": "spot",
         "demo": True,
     }
     assert settings["notify"] == {
-        "telegram_bot_token": "en**************en",
+        "telegram_bot_token": "",
         "telegram_bot_token_set": True,
         "telegram_chat_id": "987654",
     }
@@ -7410,11 +7485,11 @@ async def test_settings_persist_across_app_instances(tmp_path, monkeypatch):
     saved = resp.json()
     assert saved["mode"] == "live"
     assert saved["exchange"] == {
-        "api_key": "pe*************ey",
+        "api_key": "",
         "api_key_set": True,
-        "secret": "pe************et",
+        "secret": "",
         "secret_set": True,
-        "passphrase": "pe****************se",
+        "passphrase": "",
         "passphrase_set": True,
         "market_type": "spot",
         "demo": True,
@@ -7424,7 +7499,7 @@ async def test_settings_persist_across_app_instances(tmp_path, monkeypatch):
     assert saved["risk"]["allow_live_open_orders"] is True
     assert saved["risk"]["live_max_order_notional"] == 2500.0
     assert saved["notify"] == {
-        "telegram_bot_token": "pe***********en",
+        "telegram_bot_token": "",
         "telegram_bot_token_set": True,
         "telegram_chat_id": "654321",
     }

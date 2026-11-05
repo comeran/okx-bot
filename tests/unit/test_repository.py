@@ -6205,3 +6205,32 @@ def test_atomic_private_sync_distinguishes_empty_orders_from_unset_orders(repo):
     repo.atomic_private_sync(lambda transaction: transaction.rebind_trades_to_orders(None))
     rebound = repo.get_trades()[0]
     assert (rebound.order_id, rebound.strategy) == ("eth-order", "ma_cross")
+
+
+def test_live_submission_lease_works_on_file_backed_sqlite(tmp_path):
+    repository = Repository(db_path=str(tmp_path / "lease.db"))
+
+    assert repository.acquire_live_submission_lease("owner-a") is True
+    assert repository.acquire_live_submission_lease("owner-a") is True
+    assert repository.acquire_live_submission_lease("owner-b") is False
+
+    repository.release_live_submission_lease("owner-a")
+    assert repository.acquire_live_submission_lease("owner-b") is True
+
+
+def test_file_sqlite_schema_migration_runs_once_per_database(tmp_path, monkeypatch):
+    calls = []
+    original = Repository._migrate_sqlite_schema
+
+    def counting_migration(engine):
+        calls.append(engine)
+        return original(engine)
+
+    monkeypatch.setattr(Repository, "_migrate_sqlite_schema", staticmethod(counting_migration))
+    db_path = tmp_path / "migrate-once.db"
+
+    Repository(db_path=str(db_path))
+    Repository(db_path=str(db_path))
+
+    assert len(calls) == 1
+

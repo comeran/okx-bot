@@ -1,5 +1,7 @@
 import textwrap
 
+import pytest
+
 from src.core.config import AppConfig, load_config
 
 
@@ -126,3 +128,38 @@ def test_uses_defaults_for_missing_optional_values(tmp_path):
     assert config.risk.max_drawdown_pct == 0.15
     assert config.risk.allow_live_open_orders is False
     assert config.risk.live_max_order_notional == 0.0
+
+
+def test_quoted_and_env_substituted_booleans_are_parsed_strictly(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEST_ALLOW_LIVE", "false")
+    config_file = tmp_path / "settings.yaml"
+    config_file.write_text(
+        textwrap.dedent(
+            """
+            exchange:
+              demo: "false"
+            risk:
+              allow_live_open_orders: ${TEST_ALLOW_LIVE}
+            """
+        )
+    )
+
+    config = load_config(str(config_file))
+
+    assert config.exchange.demo is False
+    assert config.risk.allow_live_open_orders is False
+
+
+def test_invalid_boolean_is_rejected(tmp_path):
+    config_file = tmp_path / "settings.yaml"
+    config_file.write_text(
+        textwrap.dedent(
+            """
+            risk:
+              allow_live_open_orders: maybe
+            """
+        )
+    )
+
+    with pytest.raises(ValueError, match="allow_live_open_orders"):
+        load_config(str(config_file))

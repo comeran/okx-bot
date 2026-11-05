@@ -2984,6 +2984,27 @@ async def test_private_sync_network_failure_keeps_unavailable_bypass():
 
 
 @pytest.mark.asyncio
+async def test_private_sync_flags_unmatched_exchange_order_even_when_trades_fail():
+    class NetworkFailureAdapter(FakeAdapter):
+        async def fetch_recent_trade_snapshots(self, symbols=None, since=None, limit=100):
+            raise NetworkError("temporary network failure")
+
+    repository = FakeRepository()
+    result = await sync_private_state(
+        repository,
+        NetworkFailureAdapter(orders=[exchange_order()]),
+        timestamp_ms=lambda: 1700000000000,
+    )
+
+    assert result.trades_status == "unavailable"
+    assert result.kill_switch_engaged is True
+    assert any(
+        event.get("divergence_type") == "unmatched_exchange_order"
+        for event in result.divergences
+    )
+
+
+@pytest.mark.asyncio
 async def test_private_sync_trade_provider_failure_preserves_safe_state_without_divergence():
     class FailingTradeAdapter(FakeAdapter):
         async def fetch_recent_trade_snapshots(self, symbols=None, since=None, limit=100):
