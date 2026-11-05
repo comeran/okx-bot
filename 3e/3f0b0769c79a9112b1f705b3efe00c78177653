@@ -1,0 +1,41 @@
+src/core/engine.py
+  s_03d2927e7aa435::t_20aeb11dee8731 277
+  s_03d2927e7aa435::t_1b88aad77f83bb 55-58
+src/order/manager.py
+  s_03d2927e7aa435::t_e37b62a7851677 107-108
+  s_03d2927e7aa435::t_abb979454de34e 1197-1219
+  s_03d2927e7aa435::t_52685ca3dcc67b 924-932
+  s_03d2927e7aa435::t_acdba937806367 923
+  s_03d2927e7aa435::t_f89f47da338c54 1196
+tests/unit/test_engine.py
+  s_03d2927e7aa435::t_54956725cda055 7
+  s_03d2927e7aa435::t_3ea03cbbc3375f 2218-2236
+  s_03d2927e7aa435::t_60c8b17af25434 2216-2217
+tests/unit/test_engine_warmup.py
+  s_03d2927e7aa435::t_8d94faaf5e322f 7
+  s_03d2927e7aa435::t_69cd897993ec03 1851-1852
+tests/unit/test_order_router.py
+  s_03d2927e7aa435::t_2b213115553e2e 4210,4212-4214,4228,4241
+  s_03d2927e7aa435::t_3b76ea3a1e18b0 4242-4286
+  s_03d2927e7aa435::t_9d2a2af02c9997 4168-4209,4211,4215-4227,4229-4240
+  s_03d2927e7aa435::t_017d46e03a8117 2103
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "3e3f0b0769c79a9112b1f705b3efe00c78177653",
+  "prompts": {},
+  "logical_commit_id": "3e3f0b0769c79a9112b1f705b3efe00c78177653",
+  "sessions": {
+    "s_03d2927e7aa435": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0aa483d5-b8bb-4fd9-ab01-d8ee071066f0",
+        "model": "deepseek/deepseek-flash"
+      },
+      "human_author": "Zane <zane@bigo.sg>",
+      "total_additions": 186,
+      "total_deletions": 8
+    }
+  }
+}
