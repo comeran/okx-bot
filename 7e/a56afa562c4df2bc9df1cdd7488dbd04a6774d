@@ -1,0 +1,25 @@
+tests/unit/test_engine.py
+  s_03d2927e7aa435::t_58fd5c9b021d54 2045-2057
+src/core/engine.py
+  s_03d2927e7aa435::t_a1478a04284552 75
+  s_03d2927e7aa435::t_b6281906a961c5 409-417
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "7ea56afa562c4df2bc9df1cdd7488dbd04a6774d",
+  "prompts": {},
+  "logical_commit_id": "7ea56afa562c4df2bc9df1cdd7488dbd04a6774d",
+  "sessions": {
+    "s_03d2927e7aa435": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0aa483d5-b8bb-4fd9-ab01-d8ee071066f0",
+        "model": "deepseek/deepseek-flash"
+      },
+      "human_author": "Zane <zane@bigo.sg>",
+      "total_additions": 23,
+      "total_deletions": 1
+    }
+  }
+}
