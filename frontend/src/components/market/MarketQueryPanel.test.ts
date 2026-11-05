@@ -87,6 +87,29 @@ describe('MarketQueryPanel', () => {
     wrapper.unmount();
   });
 
+  it('uses caller-supplied option lists instead of module defaults', async () => {
+    const wrapper = await mount(MarketQueryPanel, {
+      locale: 'en',
+      components: stubs,
+      props: {
+        ...baseProps,
+        marketTypeOptions: ['swap'],
+        timeframeOptions: ['4h'],
+        limitOptions: [7],
+      },
+    });
+
+    const optionValues = wrapper
+      .findAll((node) => node.type === 'el-option')
+      .map((node) => node.props.value);
+
+    expect(optionValues).toContain('swap');
+    expect(optionValues).toContain('4h');
+    expect(optionValues).toContain(7);
+    expect(optionValues).not.toContain('spot');
+    wrapper.unmount();
+  });
+
   it('uses responsive query grid and full-width mobile submit classes', async () => {
     const wrapper = await mount(MarketQueryPanel, {
       locale: 'en',

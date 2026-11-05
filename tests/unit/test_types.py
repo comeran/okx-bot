@@ -619,6 +619,27 @@ def test_exchange_order_snapshot_uses_filled_when_remaining_exceeds_amount():
     assert order.remaining_amount == 0.75
 
 
+def test_exchange_order_snapshot_accepts_large_quantities_with_float_rounding():
+    snapshot = ExchangeOrderSnapshot(
+        exchange_order_id="ex-large-quantity",
+        client_order_id="client-large-quantity",
+        symbol="BTC-USDT",
+        side=OrderSide.BUY,
+        type=OrderType.LIMIT,
+        amount=123456.789,
+        price=100.0,
+        status=OrderStatus.PENDING,
+        fill_price=0.0,
+        timestamp=1,
+        updated_at=2,
+        filled_amount=100000.0,
+        remaining_amount=23456.789,
+    )
+
+    assert snapshot.filled_amount == 100000.0
+    assert snapshot.remaining_amount == pytest.approx(23456.789)
+
+
 def test_exchange_order_snapshot_rejects_inconsistent_explicit_fill_group():
     with pytest.raises(ValueError, match="inconsistent filled and remaining amounts"):
         ExchangeOrderSnapshot(

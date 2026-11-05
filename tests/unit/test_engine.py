@@ -2042,6 +2042,19 @@ async def test_callback_initiated_stop_blocks_restart_until_detached_cleanup_fin
             await asyncio.gather(runtime, return_exceptions=True)
 
 
+async def test_feed_synchronization_wait_times_out():
+    engine = BotEngine()
+    engine._feed_synchronization_timeout_seconds = 0.01
+    synchronization = asyncio.get_running_loop().create_future()
+
+    with pytest.raises(RuntimeError, match="synchronization timed out"):
+        await engine._wait_for_feed_synchronization(
+            synchronization,
+            "BTC-USDT",
+            "1m",
+        )
+
+
 async def test_startup_rollback_with_reentrant_shutdown_stops_owned_market_data_once():
     startup_error = RuntimeError("startup readiness failed")
     events = []

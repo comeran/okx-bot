@@ -104,3 +104,53 @@ async def test_yaml_strategy_returns_sell_order_for_backtest_engine() -> None:
     assert isinstance(order, Order)
     assert order.symbol == "BTC-USDT"
     assert order.side == OrderSide.SELL
+
+
+@pytest.mark.asyncio
+async def test_yaml_strategy_evaluates_configured_indicators() -> None:
+    strategy = YAMLStrategy(
+        {
+            "name": "yaml_ma",
+            "symbol": "BTC-USDT",
+            "timeframe": "1h",
+            "params": {"fast": 2, "slow": 3},
+            "indicators": {
+                "fast_ma": "sma(close, {{ fast }})",
+                "slow_ma": "sma(close, {{ slow }})",
+            },
+            "conditions": {"buy": ["fast_ma > slow_ma"]},
+        }
+    )
+    strategy.set_order_manager(RecordingOrderManager())
+
+    assert strategy.required_warmup_bars() == 3
+
+    orders = []
+    for close in (10.0, 10.0, 10.0, 10.0, 12.0):
+        order = await strategy.on_bar(
+            Bar(
+                timestamp=int(close * 100),
+                open=close,
+                high=close,
+                low=close,
+                close=close,
+                volume=1,
+            )
+        )
+        if order is not None:
+            orders.append(order)
+
+    assert len(orders) == 1
+    assert orders[0].side == OrderSide.BUY
+
+
+def test_yaml_strategy_rejects_unsupported_indicator_expression() -> None:
+    with pytest.raises(ValueError, match="Unsupported indicator"):
+        YAMLStrategy(
+            {
+                "name": "yaml_bad",
+                "symbol": "BTC-USDT",
+                "timeframe": "1h",
+                "indicators": {"momentum": "mystery(close, 5)"},
+            }
+        )

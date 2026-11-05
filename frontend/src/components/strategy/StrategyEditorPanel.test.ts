@@ -127,6 +127,36 @@ describe('StrategyEditorPanel', () => {
     wrapper.unmount();
   });
 
+  it('locks the editor while a save is in flight', async () => {
+    const wrapper = await mount(StrategyEditorPanel, {
+      components: { ElButton },
+      props: {
+        modelValue: draft(),
+        yaml: 'name: desk:btc',
+        title: 'strategies.editor.edit',
+        mode: 'edit',
+        definitions,
+        advanced: false,
+        readonly: false,
+        dirty: true,
+        busy: true,
+        saveLoading: true,
+        modelUri: 'inmemory://strategy/edit.yaml',
+        validationSummary: [],
+        selectedName: 'desk:btc',
+        cloneSourceName: '',
+        issues: [],
+        'onUpdate:modelValue': vi.fn(),
+        'onUpdate:yaml': vi.fn(),
+      },
+    });
+
+    const form = wrapper.find((node) => node.type === 'strategy-form-stub');
+    expect(form.props.readonly).toBe(true);
+
+    wrapper.unmount();
+  });
+
   it('emits mode toggles and preserves the bound payloads when switching views', async () => {
     const updates: Array<{ model?: StrategyConfigPayload; yaml?: string }> = [];
     let wrapper: Awaited<ReturnType<typeof mount>> | undefined;

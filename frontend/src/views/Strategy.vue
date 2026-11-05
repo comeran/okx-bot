@@ -324,7 +324,7 @@ async function saveDraft(): Promise<void> {
           strategy_type: canonical.config.strategy_type,
           symbol: canonical.config.symbol,
           timeframe: canonical.config.timeframe,
-          enabled: false,
+          enabled: canonical.config.enabled,
           params: canonical.config.params,
         },
       });

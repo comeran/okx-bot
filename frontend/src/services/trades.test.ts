@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import axios from 'axios';
 
 import { fetchTrades } from './trades';
@@ -8,8 +8,12 @@ vi.mock('axios');
 const mockedAxios = vi.mocked(axios);
 
 describe('trades service', () => {
-  it('loads trade history from the trading API', async () => {
-    const trades = [
+  beforeEach(() => {
+    mockedAxios.get.mockReset();
+  });
+
+  it('loads strategy and exchange trade history from the trading API', async () => {
+    const strategyTrades = [
       {
         id: 1,
         strategy: 'ma_cross',
@@ -21,14 +25,31 @@ describe('trades service', () => {
         timestamp: 1700000000000,
       },
     ];
-    mockedAxios.get.mockResolvedValueOnce({ data: trades });
+    const exchangeTrades = [
+      {
+        id: 2,
+        strategy: '__exchange__',
+        symbol: 'ETH-USDT-SWAP',
+        side: 'sell',
+        amount: 1,
+        price: 3000,
+        fee: 0.5,
+        timestamp: 1700000600000,
+      },
+    ];
+    mockedAxios.get
+      .mockResolvedValueOnce({ data: strategyTrades })
+      .mockResolvedValueOnce({ data: exchangeTrades });
 
     const result = await fetchTrades();
 
     expect(mockedAxios.get).toHaveBeenCalledWith('/api/trading/trades', {
       params: undefined,
     });
-    expect(result).toEqual(trades);
+    expect(mockedAxios.get).toHaveBeenCalledWith('/api/trading/trades', {
+      params: { scope: 'exchange' },
+    });
+    expect(result).toEqual([...exchangeTrades, ...strategyTrades]);
   });
 
   it('forwards the strategy filter to the trading API', async () => {
@@ -36,6 +57,7 @@ describe('trades service', () => {
 
     await fetchTrades({ strategy: 'ma_cross' });
 
+    expect(mockedAxios.get).toHaveBeenCalledTimes(1);
     expect(mockedAxios.get).toHaveBeenCalledWith('/api/trading/trades', {
       params: { strategy: 'ma_cross' },
     });

@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -122,7 +123,9 @@ class BacktestEngine:
 
         await strategy.on_init()
 
-        for bar in bars:
+        for index, bar in enumerate(bars):
+            if index % 1000 == 0:
+                await asyncio.sleep(0)
             resting: list[Order] = []
             for order in pending:
                 match = self.matcher.match(order, bar)

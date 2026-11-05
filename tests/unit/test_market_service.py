@@ -468,7 +468,7 @@ async def test_poll_once_preserves_all_callback_exceptions_and_dispatches_every_
         with pytest.raises(_CallbackDispatchError) as raised:
             await service._poll_once("BTC-USDT-SWAP", "1m")
 
-    assert [bar.timestamp for bar in delivered] == [1700000000000]
+    assert [bar.timestamp for bar in delivered] == [1700000000000, 1700000060000]
     assert isinstance(raised.value.__cause__, ExceptionGroup)
     assert raised.value.__cause__.exceptions == (first_error, second_error)
     assert raised.value.original is first_error
@@ -567,8 +567,8 @@ async def test_feed_worker_keeps_ordinary_interval_after_callback_only_failures(
     assert sleep_durations == [1, 1, 1]
     health = service.get_feed_health("BTC-USDT-SWAP", "1m")
     assert health.status == "pending"
-    assert health.buffered_bars == 0
-    assert health.last_bar_timestamp is None
+    assert health.buffered_bars == 1
+    assert health.last_bar_timestamp == 1700000180000
     assert health.consecutive_failures == 0
     assert health.error_code == "market_feed_subscriber_delivery_failed"
     assert any(

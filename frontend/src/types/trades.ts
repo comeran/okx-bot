@@ -7,6 +7,7 @@ export interface TradeRecord {
   price: number;
   fee: number;
   timestamp: number;
+  notional_value?: number | null;
 }
 
 export interface TradesQuery {

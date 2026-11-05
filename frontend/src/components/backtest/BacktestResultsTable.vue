@@ -119,6 +119,17 @@ function rowClassName({ row }: { row: BacktestResult }): string {
             {{ row.total_trades === null || row.total_trades === undefined ? EMPTY_BACKTEST_VALUE : formatBacktestNumber(row.total_trades, 0) }}
           </template>
         </el-table-column>
+        <el-table-column :label="t('common.actions')" min-width="110" fixed="right">
+          <template #default="{ row }">
+            <el-button
+              size="small"
+              :aria-label="`${t('backtest.viewResult')}: ${row.id}`"
+              @click.stop="selectResult(row.id)"
+            >
+              {{ t('backtest.viewResult') }}
+            </el-button>
+          </template>
+        </el-table-column>
         <template #empty>
           <div class="backtest-results-table__empty">{{ t('backtest.noResults') }}</div>
         </template>

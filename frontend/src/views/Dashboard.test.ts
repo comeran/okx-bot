@@ -199,6 +199,54 @@ describe('Dashboard view', () => {
     wrapper.unmount();
   });
 
+  it('retries the full initial load when the shared dashboard error is displayed', async () => {
+    storeMocks.dashboard.error = 'Dashboard refresh failed';
+
+    const wrapper = await mount(Dashboard, {
+      locale: 'en',
+      components: {
+        ElButton: defineHostComponent('el-button'),
+        ElAlert: defineHostComponent('el-alert'),
+        ElRow: defineHostComponent('el-row'),
+        ElCol: defineHostComponent('el-col'),
+      },
+    });
+
+    await wrapper.flush();
+    const accountOverview = wrapper.find((node) => node.type === 'account-overview-stub');
+    await wrapper.invoke(accountOverview, 'onRetry');
+
+    expect(storeMocks.dashboard.loadInitialData).toHaveBeenCalledTimes(2);
+    expect(storeMocks.dashboard.refreshAccountOverview).not.toHaveBeenCalled();
+
+    wrapper.unmount();
+  });
+
+  it('shows an unknown active strategy count when the strategy list fails', async () => {
+    storeMocks.strategies.error = 'Failed to load strategies';
+    storeMocks.strategies.runtimeSummaries = [];
+    storeMocks.strategies.activeStrategyCount = 0;
+
+    const wrapper = await mount(Dashboard, {
+      locale: 'en',
+      components: {
+        ElButton: defineHostComponent('el-button'),
+        ElAlert: defineHostComponent('el-alert'),
+        ElRow: defineHostComponent('el-row'),
+        ElCol: defineHostComponent('el-col'),
+      },
+    });
+
+    await wrapper.flush();
+
+    const metricValues = wrapper.findAll((node) => node.type === 'span' && String(node.props.class).split(' ').includes('metric-card__value'));
+    expect(textContent(metricValues[5])).toBe('—');
+    const alerts = wrapper.findAll((node) => node.type === 'el-alert');
+    expect(alerts.some((alert) => alert.props.title === 'Failed to load strategies')).toBe(true);
+
+    wrapper.unmount();
+  });
+
   it('reformats the last updated label when locale changes without refetching', async () => {
     storeMocks.dashboard.lastUpdatedAt = 1700000000000;
 

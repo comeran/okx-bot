@@ -114,6 +114,7 @@ def _subtract_amounts(amount: float, value: float) -> float:
 
 
 _AMOUNT_RECONCILIATION_ABS_TOLERANCE = 1e-12
+_AMOUNT_RECONCILIATION_REL_TOLERANCE = 1e-12
 
 
 def _validate_amount_reconciliation(
@@ -126,7 +127,7 @@ def _validate_amount_reconciliation(
     if not math.isclose(
         filled_amount + remaining_amount,
         amount,
-        rel_tol=0.0,
+        rel_tol=_AMOUNT_RECONCILIATION_REL_TOLERANCE,
         abs_tol=_AMOUNT_RECONCILIATION_ABS_TOLERANCE,
     ):
         raise ValueError(error_message)

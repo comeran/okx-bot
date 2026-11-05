@@ -72,6 +72,7 @@ class _LegacyMarketDataRuntime:
 class BotEngine:
     _legacy_market_data_tasks: list[_LegacyMarketDataRuntime] = []
     _legacy_market_data_lock = threading.Lock()
+    _feed_synchronization_timeout_seconds = 10.0
 
     def __init__(
         self,
@@ -264,6 +265,11 @@ class BotEngine:
             await self._finish_strategy_activation(initialized)
             if self._stop_cleanup_task is not None:
                 await self._await_stop_cleanup(self._stop_cleanup_task)
+                if unregister_health_listener is not None:
+                    try:
+                        unregister_health_listener()
+                    except BaseException as exc:
+                        self._record_cleanup_error(exc)
                 return
             await self._commit_strategy_activation(initialized)
         except BaseException:
@@ -400,7 +406,15 @@ class BotEngine:
             min_bars: int,
         ) -> None:
             del min_bars
-            await asyncio.shield(synchronization)
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(synchronization),
+                    timeout=self._feed_synchronization_timeout_seconds,
+                )
+            except TimeoutError as exc:
+                raise RuntimeError(
+                    f"market feed synchronization timed out for {symbol} {timeframe}"
+                ) from exc
 
         await self._wait_for_market_data_ready(
             wait_for_generation,

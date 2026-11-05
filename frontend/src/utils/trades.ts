@@ -51,7 +51,7 @@ function sumNumbers(values: Array<number | null | undefined>): number | null {
 function matchesText(value: string | null | undefined, filter: string): boolean {
   const normalizedFilter = normalizeValue(filter);
   if (!normalizedFilter) return true;
-  return normalizeValue(value).includes(normalizedFilter);
+  return normalizeValue(value) === normalizedFilter;
 }
 
 function containsSearchTerm(trade: TradeRecord, searchTerm: string): boolean {
@@ -77,11 +77,12 @@ export function filterTrades(trades: TradeRecord[], filters: TradeFilters): Trad
 }
 
 export function summarizeTrades(trades: TradeRecord[]): TradeSummary {
-  const totalNotional = sumNumbers(trades.map((trade) => (
-    hasNumericValue(trade.amount) && hasNumericValue(trade.price)
+  const totalNotional = sumNumbers(trades.map((trade) => {
+    if (hasNumericValue(trade.notional_value)) return trade.notional_value;
+    return hasNumericValue(trade.amount) && hasNumericValue(trade.price)
       ? trade.amount * trade.price
-      : null
-  )));
+      : null;
+  }));
   const totalFees = sumNumbers(trades.map((trade) => trade.fee));
 
   return {

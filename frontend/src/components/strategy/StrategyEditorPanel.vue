@@ -104,7 +104,7 @@ const modeLabel = computed(() => (props.advanced ? t('strategies.editor.advanced
       :definitions="props.definitions"
       :mode="props.mode === 'edit' ? 'edit' : props.mode"
       :issues="props.issues"
-      :readonly="props.readonly"
+      :readonly="props.readonly || props.busy"
       :dirty="props.dirty"
     />
     <CodeEditor
@@ -114,7 +114,7 @@ const modeLabel = computed(() => (props.advanced ? t('strategies.editor.advanced
       :description="t('strategies.editor.yamlDescription')"
       :model-uri="props.modelUri"
       :issues="props.issues"
-      :readonly="props.readonly"
+      :readonly="props.readonly || props.busy"
       :height="420"
     />
 

@@ -80,6 +80,40 @@ async def test_live_state_sync_does_not_archive_positions_from_unmarked_partial_
 
 
 @pytest.mark.asyncio
+async def test_refresh_okx_live_state_closes_adapter_after_success(monkeypatch):
+    class SuccessfulAdapter:
+        def __init__(self):
+            self.closed = False
+
+        async def fetch_account_snapshot(self):
+            return AccountSnapshot(
+                currency="USDT",
+                equity=1000.0,
+                cash_balance=1000.0,
+                available_balance=1000.0,
+                updated_at=1700000000000,
+            )
+
+        async def fetch_position_snapshots(self, symbols=None):
+            return []
+
+        async def close(self):
+            self.closed = True
+
+    adapter = SuccessfulAdapter()
+    monkeypatch.setattr(
+        "src.exchange.live_sync.create_okx_adapter",
+        lambda exchange: adapter,
+    )
+
+    await refresh_okx_live_state(
+        object(), FakeRepository(), "__exchange__", None, lambda: 1700000000000
+    )
+
+    assert adapter.closed is True
+
+
+@pytest.mark.asyncio
 async def test_refresh_okx_live_state_preserves_provider_error_when_adapter_close_also_fails(
     monkeypatch,
 ):

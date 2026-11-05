@@ -6234,3 +6234,44 @@ def test_file_sqlite_schema_migration_runs_once_per_database(tmp_path, monkeypat
 
     assert len(calls) == 1
 
+
+def test_save_kline_is_idempotent_for_the_same_candle(repo):
+    first = repo.save_kline(
+        KlineCache(
+            symbol="BTC-USDT",
+            timeframe="1h",
+            timestamp=1700000000000,
+            open=100.0,
+            high=102.0,
+            low=99.0,
+            close=101.0,
+            volume=10.0,
+        )
+    )
+    second = repo.save_kline(
+        KlineCache(
+            symbol="BTC-USDT",
+            timeframe="1h",
+            timestamp=1700000000000,
+            open=100.0,
+            high=103.0,
+            low=99.0,
+            close=102.0,
+            volume=12.0,
+        )
+    )
+
+    assert first is not None and second is not None
+    assert second.id == first.id
+    rows = repo.get_klines(
+        "BTC-USDT",
+        "1h",
+        1700000000000,
+        1700000000000,
+        source="unknown",
+        runtime_mode="unknown",
+    )
+    assert len(rows) == 1
+    assert rows[0].close == 102.0
+    assert rows[0].volume == 12.0
+

@@ -1139,8 +1139,11 @@ class UnifiedOrderManager:
             current_amount_by_side[reducing_side] - reduced_amount,
             current_amount_by_side[increasing_side] + order.amount - reduced_amount,
         )
-        is_reducing = has_position and reduced_amount > 0 and (
-            sum(resulting_amount) < sum(current_amount_by_side.values())
+        is_reducing = (
+            has_position
+            and reduced_amount > 0
+            and order.amount <= current_amount_by_side[reducing_side]
+            and sum(resulting_amount) < sum(current_amount_by_side.values())
         )
         if is_reducing:
             if self.live_market_type != "spot":
@@ -1164,7 +1167,12 @@ class UnifiedOrderManager:
                 effective_price=order_price,
             )
 
-        order_value = self._order_value_for_risk(order, order_price, positions)
+        opening_ratio = 1.0
+        if order.amount > 0 and has_position:
+            opening_ratio = max(0.0, order.amount - reduced_amount) / order.amount
+        order_value = (
+            self._order_value_for_risk(order, order_price, positions) * opening_ratio
+        )
         if self.live_max_order_notional > 0 and order_value > self.live_max_order_notional:
             return RiskGateResult(
                 False,

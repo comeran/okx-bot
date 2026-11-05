@@ -85,6 +85,10 @@ const builtInNames = computed(() => new Set(
   strategyTypeCatalog.value.map((strategyType) => strategyType.strategy_type),
 ));
 
+const configNames = computed(() => new Set(
+  strategyConfigs.value.map((config) => config.name),
+));
+
 function strategySourceLabel(source: BacktestStrategyOptionSource): string {
   if (locale.value.startsWith('zh')) {
     return source === 'builtin' ? '内置策略' : '保存配置';
@@ -141,21 +145,23 @@ const strategyOptions = computed<BacktestStrategyOption[]>(() => {
   if (!catalogUnavailable) {
     for (const strategyType of strategyTypeCatalog.value) {
       const status = runtimeStatusByName.value.get(strategyType.strategy_type);
+      const shadowed = configNames.value.has(strategyType.strategy_type);
       options.push({
         id: `builtin:${strategyType.strategy_type}`,
-        value: strategyType.strategy_type,
+        value: shadowed ? `builtin:${strategyType.strategy_type}` : strategyType.strategy_type,
         backendValue: strategyType.strategy_type,
-        label: strategyOptionLabel(strategyType.strategy_type, 'builtin', status),
+        label: strategyOptionLabel(strategyType.strategy_type, 'builtin', status, shadowed),
+        disabled: shadowed || undefined,
       });
     }
   }
 
   for (const config of strategyConfigs.value) {
     const status = runtimeStatusByName.value.get(config.name);
-    const disabled = catalogUnavailable || builtInNames.value.has(config.name);
+    const disabled = catalogUnavailable;
     options.push({
       id: `config:${config.name}`,
-      value: catalogUnavailable ? config.name : (disabled ? `config:${config.name}` : config.name),
+      value: catalogUnavailable ? `config:${config.name}` : config.name,
       backendValue: config.name,
       label: strategyOptionLabel(config.name, 'config', status, disabled),
       disabled,

@@ -2624,6 +2624,20 @@ async def test_live_order_manager_allows_opening_order_when_enabled_and_within_l
         fees_paid=0.0,
         updated_at=1700000000000,
     )
+    repository.accounts["__exchange__"] = AccountRecord(
+        strategy="__exchange__",
+        initial_equity=100000.0,
+        cash_balance=100000.0,
+        equity=100000.0,
+        realized_pnl=0.0,
+        unrealized_pnl=0.0,
+        daily_pnl=0.0,
+        fees_paid=0.0,
+        updated_at=1700000000000,
+        source="live_exchange",
+        runtime_mode="live",
+    )
+    grant_live_position_ownership(repository)
     router = OrderRouter(backtest=None, live=handler, mode="live")
     manager = UnifiedOrderManager(
         router=router,
@@ -2646,8 +2660,8 @@ async def test_live_order_manager_allows_opening_order_when_enabled_and_within_l
         strategy_name="ma_cross",
     )
 
-    assert order.status == OrderStatus.REJECTED
-    assert handler.submitted == []
+    assert order.status == OrderStatus.FILLED
+    assert [submitted.id for submitted in handler.submitted] == [order.id]
 
 
 @pytest.mark.asyncio
@@ -2671,6 +2685,20 @@ async def test_live_order_manager_rejects_opening_order_over_notional_cap():
         fees_paid=0.0,
         updated_at=1700000000000,
     )
+    repository.accounts["__exchange__"] = AccountRecord(
+        strategy="__exchange__",
+        initial_equity=100000.0,
+        cash_balance=100000.0,
+        equity=100000.0,
+        realized_pnl=0.0,
+        unrealized_pnl=0.0,
+        daily_pnl=0.0,
+        fees_paid=0.0,
+        updated_at=1700000000000,
+        source="live_exchange",
+        runtime_mode="live",
+    )
+    grant_live_position_ownership(repository)
     risk_events = []
 
     async def on_risk_event(payload):
@@ -2701,9 +2729,9 @@ async def test_live_order_manager_rejects_opening_order_over_notional_cap():
 
     assert order.status == OrderStatus.REJECTED
     assert repository.orders[0].status == "rejected"
-    assert risk_events[0]["reason"] == "Live position ownership is unavailable"
-    assert risk_events[0]["reason_code"] == "live_position_ownership_unavailable"
-    assert risk_events[0]["order_value"] == 0.0
+    assert risk_events[0]["reason"] == "Live order exceeds configured notional cap"
+    assert risk_events[0]["reason_code"] == "live_order_notional_exceeded"
+    assert risk_events[0]["order_value"] == 15000.0
 
 
 @pytest.mark.asyncio
@@ -3734,6 +3762,42 @@ async def test_live_strategy_allows_reduce_when_exchange_position_has_explicit_m
     )
 
     assert order.status == OrderStatus.FILLED
+
+
+@pytest.mark.asyncio
+async def test_live_flip_order_is_not_marked_reduce_only():
+    repository = FakeRepository()
+    repository.accounts["__exchange__"] = AccountRecord(
+        strategy="__exchange__", initial_equity=1000.0, cash_balance=1000.0,
+        equity=1000.0, realized_pnl=0.0, unrealized_pnl=0.0, daily_pnl=0.0,
+        fees_paid=0.0, updated_at=1,
+        source="live_exchange", runtime_mode="live",
+    )
+    repository.positions[("__exchange__", "BTC-USDT-SWAP")] = PositionRecord(
+        strategy="__exchange__", symbol="BTC-USDT-SWAP", side="long", amount=1.0,
+        entry_price=100.0, leverage=1, timestamp=1,
+        source="live_exchange", runtime_mode="live",
+    )
+    repository.owned_positions.add(("alpha", "BTC-USDT-SWAP"))
+    handler = MockHandler()
+    manager = UnifiedOrderManager(
+        router=OrderRouter(backtest=None, live=handler, mode="live"),
+        repository=repository,
+        risk_manager=RiskManager(max_position_pct=2.0),
+        price_provider=lambda _symbol: 100.0,
+        live_safeguards=True,
+        live_market_type="swap",
+        allow_live_open_orders=True,
+        live_max_order_notional=1000.0,
+    )
+
+    order = await manager.submit(
+        "BTC-USDT-SWAP", OrderSide.SELL, OrderType.MARKET, 3.0, strategy_name="alpha"
+    )
+
+    assert order.status == OrderStatus.FILLED
+    assert order.reduce_only is False
+    assert "reduceOnly" not in order.params
 
 
 @pytest.mark.asyncio

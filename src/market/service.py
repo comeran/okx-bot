@@ -83,6 +83,7 @@ class MarketDataService:
     _max_retry_delay_seconds = 8
     _history_page_limit = 300
     _max_backfill_pages = 4
+    _max_subscriber_failures = 3
 
     def __init__(
         self,
@@ -107,6 +108,7 @@ class MarketDataService:
         self._last_bar_timestamps: dict[str, int] = {}
         self._required_bars: dict[str, int] = {}
         self._subscriber_last_bar_timestamps: dict[str, dict[int, int]] = {}
+        self._subscriber_failures: dict[str, dict[int, int]] = {}
         self._health: dict[str, MarketFeedHealth] = {}
         self._health_conditions: dict[str, asyncio.Condition] = {}
         self._health_listeners: dict[int, HealthListener] = {}
@@ -623,6 +625,7 @@ class MarketDataService:
                 parsed_bars,
             )
             parsed_bars.sort(key=lambda bar: bar.timestamp)
+            failed_callbacks: set[int] = set()
             for bar in parsed_bars:
                 if bar.timestamp <= self._last_bar_timestamps.get(key, 0):
                     continue
@@ -635,7 +638,11 @@ class MarketDataService:
                 bar_callback_errors: list[Exception] = []
                 callbacks = list(self._subscriptions.get(key, []))
                 subscriber_state = self._subscriber_last_bar_timestamps.setdefault(key, {})
+                subscriber_failures = self._subscriber_failures.setdefault(key, {})
+                quarantined: list[BarCallback] = []
                 for callback in callbacks:
+                    if id(callback) in failed_callbacks:
+                        continue
                     if not any(
                         existing is callback for existing in self._subscriptions.get(key, [])
                     ):
@@ -648,15 +655,41 @@ class MarketDataService:
                         raise
                     except Exception as exc:
                         bar_callback_errors.append(exc)
+                        failed_callbacks.add(id(callback))
+                        failures = subscriber_failures.get(id(callback), 0) + 1
+                        subscriber_failures[id(callback)] = failures
+                        if failures >= self._max_subscriber_failures:
+                            quarantined.append(callback)
+                            logger.error(
+                                "Quarantining subscriber for %s after %s consecutive "
+                                "delivery failures",
+                                key,
+                                failures,
+                                exc_info=exc,
+                            )
                     else:
+                        subscriber_failures.pop(id(callback), None)
                         subscriber_state[id(callback)] = bar.timestamp
+                for callback in quarantined:
+                    remaining = [
+                        existing
+                        for existing in self._subscriptions.get(key, [])
+                        if existing is not callback
+                    ]
+                    if remaining:
+                        self._subscriptions[key] = remaining
+                    else:
+                        self._subscriptions.pop(key, None)
+                    subscriber_state.pop(id(callback), None)
+                    subscriber_failures.pop(id(callback), None)
                 if bar_callback_errors:
                     callback_errors.extend(bar_callback_errors)
-                    break
-                active_callbacks = self._subscriptions.get(key, [])
-                if not active_callbacks or all(
+                remaining_callbacks = [
+                    callback for callback in callbacks if callback not in quarantined
+                ]
+                if not remaining_callbacks or all(
                     subscriber_state.get(id(callback), 0) >= bar.timestamp
-                    for callback in active_callbacks
+                    for callback in remaining_callbacks
                 ):
                     self._last_bar_timestamps[key] = bar.timestamp
                     self._append_bar_once(key, bar)

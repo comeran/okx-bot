@@ -388,7 +388,14 @@ class StrategyRuntimeState:
         return lock
 
     def list_strategies(self) -> list[dict[str, str]]:
-        return [{"name": name, "status": status} for name, status in self.strategy_status.items()]
+        strategies = []
+        for name, status in self.strategy_status.items():
+            entry = {"name": name, "status": status}
+            error = self.strategy_errors.get(name)
+            if error is not None:
+                entry["error"] = error
+            strategies.append(entry)
+        return strategies
 
     def strategy_exists(self, name: str) -> bool:
         return name in self.strategy_status
@@ -401,7 +408,6 @@ def create_router(
     router = APIRouter()
     runtime = runtime or StrategyRuntimeState()
     config_repository = Repository()
-    risk_event_notifier = create_risk_event_notifier()
     market_data_service: MarketDataService | None = None
 
     def get_market_data_service() -> MarketDataService:
@@ -628,7 +634,9 @@ def create_router(
                     "type": "orders",
                     "scope": "strategy",
                     "strategy": strategy,
-                    "orders": trading.serialize_records(strategy_orders),
+                    "orders": [
+                        trading.serialize_order_record(order) for order in strategy_orders
+                    ],
                 }
             )
         account = scoped_account(repository, strategy, runtime_mode)
@@ -689,10 +697,11 @@ def create_router(
                 save_risk_event(payload)
         if broadcast is not None:
             await broadcast(payload)
-        if risk_event_notifier is None:
+        notifier = create_risk_event_notifier()
+        if notifier is None:
             return
         try:
-            await risk_event_notifier.send_risk_event(payload)
+            await notifier.send_risk_event(payload)
         except Exception:
             logger.warning("Failed to send Telegram risk notification", exc_info=True)
 
@@ -907,13 +916,17 @@ def create_router(
         await broadcast(payload)
 
     def list_persisted_strategy_statuses() -> list[dict[str, str]]:
-        return [
-            {
+        statuses = []
+        for config in config_repository.get_strategy_configs():
+            entry = {
                 "name": config.name,
                 "status": status_for_strategy(config.name),
             }
-            for config in config_repository.get_strategy_configs()
-        ]
+            error = runtime.strategy_errors.get(config.name)
+            if error is not None:
+                entry["error"] = error
+            statuses.append(entry)
+        return statuses
 
     @router.get("")
     async def list_strategies() -> list[dict[str, str]]:

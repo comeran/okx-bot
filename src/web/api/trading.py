@@ -296,7 +296,17 @@ def serialize_order_record(record: OrderRecord) -> dict[str, Any]:
 
 def serialize_trade_record(record: object) -> dict[str, Any]:
     values = serialize_record(record)
-    return {field: values[field] for field in TRADE_PUBLIC_FIELDS if field in values}
+    payload = {field: values[field] for field in TRADE_PUBLIC_FIELDS if field in values}
+    contracts = getattr(record, "contracts", None)
+    contract_size = getattr(record, "contract_size", None)
+    if getattr(record, "is_inverse", False) and contracts is not None and contract_size:
+        payload["notional_value"] = contracts * contract_size
+    else:
+        quantity = getattr(record, "quantity", None)
+        price = getattr(record, "price", None)
+        if quantity is not None and price is not None:
+            payload["notional_value"] = quantity * price
+    return payload
 
 
 def serialize_records(records: list[object]) -> list[dict[str, Any]]:

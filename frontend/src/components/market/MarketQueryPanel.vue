@@ -3,7 +3,13 @@ import { computed } from 'vue';
 import { useI18n } from 'vue-i18n';
 
 import SectionCard from '@/components/ui/SectionCard.vue';
-import { fallbackSymbolsByType, formatMarketDateTime, limitOptions, marketTypeOptions, timeframeOptions } from '@/utils/market';
+import {
+  fallbackSymbolsByType,
+  formatMarketDateTime,
+  limitOptions as defaultLimitOptions,
+  marketTypeOptions as defaultMarketTypeOptions,
+  timeframeOptions as defaultTimeframeOptions,
+} from '@/utils/market';
 
 interface Props {
   marketType: string;
@@ -28,9 +34,9 @@ interface Props {
 }
 
 const props = withDefaults(defineProps<Props>(), {
-  marketTypeOptions: () => marketTypeOptions,
-  timeframeOptions: () => timeframeOptions,
-  limitOptions: () => limitOptions,
+  marketTypeOptions: () => defaultMarketTypeOptions,
+  timeframeOptions: () => defaultTimeframeOptions,
+  limitOptions: () => defaultLimitOptions,
   loading: false,
   tickersLoading: false,
 });
