@@ -72,7 +72,7 @@ async def test_full_backtest_flow_matches_ma_cross_orders() -> None:
     report = await engine.run(strategy, bars)
 
     assert report.initial_capital == 100000
-    assert report.total_trades == 2
+    assert report.total_trades == 1
     assert report.final_equity > 0
     assert len(report.equity_curve) == len(bars) + 1
 

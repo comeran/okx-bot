@@ -1,13 +1,38 @@
 from __future__ import annotations
 
+import os
+import re
+import secrets
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from src.data.repository import Repository
 from src.web.api import backtest, market, ops, settings, strategies, trading
 from src.web.ws import WebSocketManager
 
 ws_manager = WebSocketManager()
+
+API_TOKEN_ENV = "OKX_BOT_API_TOKEN"
+LOCAL_ORIGIN_PATTERN = re.compile(r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$")
+
+
+def _is_local_origin(origin: str) -> bool:
+    return bool(LOCAL_ORIGIN_PATTERN.match(origin.rstrip("/")))
+
+
+def _supplied_api_token(headers: object, query_token: str | None = None) -> str:
+    if query_token:
+        return query_token
+    supplied = headers.get("x-api-token", "")
+    if supplied:
+        return supplied
+    authorization = headers.get("authorization", "")
+    if authorization.lower().startswith("bearer "):
+        return authorization[7:].strip()
+    return ""
+
 
 
 def runtime_snapshot(strategy_runtime: strategies.StrategyRuntimeState) -> dict[str, object]:
@@ -67,11 +92,26 @@ def create_app() -> FastAPI:
     app = FastAPI(title="OKX Bot API", version="0.1.0")
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
         allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.middleware("http")
+    async def require_api_token(request, call_next):  # type: ignore[no-untyped-def]
+        token = os.environ.get(API_TOKEN_ENV, "")
+        path = request.url.path
+        if (
+            token
+            and request.method != "OPTIONS"
+            and path.startswith("/api")
+            and path != "/api/health"
+        ):
+            supplied = _supplied_api_token(request.headers)
+            if not secrets.compare_digest(supplied, token):
+                return JSONResponse({"detail": "unauthorized"}, status_code=401)
+        return await call_next(request)
 
     @app.get("/api/health")
     async def health() -> dict[str, str]:
@@ -79,6 +119,16 @@ def create_app() -> FastAPI:
 
     @app.websocket("/ws")
     async def websocket_endpoint(ws: WebSocket) -> None:
+        origin = ws.headers.get("origin", "")
+        if origin and not _is_local_origin(origin):
+            await ws.close(code=1008, reason="origin not allowed")
+            return
+        token = os.environ.get(API_TOKEN_ENV, "")
+        if token:
+            supplied = _supplied_api_token(ws.headers, ws.query_params.get("token"))
+            if not secrets.compare_digest(supplied, token):
+                await ws.close(code=1008, reason="unauthorized")
+                return
         requested_scope = ws.query_params.get("scope")
         requested_strategy = ws.query_params.get("strategy")
         if requested_scope not in {"exchange", "strategy"}:

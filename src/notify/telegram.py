@@ -14,11 +14,16 @@ class TelegramNotifier:
         self.base_url = f"https://api.telegram.org/bot{bot_token}"
 
     async def send(self, text: str) -> None:
-        async with httpx.AsyncClient() as client:
-            await client.post(
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
                 f"{self.base_url}/sendMessage",
                 json={"chat_id": self.chat_id, "text": text, "parse_mode": "HTML"},
             )
+            response.raise_for_status()
+            payload = response.json()
+            if not payload.get("ok"):
+                description = payload.get("description", payload)
+                raise RuntimeError(f"Telegram rejected message: {description}")
 
     def format_position_opened(
         self,

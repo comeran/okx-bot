@@ -26,6 +26,8 @@ _ACCOUNT_BALANCE_FIELDS = (
     "available_balance",
     "equity",
     "fees_paid",
+    "day_start_equity",
+    "peak_equity",
 )
 _ACCOUNT_PNL_FIELDS = ("realized_pnl", "unrealized_pnl", "daily_pnl")
 _ASSET_BALANCE_FIELDS = ("cash_bal", "eq", "eq_utd", "avail_bal")
@@ -106,6 +108,9 @@ class AccountRecord(SQLModel, table=True):
     unrealized_pnl: float
     daily_pnl: float
     fees_paid: float
+    day_start_equity: float | None = None
+    day_start_at: int | None = None
+    peak_equity: float | None = None
     updated_at: int
     assets: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON))
     # Legacy snapshots remain queryable for audit while only the latest active
@@ -124,6 +129,7 @@ class AccountRecord(SQLModel, table=True):
         for field_name in _ACCOUNT_PNL_FIELDS:
             setattr(self, field_name, _finite_or_zero(getattr(self, field_name)))
         self.updated_at = _safe_timestamp(self.updated_at)
+        self.day_start_at = _safe_timestamp(self.day_start_at)
         self.assets = immutable_assets(normalize_account_assets(self.assets))
         self.active = True if self.active is None else bool(self.active)
         self.stale_at = None if self.stale_at is None else _safe_timestamp(self.stale_at)

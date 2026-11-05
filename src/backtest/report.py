@@ -23,21 +23,26 @@ def generate_report(
     initial_capital: float,
     trades: list[dict[str, Any]],
     equity_curve: list[float],
+    round_trip_pnls: list[float] | None = None,
+    bars_per_year: float | None = None,
 ) -> BacktestReport:
     final_equity = equity_curve[-1] if equity_curve else initial_capital
     total_return = (final_equity - initial_capital) / initial_capital if initial_capital else 0
 
-    pnl_values = [float(trade.get("pnl", 0)) for trade in trades]
+    if round_trip_pnls is not None:
+        pnl_values = [float(pnl) for pnl in round_trip_pnls]
+    else:
+        pnl_values = [float(trade.get("pnl", 0)) for trade in trades]
     wins = [pnl for pnl in pnl_values if pnl > 0]
     losses = [pnl for pnl in pnl_values if pnl < 0]
-    total_trades = len(trades)
+    total_trades = len(pnl_values)
     win_rate = len(wins) / total_trades if total_trades else 0
     gross_profit = sum(wins)
     gross_loss = abs(sum(losses))
     profit_factor = gross_profit / gross_loss if gross_loss else 0
 
     max_drawdown = _max_drawdown(equity_curve)
-    sharpe_ratio = _sharpe_ratio(equity_curve)
+    sharpe_ratio = _sharpe_ratio(equity_curve, bars_per_year)
 
     return BacktestReport(
         initial_capital=initial_capital,
@@ -65,7 +70,7 @@ def _max_drawdown(equity_curve: list[float]) -> float:
     return max_drawdown
 
 
-def _sharpe_ratio(equity_curve: list[float]) -> float:
+def _sharpe_ratio(equity_curve: list[float], bars_per_year: float | None = None) -> float:
     returns = [
         (current - previous) / previous
         for previous, current in zip(equity_curve, equity_curve[1:], strict=False)
@@ -78,4 +83,5 @@ def _sharpe_ratio(equity_curve: list[float]) -> float:
     if volatility == 0:
         return 0
 
-    return mean(returns) / volatility * sqrt(252)
+    annualization = sqrt(bars_per_year) if bars_per_year and bars_per_year > 0 else sqrt(252)
+    return mean(returns) / volatility * annualization

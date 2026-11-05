@@ -306,11 +306,13 @@ class _AccountingTransaction:
         *,
         source: str | None = None,
         runtime_mode: str | None = None,
+        include_inactive: bool = False,
     ) -> AccountRecord | None:
-        statement = select(AccountRecord).where(
-            AccountRecord.strategy == strategy,
-            or_(AccountRecord.active.is_(True), AccountRecord.active.is_(None)),
-        )
+        statement = select(AccountRecord).where(AccountRecord.strategy == strategy)
+        if not include_inactive:
+            statement = statement.where(
+                or_(AccountRecord.active.is_(True), AccountRecord.active.is_(None))
+            )
         if source is not None:
             statement = statement.where(AccountRecord.source == source)
         if runtime_mode is not None:
@@ -921,6 +923,8 @@ def _upsert_trade_in_session(session: Session, trade: TradeRecord) -> TradeRecor
 
 
 class Repository:
+    _MIGRATED_SQLITE_DATABASES: set[str] = set()
+
     def __init__(self, engine: Engine | None = None, db_path: str = "data/bot.db"):
         if engine is None:
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
@@ -928,10 +932,19 @@ class Repository:
             self._enable_wal(engine)
         self._enable_sqlite_write_lock(engine)
         SQLModel.metadata.create_all(engine)
-        self._migrate_sqlite_schema(engine)
-        self._ensure_sqlite_order_external_id_indexes(engine)
-        self._ensure_sqlite_current_state_indexes(engine)
-        self._ensure_live_submission_lease_table(engine)
+        migration_key = None
+        if engine.dialect.name == "sqlite" and engine.url.database != ":memory:":
+            migration_key = str(engine.url)
+        if (
+            migration_key is None
+            or migration_key not in Repository._MIGRATED_SQLITE_DATABASES
+        ):
+            self._migrate_sqlite_schema(engine)
+            self._ensure_sqlite_order_external_id_indexes(engine)
+            self._ensure_sqlite_current_state_indexes(engine)
+            self._ensure_live_submission_lease_table(engine)
+            if migration_key is not None:
+                Repository._MIGRATED_SQLITE_DATABASES.add(migration_key)
         self.engine = engine
 
     def atomic_accounting(self, callback: Callable[[_AccountingTransaction], object]) -> object:
@@ -980,24 +993,28 @@ class Repository:
         expires_at = now + max(1.0, lease_seconds)
         with self.engine.connect() as connection:
             if self.engine.dialect.name == "sqlite":
-                connection.exec_driver_sql(
-                    f"PRAGMA busy_timeout={max(1, int(timeout * 1000))}"
+                # Set the busy timeout on the raw DBAPI connection: executing a
+                # PRAGMA through SQLAlchemy would autobegin the transaction and
+                # the engine-level "begin" listener would then issue its own
+                # BEGIN IMMEDIATE, colliding with the explicit one below.
+                cursor = connection.connection.cursor()
+                try:
+                    cursor.execute(f"PRAGMA busy_timeout={max(1, int(timeout * 1000))}")
+                finally:
+                    cursor.close()
+            with connection.begin():
+                row = connection.execute(text(
+                    "SELECT owner, expires_at FROM live_submission_lease WHERE name = 'live'"
+                )).first()
+                if row is not None and row[1] > now and row[0] != owner:
+                    return False
+                statement = text(
+                    "INSERT INTO live_submission_lease(name, owner, expires_at) "
+                    "VALUES ('live', :owner, :expires_at) "
+                    "ON CONFLICT(name) DO UPDATE SET owner = excluded.owner, "
+                    "expires_at = excluded.expires_at"
                 )
-                connection.exec_driver_sql("BEGIN IMMEDIATE")
-            row = connection.execute(text(
-                "SELECT owner, expires_at FROM live_submission_lease WHERE name = 'live'"
-            )).first()
-            if row is not None and row[1] > now and row[0] != owner:
-                connection.rollback()
-                return False
-            statement = text(
-                "INSERT INTO live_submission_lease(name, owner, expires_at) "
-                "VALUES ('live', :owner, :expires_at) "
-                "ON CONFLICT(name) DO UPDATE SET owner = excluded.owner, "
-                "expires_at = excluded.expires_at"
-            )
-            connection.execute(statement, {"owner": owner, "expires_at": expires_at})
-            connection.commit()
+                connection.execute(statement, {"owner": owner, "expires_at": expires_at})
             return True
 
     def release_live_submission_lease(self, owner: str) -> None:
@@ -2227,6 +2244,15 @@ class Repository:
                     ),
                     "active": "ALTER TABLE accountrecord ADD COLUMN active BOOLEAN DEFAULT 1",
                     "stale_at": "ALTER TABLE accountrecord ADD COLUMN stale_at INTEGER",
+                    "day_start_equity": (
+                        "ALTER TABLE accountrecord ADD COLUMN day_start_equity FLOAT DEFAULT 0.0"
+                    ),
+                    "day_start_at": (
+                        "ALTER TABLE accountrecord ADD COLUMN day_start_at INTEGER DEFAULT 0"
+                    ),
+                    "peak_equity": (
+                        "ALTER TABLE accountrecord ADD COLUMN peak_equity FLOAT DEFAULT 0.0"
+                    ),
                 },
                 "positionrecord": {
                     "mark_price": "ALTER TABLE positionrecord ADD COLUMN mark_price FLOAT",

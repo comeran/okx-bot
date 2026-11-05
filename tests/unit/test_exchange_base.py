@@ -233,6 +233,18 @@ async def test_okx_base_adapter_fetch_spot_ohlcv_with_since_uses_raw_history_can
 
 
 @pytest.mark.asyncio
+async def test_okx_base_adapter_clamps_spot_ohlcv_limit_and_rejects_unknown_timeframe():
+    adapter = OKXBaseAdapter("", "", "", "spot")
+    fake = FakeOKX.instances[0]
+    fake.raw_candle_response = {"data": []}
+
+    await adapter.fetch_ohlcv("BTC-USDT", "1m", limit=1000)
+
+    assert fake.public_candles_calls[-1]["limit"] == 300
+    with pytest.raises(ValueError, match="timeframe"):
+        await adapter.fetch_ohlcv("BTC-USDT", "2h")
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("column_count", [7, 9])
 async def test_okx_base_adapter_accepts_ohlcv_rows_with_extra_columns(column_count):
@@ -2101,9 +2113,12 @@ async def test_okx_base_adapter_fetch_position_snapshots_uses_inst_id_and_consis
         }
     ]
 
-    snapshots = await adapter.fetch_position_snapshots(["BTC-USDT-SWAP"])
+    result = await adapter.fetch_position_snapshots(["BTC-USDT-SWAP"])
+    snapshots = result.positions
 
     assert fake.fetch_positions_calls == [["BTC/USDT:USDT"]]
+    assert result.complete_snapshot is True
+    assert result.snapshot_timestamp == 1700000000000
     assert len(snapshots) == 1
     assert snapshots[0].symbol == "BTC-USDT-SWAP"
     assert snapshots[0].side == PositionSide.LONG
@@ -2141,7 +2156,7 @@ async def test_okx_base_adapter_maps_net_positions_from_signed_amount_and_preser
         },
     ]
 
-    snapshots = await adapter.fetch_position_snapshots()
+    snapshots = (await adapter.fetch_position_snapshots()).positions
 
     assert fake.fetch_positions_calls == [None]
     assert [(snapshot.symbol, snapshot.side, snapshot.amount) for snapshot in snapshots] == [
@@ -3056,7 +3071,7 @@ async def test_okx_base_adapter_accepts_valid_empty_recent_trade_response():
     assert await adapter.fetch_recent_trade_snapshots() == []
 
 
-@pytest.mark.parametrize("fee", [{"cost": "nan"}, {"cost": "inf"}, {"cost": "bad"}, {"cost": -1.0}])
+@pytest.mark.parametrize("fee", [{"cost": "nan"}, {"cost": "inf"}, {"cost": "bad"}])
 def test_okx_base_adapter_rejects_invalid_trade_fee_costs(fee):
     adapter = OKXBaseAdapter("", "", "", "swap")
 
@@ -3070,6 +3085,23 @@ def test_okx_base_adapter_rejects_invalid_trade_fee_costs(fee):
             "price": "100",
             "fee": fee,
         })
+
+
+def test_okx_base_adapter_treats_negative_trade_fee_as_rebate():
+    adapter = OKXBaseAdapter("", "", "", "swap")
+
+    snapshot = adapter._map_trade({
+        "id": "trade-rebate",
+        "order": "order-1",
+        "symbol": "BTC-USDT-SWAP",
+        "side": "buy",
+        "amount": "1",
+        "price": "100",
+        "fee": {"cost": -0.5},
+    })
+
+    assert snapshot is not None
+    assert snapshot.fee == 0.0
 
 
 @pytest.mark.parametrize("fee", ["invalid-fee", [], 1, True])
@@ -3142,6 +3174,63 @@ def test_okx_base_adapter_safe_int_stays_within_sqlite_signed_range(value, expec
     adapter = OKXBaseAdapter("", "", "", "swap")
 
     assert adapter._safe_int(value) == expected
+
+
+@pytest.mark.asyncio
+async def test_okx_base_adapter_accepts_empty_balance_fields_with_avail_eq_fallback():
+    adapter = OKXBaseAdapter("api-key", "secret", "passphrase", "swap")
+    fake = FakeOKX.instances[0]
+    fake.balance_response = {
+        "USDT": {"total": "560", "free": "525", "used": "35"},
+        "info": {
+            "data": [
+                {
+                    "totalEq": "660.5",
+                    "availEq": "520",
+                    "upl": "7.75",
+                    "details": [
+                        {
+                            "ccy": "USDT",
+                            "eq": "565.5",
+                            "eqUtd": "560",
+                            "cashBal": "550",
+                            "availBal": "",
+                            "availEq": "520",
+                            "upl": "5.5",
+                            "realizedPnl": "1.25",
+                            "uTime": "1700000000000",
+                        }
+                    ],
+                }
+            ]
+        },
+    }
+
+    snapshot = await adapter.fetch_account_snapshot()
+
+    assert snapshot.available_balance == 520.0
+    assert snapshot.assets[0].avail_bal == 520.0
+
+
+def test_okx_base_adapter_accepts_market_trigger_sentinel_price():
+    adapter = OKXBaseAdapter("", "", "", "swap")
+
+    snapshot = adapter._map_order(
+        {
+            "id": "algo-1",
+            "symbol": "BTC-USDT-SWAP",
+            "side": "sell",
+            "type": "trigger",
+            "amount": "1.0",
+            "filled": "0",
+            "price": "-1",
+            "status": "open",
+            "timestamp": "1700000000000",
+        }
+    )
+
+    assert snapshot.type == OrderType.MARKET
+    assert snapshot.price == 0.0
 
 
 @pytest.mark.parametrize("value", ["nan", "inf", "-1"])
@@ -3807,7 +3896,9 @@ async def test_okx_base_adapter_rejects_position_response_malformed_data():
             await adapter.fetch_position_snapshots()
 
     fake.positions_response = []
-    assert await adapter.fetch_position_snapshots() == []
+    result = await adapter.fetch_position_snapshots()
+    assert result.positions == []
+    assert result.complete_snapshot is True
 
 
 @pytest.mark.parametrize(

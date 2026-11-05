@@ -25,6 +25,7 @@ from src.core.types import (
     ExchangeTradeSnapshot,
     OrderSide,
     OrderStatus,
+    daily_pnl_state,
     execution_type_family,
     has_trusted_account_snapshot_provenance,
     stable_blank_trade_fingerprint,
@@ -499,6 +500,20 @@ def _persist_private_state(
             timestamp_ms,
             target_symbols,
             unmatched_exchange_snapshot_ids,
+            trades_available=True,
+        ))
+    else:
+        divergences.extend(_find_divergences(
+            local_orders,
+            exchange_orders,
+            [],
+            [],
+            local_by_exchange_id,
+            local_by_client_id,
+            timestamp_ms,
+            target_symbols,
+            unmatched_exchange_snapshot_ids,
+            trades_available=False,
         ))
     high_risk_divergences = [
         divergence for divergence in divergences if divergence.get("severity") == "high"
@@ -537,7 +552,20 @@ def _persist_private_state(
 
     account_upserted = 0
     if has_trusted_account_snapshot_provenance(account):
-        repository.upsert_account(_account_record(account))
+        get_account = getattr(repository, "get_account", None)
+        try:
+            existing_account = (
+                get_account(
+                    EXCHANGE_STRATEGY,
+                    source="live_exchange",
+                    runtime_mode="live",
+                )
+                if callable(get_account)
+                else None
+            )
+        except TypeError:
+            existing_account = get_account(EXCHANGE_STRATEGY) if callable(get_account) else None
+        repository.upsert_account(_account_record(account, existing_account))
         account_upserted = 1
     else:
         get_account = getattr(repository, "get_account", None)
@@ -1481,6 +1509,7 @@ def _find_divergences(
     timestamp_ms: Callable[[], int],
     target_symbols: list[str] | None = None,
     unmatched_exchange_snapshot_ids: set[int] | None = None,
+    trades_available: bool = True,
 ) -> list[dict[str, object]]:
     divergences: list[dict[str, object]] = []
     seen: set[str] = set()
@@ -1490,7 +1519,7 @@ def _find_divergences(
         else [order for order in local_orders if _in_scope(order.symbol, target_symbols)]
     )
     traded_amount_by_local_order: dict[int, float] = {}
-    unique_persisted_trades = _unique_trade_records(persisted_trades)
+    unique_persisted_trades = _unique_trade_records(persisted_trades) if trades_available else []
     for trade in unique_persisted_trades:
         matching_orders = [
             order for order in scoped_local_orders
@@ -1503,7 +1532,7 @@ def _find_divergences(
                 + _trade_order_amount(trade)
             )
 
-    for order in scoped_local_orders:
+    for order in scoped_local_orders if trades_available else []:
         traded_amount = traded_amount_by_local_order.get(id(order), 0.0)
         if traded_amount > order.amount:
             _append_divergence(
@@ -1587,7 +1616,7 @@ def _find_divergences(
             client_order_id=snapshot.client_order_id,
         )
 
-    for snapshot in exchange_trades:
+    for snapshot in exchange_trades if trades_available else []:
         if _match_trade(snapshot, local_by_exchange_id, local_by_client_id) is not None:
             continue
         _append_divergence(
@@ -1888,20 +1917,44 @@ def _execution_identity_matches(
     return True
 
 
-def _account_record(snapshot: AccountSnapshot) -> AccountRecord:
+def _account_record(
+    snapshot: AccountSnapshot,
+    existing: AccountRecord | None = None,
+) -> AccountRecord:
+    timestamp = snapshot.updated_at or snapshot.timestamp
+    day_start_equity, day_start_at, daily_pnl = daily_pnl_state(
+        (existing.day_start_equity or 0.0) if existing is not None else 0.0,
+        (existing.day_start_at or 0) if existing is not None else 0,
+        snapshot.equity,
+        timestamp,
+        previous_equity=existing.equity if existing is not None else 0.0,
+        previous_daily_pnl=existing.daily_pnl if existing is not None else 0.0,
+        previous_updated_at=existing.updated_at if existing is not None else 0,
+    )
+    peak_equity = max(
+        (existing.peak_equity or 0.0) if existing is not None else 0.0,
+        snapshot.equity,
+    )
     return AccountRecord(
         strategy=EXCHANGE_STRATEGY,
         source="live_exchange",
         runtime_mode="live",
-        initial_equity=snapshot.initial_equity,
+        initial_equity=(
+            existing.initial_equity
+            if existing is not None and existing.initial_equity > 0.0
+            else snapshot.initial_equity
+        ),
         cash_balance=snapshot.cash_balance,
         available_balance=snapshot.available_balance,
         equity=snapshot.equity,
         realized_pnl=snapshot.realized_pnl,
         unrealized_pnl=snapshot.unrealized_pnl,
-        daily_pnl=snapshot.daily_pnl,
-        fees_paid=snapshot.fees_paid,
-        updated_at=snapshot.updated_at or snapshot.timestamp,
+        daily_pnl=daily_pnl,
+        fees_paid=existing.fees_paid if existing is not None else snapshot.fees_paid,
+        day_start_equity=day_start_equity,
+        day_start_at=day_start_at,
+        peak_equity=peak_equity,
+        updated_at=timestamp,
         assets=[asdict(asset) for asset in snapshot.assets],
     )
 

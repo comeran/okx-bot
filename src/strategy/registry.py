@@ -163,6 +163,16 @@ class StrategyRegistry:
             "name",
             issues,
         )
+        if normalized_name and (
+            "/" in normalized_name or "\\" in normalized_name or ".." in normalized_name
+        ):
+            issues.append(
+                StrategyValidationIssue(
+                    path="name",
+                    code="invalid_name",
+                    message="Strategy name must not contain path separators",
+                )
+            )
         if (
             normalized_name.startswith("__")
             or normalized_name in _RESERVED_STRATEGY_NAMES

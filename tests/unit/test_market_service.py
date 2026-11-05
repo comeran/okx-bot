@@ -2878,3 +2878,66 @@ async def test_wait_until_ready_can_require_successful_subscriber_delivery():
             await service.wait_until_ready(
                 "BTC-USDT-SWAP", "1m", timeout=0.001, require_subscribers=True
             )
+
+
+async def test_price_buffer_is_visible_inside_subscriber_callback():
+    with patch("src.market.service.create_okx_client") as ccxt:
+        exchange = AsyncMock()
+        exchange.watch_ohlcv.return_value = [
+            [1700000000000, 50000, 51000, 49000, 50500, 100.5],
+            [1700000060000, 50500, 51500, 50000, 51200, 80.25],
+        ]
+        ccxt.return_value = exchange
+        seen: list[int] = []
+
+        async def callback(bar: Bar) -> None:
+            seen.append(service.latest_price("BTC-USDT-SWAP", "1m"))
+
+        service = MarketDataService("api-key", "secret", "passphrase")
+        service._current_time = lambda: 1700000120
+        service.subscribe("BTC-USDT-SWAP", "1m", callback)
+
+        await service._poll_once("BTC-USDT-SWAP", "1m")
+
+    assert seen == [50500.0, 51200.0]
+
+
+async def test_poll_once_requests_full_page_and_backfills_warmup_history():
+    class PagedExchange:
+        def __init__(self) -> None:
+            self.calls: list[tuple[int | None, int | None]] = []
+
+        async def watch_ohlcv(self, symbol: str, timeframe: str):
+            raise NotSupported("watch unavailable")
+
+        async def fetch_ohlcv(
+            self,
+            symbol: str,
+            timeframe: str,
+            since: int | None = None,
+            limit: int | None = None,
+        ):
+            self.calls.append((since, limit))
+            if since is None:
+                return [[900000, 100, 101, 99, 100, 1]]
+            return [[840000, 100, 101, 99, 100, 1]]
+
+        async def close(self) -> None:
+            pass
+
+    exchange = PagedExchange()
+    with patch("src.market.service.create_okx_client", return_value=exchange):
+        service = MarketDataService("api-key", "secret", "passphrase")
+        service._current_time = lambda: 1000
+        service._required_bars["BTC-USDT-SWAP:1m"] = 3
+        callback = AsyncMock()
+        service.subscribe("BTC-USDT-SWAP", "1m", callback)
+
+        await service._poll_once("BTC-USDT-SWAP", "1m")
+
+    assert exchange.calls[0] == (None, 300)
+    assert [bar.timestamp for bar in service.get_recent_bars("BTC-USDT-SWAP", "1m")] == [
+        840000,
+        900000,
+    ]
+    assert [call.args[0].timestamp for call in callback.await_args_list] == [840000, 900000]

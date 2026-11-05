@@ -147,7 +147,7 @@ def create_risk_manager(live: bool = False) -> RiskManager:
         max_daily_loss_pct=risk.max_daily_loss_pct,
         max_drawdown_pct=risk.max_drawdown_pct,
         enforce_daily_loss=live,
-        enforce_drawdown=False,
+        enforce_drawdown=live,
     )
 
 
@@ -457,7 +457,11 @@ def create_router(
         def latest_price(symbol: str) -> float | None:
             if timeframe is None:
                 return None
-            bars = get_market_data_service().get_recent_bars(symbol, timeframe, count=1)
+            service = get_market_data_service()
+            get_latest_price = getattr(service, "latest_price", None)
+            if callable(get_latest_price):
+                return get_latest_price(symbol, timeframe)
+            bars = service.get_recent_bars(symbol, timeframe, count=1)
             if not bars:
                 return None
             return bars[-1].close

@@ -108,3 +108,41 @@ def test_strategy_helpers_use_persisted_runtime_settings(monkeypatch, tmp_path):
     settings = strategy_api.load_runtime_settings()
     assert settings.risk.allow_live_open_orders is True
     assert settings.risk.live_max_order_notional == 1234.0
+
+
+def test_save_runtime_settings_is_private_and_atomic(monkeypatch, tmp_path):
+    import stat
+
+    from src.core.runtime_settings import save_runtime_settings
+
+    settings_path = tmp_path / "settings.local.yaml"
+    monkeypatch.setenv("OKX_BOT_SETTINGS_PATH", str(settings_path))
+
+    save_runtime_settings(AppConfig())
+
+    assert stat.S_IMODE(settings_path.stat().st_mode) == 0o600
+    assert not (tmp_path / ".settings.local.yaml.tmp").exists()
+
+
+def test_save_runtime_settings_does_not_copy_env_secrets(monkeypatch, tmp_path):
+    from src.core.runtime_settings import save_runtime_settings
+
+    settings_path = tmp_path / "settings.local.yaml"
+    monkeypatch.setenv("OKX_BOT_SETTINGS_PATH", str(settings_path))
+    monkeypatch.setenv("OKX_API_KEY", "env-api-key")
+    monkeypatch.setenv("OKX_SECRET", "env-secret")
+    monkeypatch.setenv("OKX_PASSPHRASE", "env-passphrase")
+    monkeypatch.setenv("TG_BOT_TOKEN", "env-telegram-token")
+    config = AppConfig()
+    config.exchange.api_key = "env-api-key"
+    config.exchange.secret = "env-secret"
+    config.exchange.passphrase = "env-passphrase"
+    config.notify.telegram_bot_token = "env-telegram-token"
+
+    save_runtime_settings(config)
+
+    saved = yaml.safe_load(settings_path.read_text(encoding="utf-8"))
+    assert saved["exchange"]["api_key"] == ""
+    assert saved["exchange"]["secret"] == ""
+    assert saved["exchange"]["passphrase"] == ""
+    assert saved["notify"]["telegram_bot_token"] == ""

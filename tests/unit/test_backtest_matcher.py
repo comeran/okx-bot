@@ -74,3 +74,16 @@ def test_stop_order_not_triggered(bar):
     )
     result = matcher.match(order, bar)
     assert result.status == OrderStatus.PENDING
+
+
+def test_stop_order_gapped_fill_uses_worse_open_price():
+    matcher = OrderMatcher(slippage=0.0, fee_rate=0.0)
+    gapped = Bar(timestamp=1000, open=48000, high=48200, low=47500, close=47600, volume=100)
+    order = Order(
+        id="9", symbol="BTC-USDT", side=OrderSide.SELL, type=OrderType.STOP, amount=0.1, price=49000
+    )
+
+    result = matcher.match(order, gapped)
+
+    assert result.status == OrderStatus.FILLED
+    assert result.fill_price == 48000

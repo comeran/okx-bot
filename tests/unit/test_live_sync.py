@@ -10,6 +10,7 @@ from src.exchange.errors import MalformedProviderData
 from src.exchange.live_sync import (
     LiveStateSyncService,
     PositionSnapshotResult,
+    UntrustedLiveStateError,
     refresh_okx_live_state,
 )
 
@@ -914,7 +915,7 @@ async def test_live_state_sync_archives_stale_synced_positions_for_requested_sym
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("refresh_timestamp", [1699999999999, 0])
+@pytest.mark.parametrize("refresh_timestamp", [1699999999999])
 async def test_live_state_sync_preserves_newer_persisted_position_on_stale_or_invalid_empty_refresh(
     refresh_timestamp,
 ):
@@ -1198,7 +1199,46 @@ async def test_live_state_sync_initializes_zero_baseline_from_first_nonzero_equi
 
 
 @pytest.mark.asyncio
-async def test_live_state_sync_preserves_existing_daily_pnl_and_fees():
+async def test_live_state_sync_rolls_daily_pnl_at_utc_day_boundary():
+    adapter = FakeAdapter()
+    adapter.account = AccountSnapshot(
+        currency="USDT",
+        equity=880.0,
+        cash_balance=880.0,
+        available_balance=880.0,
+        updated_at=1700006400000,
+    )
+    repository = FakeRepository()
+    repository.accounts["__exchange__"] = AccountRecord(
+        strategy="__exchange__",
+        initial_equity=1000.0,
+        cash_balance=900.0,
+        equity=900.0,
+        realized_pnl=0.0,
+        unrealized_pnl=0.0,
+        daily_pnl=-100.0,
+        fees_paid=3.5,
+        day_start_equity=1000.0,
+        day_start_at=1700000000000,
+        peak_equity=1000.0,
+        updated_at=1700000000000,
+        source="live_exchange",
+        runtime_mode="live",
+    )
+
+    await LiveStateSyncService(
+        adapter, repository, timestamp_ms=lambda: 1700006400000
+    ).refresh("__exchange__", symbols=["BTC-USDT-SWAP"])
+
+    account = repository.accounts["__exchange__"]
+    assert account.day_start_equity == 880.0
+    assert account.day_start_at == 1700006400000
+    assert account.daily_pnl == 0.0
+    assert account.peak_equity == 1000.0
+
+
+@pytest.mark.asyncio
+async def test_live_state_sync_preserves_existing_daily_pnl_basis_and_fees():
     adapter = FakeAdapter()
     repository = FakeRepository()
     repository.accounts["__exchange__"] = AccountRecord(
@@ -1220,12 +1260,13 @@ async def test_live_state_sync_preserves_existing_daily_pnl_and_fees():
 
     account = repository.accounts["__exchange__"]
     assert account.initial_equity == 900.0
-    assert account.daily_pnl == -12.0
+    assert account.daily_pnl == 88.0
+    assert account.day_start_equity == 912.0
     assert account.fees_paid == 3.5
 
 
 @pytest.mark.asyncio
-async def test_live_state_sync_does_not_fabricate_account_timestamp_when_provider_time_is_unknown():
+async def test_live_state_sync_rejects_unknown_account_timestamp_with_existing_row():
     adapter = FakeAdapter()
     adapter.account = AccountSnapshot(
         equity=1200.0,
@@ -1248,9 +1289,10 @@ async def test_live_state_sync_does_not_fabricate_account_timestamp_when_provide
         updated_at=1700000000000,
     )
 
-    await LiveStateSyncService(
-        adapter, repository, timestamp_ms=lambda: 1700000009999
-    ).refresh("__exchange__", symbols=["BTC-USDT-SWAP"])
+    with pytest.raises(UntrustedLiveStateError):
+        await LiveStateSyncService(
+            adapter, repository, timestamp_ms=lambda: 1700000009999
+        ).refresh("__exchange__", symbols=["BTC-USDT-SWAP"])
 
     account = repository.accounts["__exchange__"]
     assert account.equity == 900.0
@@ -1258,7 +1300,7 @@ async def test_live_state_sync_does_not_fabricate_account_timestamp_when_provide
 
 
 @pytest.mark.asyncio
-async def test_live_state_sync_skips_untrusted_first_account_snapshot(caplog):
+async def test_live_state_sync_rejects_untrusted_first_account_snapshot():
     adapter = FakeAdapter()
     adapter.account = AccountSnapshot(
         equity=1200.0,
@@ -1269,13 +1311,12 @@ async def test_live_state_sync_skips_untrusted_first_account_snapshot(caplog):
     )
     repository = FakeRepository()
 
-    result = await LiveStateSyncService(
-        adapter, repository, timestamp_ms=lambda: 1700000009999
-    ).refresh("__exchange__", symbols=["BTC-USDT-SWAP"])
+    with pytest.raises(UntrustedLiveStateError):
+        await LiveStateSyncService(
+            adapter, repository, timestamp_ms=lambda: 1700000009999
+        ).refresh("__exchange__", symbols=["BTC-USDT-SWAP"])
 
-    assert result.account is None
     assert repository.get_account("__exchange__") is None
-    assert "without trusted timestamp" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -1396,8 +1437,7 @@ async def test_live_refresh_without_trusted_scope_keeps_legacy_alias_active(tmp_
         equity=1000.0,
         cash_balance=900.0,
         available_balance=850.0,
-        updated_at=0,
-        timestamp=0,
+        updated_at=1700000000001,
     )
 
     await LiveStateSyncService(

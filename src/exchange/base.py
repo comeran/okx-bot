@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import math
 import re
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from decimal import Decimal, InvalidOperation
@@ -12,7 +13,7 @@ from ccxt.base.decimal_to_precision import (
     SIGNIFICANT_DIGITS,
     TICK_SIZE,
 )
-from ccxt.base.errors import NotSupported
+from ccxt.base.errors import NotSupported, OrderNotFound
 
 from src.core.types import (
     AccountSnapshot,
@@ -26,6 +27,7 @@ from src.core.types import (
     OrderType,
     PositionSide,
     PositionSnapshot,
+    PositionSnapshotResult,
     _safe_timestamp,
     _validate_amount_reconciliation,
     execution_type_family,
@@ -327,7 +329,7 @@ class ExchangeAdapter(OrderHandler, ABC):
     @abstractmethod
     async def fetch_position_snapshots(
         self, symbols: list[str] | None = None
-    ) -> list[PositionSnapshot]:
+    ) -> list[PositionSnapshot] | PositionSnapshotResult:
         pass
 
     @abstractmethod
@@ -450,7 +452,7 @@ class OKXBaseAdapter(ExchangeAdapter):
     def _account_float(
         self, row: Mapping[str, object], field: str, *, nonnegative: bool = False
     ) -> float | None:
-        if field not in row or row[field] is None:
+        if field not in row or row[field] is None or row[field] == "":
             return None
         value = row[field]
         if isinstance(value, bool):
@@ -510,6 +512,33 @@ class OKXBaseAdapter(ExchangeAdapter):
         if not math.isfinite(normalized) or normalized < 0.0:
             raise MalformedProviderData(
                 f"Malformed provider open-order row (invalid {field}): {row!r}"
+            )
+        return normalized
+
+    def _order_price(self, row: dict[str, object]) -> float | None:
+        # OKX uses ordPx=-1 for market-execution trigger orders.
+        if "price" not in row or row["price"] is None or row["price"] == "":
+            return None
+        value = row["price"]
+        if isinstance(value, bool):
+            raise MalformedProviderData(
+                f"Malformed provider open-order row (invalid price): {row!r}"
+            )
+        try:
+            normalized = float(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise MalformedProviderData(
+                f"Malformed provider open-order row (invalid price): {row!r}"
+            ) from exc
+        if not math.isfinite(normalized):
+            raise MalformedProviderData(
+                f"Malformed provider open-order row (invalid price): {row!r}"
+            )
+        if normalized == -1.0:
+            return None
+        if normalized < 0.0:
+            raise MalformedProviderData(
+                f"Malformed provider open-order row (invalid price): {row!r}"
             )
         return normalized
 
@@ -804,7 +833,9 @@ class OKXBaseAdapter(ExchangeAdapter):
                 cash_bal=self._safe_float(detail.get("cashBal")),
                 eq=self._safe_float(detail.get("eq")),
                 eq_utd=self._safe_float(detail.get("eqUtd"), self._safe_float(detail.get("eqUsd"))),
-                avail_bal=self._safe_float(detail.get("availBal")),
+                avail_bal=self._safe_float(
+                    detail.get("availBal"), self._safe_float(detail.get("availEq"))
+                ),
                 upl=self._safe_float(detail.get("upl")),
             )
             for detail in details
@@ -848,7 +879,7 @@ class OKXBaseAdapter(ExchangeAdapter):
 
     async def fetch_position_snapshots(
         self, symbols: list[str] | None = None
-    ) -> list[PositionSnapshot]:
+    ) -> PositionSnapshotResult:
         markets = getattr(self._exchange, "markets", None)
         if not markets and hasattr(self._exchange, "load_markets"):
             loaded_markets = await self._exchange.load_markets()
@@ -865,7 +896,22 @@ class OKXBaseAdapter(ExchangeAdapter):
         snapshots = []
         for row in rows:
             snapshots.append(self._parse_position_snapshot(row))
-        return snapshots
+        snapshot_timestamp = max(
+            (max(snapshot.updated_at, snapshot.timestamp) for snapshot in snapshots),
+            default=0,
+        )
+        if snapshot_timestamp <= 0:
+            milliseconds = getattr(self._exchange, "milliseconds", None)
+            snapshot_timestamp = (
+                int(milliseconds())
+                if callable(milliseconds)
+                else int(time.time() * 1000)
+            )
+        return PositionSnapshotResult(
+            positions=snapshots,
+            complete_snapshot=True,
+            snapshot_timestamp=snapshot_timestamp,
+        )
 
     def _parse_position_snapshot(self, row: dict[str, object]) -> PositionSnapshot:
         if not isinstance(row, dict) or not row:
@@ -1085,7 +1131,14 @@ class OKXBaseAdapter(ExchangeAdapter):
         since: int | None = None,
     ) -> list[Bar]:
         if self._default_type == "spot":
-            okx_bar, duration_ms = self._SPOT_OHLCV_TIMEFRAMES[timeframe]
+            try:
+                okx_bar, duration_ms = self._SPOT_OHLCV_TIMEFRAMES[timeframe]
+            except KeyError:
+                raise ValueError(f"Unsupported OKX spot timeframe: {timeframe}") from None
+            try:
+                limit = max(1, min(int(limit), 300))
+            except (TypeError, ValueError, OverflowError):
+                raise ValueError(f"Invalid OKX spot OHLCV limit: {limit!r}") from None
             params = {"instId": symbol, "bar": okx_bar, "limit": limit}
             if since is not None:
                 params["before"] = max(since - 1, 0)
@@ -1602,7 +1655,17 @@ class OKXBaseAdapter(ExchangeAdapter):
     async def cancel(self, order_id: str, symbol: str | None = None) -> object:
         if symbol is None:
             raise ValueError("OKX cancel requires symbol")
-        return await self._exchange.cancel_order(order_id, self._to_ccxt_symbol(symbol))
+        ccxt_symbol = self._to_ccxt_symbol(symbol)
+        try:
+            return await self._exchange.cancel_order(order_id, ccxt_symbol)
+        except OrderNotFound:
+            # OKX algo/trigger orders are addressed by algoId on the algo endpoint;
+            # ccxt only routes there when params explicitly mark the order.
+            return await self._exchange.cancel_order(
+                order_id,
+                ccxt_symbol,
+                params={"trigger": True},
+            )
 
     async def close(self) -> None:
         await self._exchange.close()
@@ -1675,7 +1738,7 @@ class OKXBaseAdapter(ExchangeAdapter):
                 order_type = OrderType(raw_type)
             except ValueError:
                 malformed("invalid type")
-        price = self._explicit_nonnegative_float(row, "price")
+        price = self._order_price(row)
         if raw_type in {"limit", "stop_limit", "trigger_limit"} and (
             price is None or price <= 0.0
         ):
@@ -1791,10 +1854,13 @@ class OKXBaseAdapter(ExchangeAdapter):
                 raise MalformedProviderData(
                     f"Malformed provider trade fee cost: {row!r}"
                 ) from exc
-            if not math.isfinite(fee) or fee < 0.0:
+            if not math.isfinite(fee):
                 raise MalformedProviderData(
                     f"Malformed provider trade fee cost: {row!r}"
                 )
+            # ccxt negates OKX's fee field; a positive provider fee (rebate)
+            # arrives as a negative cost and is persisted as a zero fee.
+            fee = max(0.0, fee)
         return ExchangeTradeSnapshot(
             exchange_trade_id=exchange_trade_id,
             exchange_order_id=exchange_order_id,

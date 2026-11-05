@@ -143,6 +143,8 @@ class UnifiedOrderManager:
         self.live_max_order_notional = live_max_order_notional
         self._balances: dict[str, float] = {}
         self._order_seq = 0
+        self._order_token = uuid.uuid4().hex[:12]
+        self._peak_equity = initial_equity
         self._live_lease_owner = f"{uuid.uuid4()}"
 
     async def submit(
@@ -159,7 +161,7 @@ class UnifiedOrderManager:
     ) -> Order:
         self._order_seq += 1
         order = Order(
-            id=f"{strategy_name}-{symbol}-{id(self)}-{self._order_seq}",
+            id=f"{strategy_name}-{symbol}-{self._order_token}-{self._order_seq}",
             symbol=symbol,
             side=side,
             type=order_type,
@@ -206,10 +208,34 @@ class UnifiedOrderManager:
         try:
             owner = strategy_name
             if self.live_safeguards and self.live_state_refresher is not None:
-                await self.live_state_refresher(owner, self._canonical_state_symbol(symbol))
+                try:
+                    await self.live_state_refresher(
+                        owner, self._canonical_state_symbol(symbol)
+                    )
+                except Exception as exc:
+                    logger.exception("Could not refresh live state before order submission")
+                    return await self._reject_order(
+                        order,
+                        strategy_name,
+                        RiskGateResult(
+                            False,
+                            f"Live state refresh failed: {exc}",
+                            effective_price=price,
+                        ),
+                    )
             risk_result = self._check_risk_gate(order, strategy_name)
             if not risk_result.passed:
                 return await self._reject_order(order, strategy_name, risk_result)
+            if self.kill_switch_checker is not None and self.kill_switch_checker():
+                return await self._reject_order(
+                    order,
+                    strategy_name,
+                    RiskGateResult(
+                        False,
+                        "Kill switch engaged",
+                        effective_price=price,
+                    ),
+                )
 
             if self.router.mode == "live":
                 order.client_order_id = self._new_client_order_id()
@@ -691,7 +717,7 @@ class UnifiedOrderManager:
                 account = self.repository.get_account(strategy_name)
             if account is not None and self._position_matches_runtime(account):
                 return account.cash_balance
-        return self._balances.get(strategy_name, 0.0)
+        return self._balances.get(strategy_name, self.initial_equity)
 
     def set_balance(self, strategy_name: str, amount: float) -> None:
         self._balances[strategy_name] = amount
@@ -1043,6 +1069,14 @@ class UnifiedOrderManager:
         daily_pnl = account.daily_pnl if account is not None else 0.0
         current_equity = account.equity if account is not None else self.initial_equity
         initial_equity = account.initial_equity if account is not None else self.initial_equity
+        peak_equity = max(
+            (getattr(account, "peak_equity", 0.0) or 0.0) if account is not None else 0.0,
+            initial_equity,
+            current_equity,
+        )
+        if account is None:
+            peak_equity = max(peak_equity, self._peak_equity)
+        self._peak_equity = peak_equity
 
         result = self.risk_manager.check_order(
             order=order,
@@ -1050,7 +1084,7 @@ class UnifiedOrderManager:
             total_equity=total_equity,
             order_value=risk_order_value,
             daily_pnl=daily_pnl,
-            peak_equity=max(initial_equity, current_equity),
+            peak_equity=peak_equity,
             current_equity=current_equity,
         )
         return RiskGateResult(

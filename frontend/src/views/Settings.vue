@@ -127,6 +127,7 @@ const isDirty = computed(() => JSON.stringify(buildUpdatePayload()) !== baseline
 const initialLoading = computed(() => loading.value && !hasLoadedSettings.value);
 const staleData = computed(() => hasLoadedSettings.value && Boolean(loadError.value) && !loading.value);
 const actionDisabled = computed(() => loading.value || saving.value);
+const canPersist = computed(() => hasLoadedSettings.value && !loadError.value);
 const allowedModes = ['backtest', 'paper', 'live'] as const;
 const allowedMarketTypes = ['spot', 'swap', 'future', 'option'] as const;
 
@@ -316,7 +317,7 @@ async function loadSettings(): Promise<void> {
 }
 
 async function saveSettings(): Promise<void> {
-  if (saving.value || loading.value || hasValidationErrors.value) return;
+  if (!canPersist.value || saving.value || loading.value || hasValidationErrors.value) return;
 
   saving.value = true;
   try {
@@ -357,7 +358,7 @@ onBeforeRouteLeave(async () => confirmIfDirty());
           <el-button
             type="primary"
             :loading="saving"
-            :disabled="actionDisabled || hasValidationErrors"
+            :disabled="actionDisabled || hasValidationErrors || !canPersist"
             :aria-label="t('settings.saveSettings')"
             @click="saveSettings"
           >
@@ -619,7 +620,7 @@ onBeforeRouteLeave(async () => confirmIfDirty());
             type="primary"
             native-type="submit"
             :loading="saving"
-            :disabled="actionDisabled || hasValidationErrors"
+            :disabled="actionDisabled || hasValidationErrors || !canPersist"
             :aria-label="t('settings.saveSettings')"
           >
             {{ t('settings.saveSettings') }}

@@ -470,6 +470,37 @@ def has_trusted_account_snapshot_provenance(snapshot: AccountSnapshot) -> bool:
     return max(snapshot.timestamp, snapshot.updated_at) > 0
 
 
+DAY_MS = 86_400_000
+
+
+def daily_pnl_state(
+    day_start_equity: float,
+    day_start_at: int,
+    equity: float,
+    timestamp_ms: int,
+    *,
+    previous_equity: float = 0.0,
+    previous_daily_pnl: float = 0.0,
+    previous_updated_at: int = 0,
+) -> tuple[float, int, float]:
+    """Return (day start equity, day start timestamp, daily PnL) for a snapshot."""
+    if day_start_at > 0 and day_start_at // DAY_MS == timestamp_ms // DAY_MS:
+        return day_start_equity, day_start_at, equity - day_start_equity
+    if previous_updated_at > 0 and previous_updated_at // DAY_MS == timestamp_ms // DAY_MS:
+        derived_start = previous_equity - previous_daily_pnl
+        if derived_start > 0:
+            day_start = (timestamp_ms // DAY_MS) * DAY_MS
+            return derived_start, day_start, equity - derived_start
+    return equity, timestamp_ms, 0.0
+
+
+@dataclass(frozen=True)
+class PositionSnapshotResult:
+    positions: list["PositionSnapshot"]
+    complete_snapshot: bool = False
+    snapshot_timestamp: int = 0
+
+
 @dataclass(frozen=True)
 class PositionSnapshot:
     symbol: str

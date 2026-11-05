@@ -1,10 +1,16 @@
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from src.notify.telegram import RiskEventTelegramNotifier, TelegramNotifier
 
 
 async def test_send_posts_message_to_telegram() -> None:
     mock_client = AsyncMock()
+    response = AsyncMock()
+    response.raise_for_status = lambda: None
+    response.json = lambda: {"ok": True}
+    mock_client.post.return_value = response
 
     with patch("httpx.AsyncClient") as async_client:
         async_client.return_value.__aenter__.return_value = mock_client
@@ -16,6 +22,21 @@ async def test_send_posts_message_to_telegram() -> None:
         "https://api.telegram.org/bottest-token/sendMessage",
         json={"chat_id": "123", "text": "Test message", "parse_mode": "HTML"},
     )
+
+
+async def test_send_raises_when_telegram_rejects_message() -> None:
+    mock_client = AsyncMock()
+    response = AsyncMock()
+    response.raise_for_status = lambda: None
+    response.json = lambda: {"ok": False, "description": "chat not found"}
+    mock_client.post.return_value = response
+
+    with patch("httpx.AsyncClient") as async_client:
+        async_client.return_value.__aenter__.return_value = mock_client
+
+        notifier = TelegramNotifier(bot_token="test-token", chat_id="123")
+        with pytest.raises(RuntimeError, match="chat not found"):
+            await notifier.send("Test message")
 
 
 def test_format_position_opened_includes_strategy_symbol_and_formatted_price() -> None:
