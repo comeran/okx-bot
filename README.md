@@ -43,6 +43,10 @@ TG_BOT_TOKEN=
 TG_CHAT_ID=
 ```
 
+Saving settings keeps environment-provided credentials as `${VARIABLE}` references,
+so their values are not copied into the local settings file. Empty credential fields
+in older local settings files also fall back to the corresponding environment variables.
+
 Backtests can run with public OKX historical market data; private trading/account features require valid OKX credentials.
 
 Set `OKX_BOT_DB_PATH` to override the default SQLite path (`data/bot.db`); the test suite uses this to keep tests off the real database.

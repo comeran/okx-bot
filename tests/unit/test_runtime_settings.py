@@ -1,3 +1,4 @@
+import pytest
 import yaml
 
 from src.core.config import AppConfig
@@ -142,7 +143,82 @@ def test_save_runtime_settings_does_not_copy_env_secrets(monkeypatch, tmp_path):
     save_runtime_settings(config)
 
     saved = yaml.safe_load(settings_path.read_text(encoding="utf-8"))
-    assert saved["exchange"]["api_key"] == ""
-    assert saved["exchange"]["secret"] == ""
-    assert saved["exchange"]["passphrase"] == ""
-    assert saved["notify"]["telegram_bot_token"] == ""
+    assert saved["exchange"]["api_key"] == "${OKX_API_KEY}"
+    assert saved["exchange"]["secret"] == "${OKX_SECRET}"
+    assert saved["exchange"]["passphrase"] == "${OKX_PASSPHRASE}"
+    assert saved["notify"]["telegram_bot_token"] == "${TG_BOT_TOKEN}"
+
+
+@pytest.mark.parametrize(
+    ("section", "field", "env_name"),
+    [
+        ("exchange", "api_key", "OKX_API_KEY"),
+        ("exchange", "secret", "OKX_SECRET"),
+        ("exchange", "passphrase", "OKX_PASSPHRASE"),
+        ("notify", "telegram_bot_token", "TG_BOT_TOKEN"),
+    ],
+)
+def test_env_credentials_survive_save_reload_and_follow_environment(
+    monkeypatch, section, field, env_name
+):
+    from src.core.runtime_settings import load_runtime_settings, save_runtime_settings
+
+    monkeypatch.setenv(env_name, "first-env-value")
+    config = AppConfig()
+    setattr(getattr(config, section), field, "first-env-value")
+    config.risk.max_drawdown_pct = 0.12
+
+    save_runtime_settings(config)
+
+    assert getattr(getattr(load_runtime_settings(), section), field) == "first-env-value"
+    assert load_runtime_settings().risk.max_drawdown_pct == 0.12
+
+    monkeypatch.setenv(env_name, "rotated-env-value")
+    assert getattr(getattr(load_runtime_settings(), section), field) == "rotated-env-value"
+
+
+@pytest.mark.parametrize(
+    ("section", "field", "env_name"),
+    [
+        ("exchange", "api_key", "OKX_API_KEY"),
+        ("exchange", "secret", "OKX_SECRET"),
+        ("exchange", "passphrase", "OKX_PASSPHRASE"),
+        ("notify", "telegram_bot_token", "TG_BOT_TOKEN"),
+    ],
+)
+def test_save_reload_keeps_local_credentials_when_environment_differs(
+    monkeypatch, section, field, env_name
+):
+    from src.core.runtime_settings import load_runtime_settings, save_runtime_settings
+
+    monkeypatch.setenv(env_name, "unrelated-env-value")
+    config = AppConfig()
+    setattr(getattr(config, section), field, "local-value")
+
+    save_runtime_settings(config)
+
+    assert getattr(getattr(load_runtime_settings(), section), field) == "local-value"
+
+
+@pytest.mark.parametrize(
+    ("section", "field", "env_name"),
+    [
+        ("exchange", "api_key", "OKX_API_KEY"),
+        ("exchange", "secret", "OKX_SECRET"),
+        ("exchange", "passphrase", "OKX_PASSPHRASE"),
+        ("notify", "telegram_bot_token", "TG_BOT_TOKEN"),
+    ],
+)
+def test_load_recovers_env_credentials_from_legacy_empty_settings(
+    monkeypatch, section, field, env_name
+):
+    import os
+    from pathlib import Path
+
+    from src.core.runtime_settings import load_runtime_settings
+
+    monkeypatch.setenv(env_name, "configured-env-value")
+    settings_path = Path(os.environ["OKX_BOT_SETTINGS_PATH"])
+    settings_path.write_text(yaml.safe_dump({section: {field: ""}}), encoding="utf-8")
+
+    assert getattr(getattr(load_runtime_settings(), section), field) == "configured-env-value"

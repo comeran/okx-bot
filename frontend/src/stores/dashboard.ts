@@ -26,6 +26,17 @@ const dashboardLoadPendingRequests = new WeakMap<object, number>();
 const accountOverviewRequestSequences = new WeakMap<object, number>();
 const accountOverviewRequestGenerations = new WeakMap<object, number>();
 const accountOverviewPendingRequests = new WeakMap<object, number>();
+type TradingStateField = 'account' | 'positions' | 'orders';
+const webSocketStateVersions = new WeakMap<object, Record<TradingStateField, number>>();
+
+function currentWebSocketStateVersions(store: object): Record<TradingStateField, number> {
+  return webSocketStateVersions.get(store) ?? { account: 0, positions: 0, orders: 0 };
+}
+
+function markWebSocketStateUpdated(store: object, field: TradingStateField) {
+  const versions = currentWebSocketStateVersions(store);
+  webSocketStateVersions.set(store, { ...versions, [field]: versions[field] + 1 });
+}
 
 function nextDashboardLoadRequestId(store: object): number {
   const requestId = (dashboardLoadRequestSequences.get(store) ?? 0) + 1;
@@ -225,6 +236,7 @@ const useDashboardStoreBase = defineStore('dashboard', {
     async loadInitialData() {
       const loadGeneration = nextDashboardLoadGeneration(this);
       const loadRequestId = nextDashboardLoadRequestId(this);
+      const stateVersions = currentWebSocketStateVersions(this);
       const isCurrentLoad = () => (
         dashboardLoadRequestSequences.get(this) === loadRequestId
         && currentDashboardLoadGeneration(this) === loadGeneration
@@ -264,9 +276,16 @@ const useDashboardStoreBase = defineStore('dashboard', {
           return;
         }
 
-        this.account = normalizeAccount(accountResult.value, positionsResult.value);
-        this.positions = positionsResult.value;
-        this.orders = ordersResult.value;
+        const currentVersions = currentWebSocketStateVersions(this);
+        if (currentVersions.positions === stateVersions.positions) {
+          this.positions = positionsResult.value;
+        }
+        if (currentVersions.account === stateVersions.account) {
+          this.account = normalizeAccount(accountResult.value, this.positions);
+        }
+        if (currentVersions.orders === stateVersions.orders) {
+          this.orders = ordersResult.value;
+        }
 
         try {
           const tickers = await fetchJson<MarketTicker[]>('/api/market/tickers');
@@ -300,6 +319,7 @@ const useDashboardStoreBase = defineStore('dashboard', {
     async refreshAccountOverview() {
       const accountRequestGeneration = currentDashboardLoadGeneration(this);
       const accountRequestId = nextAccountOverviewRequestId(this);
+      const accountStateVersion = currentWebSocketStateVersions(this).account;
       const isCurrentAccountRequest = () => (
         accountOverviewRequestSequences.get(this) === accountRequestId
         && (accountOverviewRequestGenerations.get(this) ?? 0) === accountRequestGeneration
@@ -317,7 +337,9 @@ const useDashboardStoreBase = defineStore('dashboard', {
           return;
         }
 
-        this.account = normalizeAccount(account, this.positions);
+        if (currentWebSocketStateVersions(this).account === accountStateVersion) {
+          this.account = normalizeAccount(account, this.positions);
+        }
         this.accountError = null;
       } catch (error) {
         if (isCurrentAccountRequest()) {
@@ -345,6 +367,7 @@ const useDashboardStoreBase = defineStore('dashboard', {
         case 'account': {
           const account = payloadFor(message, 'account');
           if (appliesToExchangeState(message) && isAccountSummary(account)) {
+            markWebSocketStateUpdated(this, 'account');
             this.account = normalizeAccount(account, this.positions);
           }
           this.scheduleStrategyPerformanceRefresh();
@@ -353,6 +376,7 @@ const useDashboardStoreBase = defineStore('dashboard', {
         case 'positions': {
           const positions = payloadFor(message, 'positions');
           if (appliesToExchangeState(message) && isPositionArray(positions)) {
+            markWebSocketStateUpdated(this, 'positions');
             this.positions = positions;
             if (this.account !== null) {
               this.account = normalizeAccount(this.account, this.positions);
@@ -364,6 +388,7 @@ const useDashboardStoreBase = defineStore('dashboard', {
         case 'orders': {
           const orders = payloadFor(message, 'orders');
           if (appliesToExchangeState(message) && isOrderArray(orders)) {
+            markWebSocketStateUpdated(this, 'orders');
             this.orders = orders;
           }
           this.scheduleStrategyPerformanceRefresh();
@@ -385,17 +410,21 @@ const useDashboardStoreBase = defineStore('dashboard', {
       const orders = isOrderArray(snapshot.orders) ? snapshot.orders : this.orders;
 
       if (isPositionArray(snapshot.positions)) {
+        markWebSocketStateUpdated(this, 'positions');
         this.positions = positions;
       }
 
       if (isOrderArray(snapshot.orders)) {
+        markWebSocketStateUpdated(this, 'orders');
         this.orders = orders;
       }
 
       if ('account' in snapshot) {
         if (snapshot.account === null) {
+          markWebSocketStateUpdated(this, 'account');
           this.account = null;
         } else if (isAccountSummary(snapshot.account)) {
+          markWebSocketStateUpdated(this, 'account');
           this.account = normalizeAccount(snapshot.account, positions);
         }
       }
