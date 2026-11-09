@@ -1,0 +1,48 @@
+tests/unit/test_backtest_engine.py
+  s_5754a483f5e2c0::t_f9cbf194405a66 5,8-9,194-322
+README.md
+  s_5754a483f5e2c0::t_cb2091340abda4 46-49
+src/core/runtime_settings.py
+  s_5754a483f5e2c0::t_cb2091340abda4 13-18,34-40,48
+tests/unit/test_test_environment.py
+  s_5754a483f5e2c0::t_bba1e60370fb0f 1-59
+tests/unit/test_backtest_matcher.py
+  s_5754a483f5e2c0::t_f9cbf194405a66 90-126
+frontend/src/stores/dashboard.ts
+  s_5754a483f5e2c0::t_91427abd2d7422 29-40,239,279-288,322,340-342,370,379,391,413,418,424,427
+frontend/src/stores/dashboard.test.ts
+  s_5754a483f5e2c0::t_695fc4be8dba6e 293-335
+  s_5754a483f5e2c0::t_0b9f6889849948 215-292,336-361
+docs/superpowers/plans/2026-11-09-review-bugfixes.md
+  s_5754a483f5e2c0::t_cda9211fd49aec 12,15,18,21,23,41-55
+  s_5754a483f5e2c0::t_70528a21c685c5 1-11,13-14,16-17,19-20,22,24-40
+tests/unit/test_runtime_settings.py
+  s_5754a483f5e2c0::t_71197b6b652d08 201-224
+  s_5754a483f5e2c0::t_bba1e60370fb0f 1,150-200
+  s_5754a483f5e2c0::t_cb2091340abda4 146-149
+src/backtest/engine.py
+  s_5754a483f5e2c0::t_d8e5a976d549c5 14,38,43-51,54-56,145-146,169,179-182
+src/backtest/matcher.py
+  s_5754a483f5e2c0::t_d8e5a976d549c5 36-40
+tests/conftest.py
+  s_5754a483f5e2c0::t_cb2091340abda4 2-3,6-17
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "855ba712869090a55ea7d98fd5a48bcbc785b460",
+  "prompts": {},
+  "logical_commit_id": "855ba712869090a55ea7d98fd5a48bcbc785b460",
+  "sessions": {
+    "s_5754a483f5e2c0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1be4b-8fcb-7f73-917c-6d11f8ef4f92",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Zane <zane@bigo.sg>",
+      "total_additions": 606,
+      "total_deletions": 21
+    }
+  }
+}
