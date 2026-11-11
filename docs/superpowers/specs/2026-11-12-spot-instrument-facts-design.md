@@ -1,8 +1,9 @@
 # Exact SPOT instrument rule observations
 
 This slice acquires exact OKX public instrument-rule evidence through an injected
-raw client. It supplies immutable facts without storing them or granting trading
-permission. An observation proves neither rule freshness nor account eligibility.
+raw client. Its durable extension retains these observations in the validated
+account/environment facts store. An observation proves neither rule freshness
+nor account eligibility and grants no trading permission.
 
 ## Contract
 
@@ -31,7 +32,39 @@ permission. An observation proves neither rule freshness nor account eligibility
 
 ## Boundary
 
-The adapter and parser have no repository, legacy projection, ledger, activation,
-allocation, frontend or order-manager integration. Persistence, provenance and
-freshness policy, runtime rule changes, order rounding/minimum checks and funded
-activation require later slices. Account and balance facts remain separate inputs.
+The adapter and parser remain independent of repositories. The opt-in
+`sync_exact_spot_instruments(repository, exchange, received_at, *, inst_id=None)`
+captures precisely the response parsed by the existing adapter, yields for pending
+cancellation and commits atomically. It never calls `load_markets`, retries or
+submits orders. Provider, parser and storage failures propagate without partial
+writes. It requires no private UID; public rules can be the first account-scoped
+observation.
+
+## Durable observation contract
+
+- `commit_private_spot_instruments` revalidates the immutable store header,
+  integer receive time, raw JSON and requested instrument. The raw response must
+  parse to exactly the supplied typed tuple, including order and optional states.
+- `private_spot_instrument_response` stores bounded credential-free raw JSON once
+  per scope and canonical SHA-256 payload hash. Original JSON text is retained
+  when supplied; mapping input is serialized deterministically. The existing
+  exact-response guard rejects duplicate JSON keys, non-JSON values, non-finite
+  numbers, excessive nesting, credential keys and responses larger than 4 MiB.
+- `private_spot_instrument` stores exact per-instrument values keyed by scope,
+  response hash and native instrument ID. Each optional value has an explicit
+  `missing`, `null` or `value` state, including empty strings. Changed payloads
+  create distinct historical observations. Identical canonical response replay
+  returns detached records with the original raw text and first receive time.
+- Reads return detached records, optionally filtered by native instrument ID;
+  `raw_json` is attached from the single response row without duplicating it in
+  the per-instrument SQL table. Empty responses retain their response journal
+  entry and produce no instrument records.
+- SQLite triggers reject UPDATE, DELETE and INSERT OR REPLACE collisions in both
+  tables. Instrument inserts require an existing response with the same scope,
+  payload hash and receive time. Constraints preserve optional state consistency,
+  bounded field lengths and native currency identity.
+
+This extension has no legacy account/assets, ledger, receipt, activation,
+allocation, frontend or order-manager effects. Freshness policy, automatic refresh,
+runtime rule changes, order rounding/minimum checks and funded activation require
+later slices. Account and balance facts remain separate inputs.

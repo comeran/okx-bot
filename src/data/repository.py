@@ -47,6 +47,8 @@ from src.data.models import (
     PositionRecord,
     PrivateAccountBalanceRecord,
     PrivateAccountConfigRecord,
+    PrivateSpotInstrumentRecord,
+    PrivateSpotInstrumentResponseRecord,
     PrivateSyncReceiptRecord,
     PrivateUIDBindingRecord,
     RiskEventRecord,
@@ -66,6 +68,11 @@ from src.exchange.okx_balance_facts import (
     ACCOUNT_BALANCE_FIELDS,
     AccountBalanceFact,
     parse_okx_account_balance,
+)
+from src.exchange.okx_instrument_facts import (
+    INSTRUMENT_OPTIONAL_FIELDS,
+    SpotInstrumentFact,
+    parse_okx_spot_instruments,
 )
 from src.exchange.okx_private_facts import parse_okx_spot_fill_page
 
@@ -813,6 +820,78 @@ class _AccountingTransaction:
         if any(binding.account_scope_id != scope_id for binding in bindings):
             raise ValueError("Private UID account scope mismatch")
         return bindings[0].uid if bindings else None
+
+    def commit_private_spot_instruments(
+        self, facts: tuple[SpotInstrumentFact, ...], *, raw_payload: object,
+        received_at: int, requested_inst_id: str | None = None,
+    ) -> list[PrivateSpotInstrumentRecord]:
+        """Atomically retain one public response and all its exact rule rows."""
+        scope_id = _receipt_scope(self.session)
+        received_at = _receipt_integer(received_at, "instrument received time")
+        decoded, raw_json, payload_hash = _exact_payload(raw_payload)
+        parsed = parse_okx_spot_instruments(decoded, inst_id=requested_inst_id)
+        if (not isinstance(facts, tuple)
+                or any(not isinstance(fact, SpotInstrumentFact) for fact in facts)
+                or parsed != facts):
+            raise ValueError("Raw spot instruments do not match typed facts")
+        existing = self.session.get(PrivateSpotInstrumentResponseRecord, (scope_id, payload_hash))
+        if existing is None:
+            self.session.add(PrivateSpotInstrumentResponseRecord(
+                account_scope_id=scope_id, payload_hash=payload_hash,
+                received_at=received_at, raw_json=raw_json,
+            ))
+            self.session.flush()
+            for fact in facts:
+                values = {name: getattr(fact, name) for name in (
+                    "inst_id", "base_ccy", "quote_ccy", "tick_sz", "lot_sz", "min_sz",
+                )}
+                for name in INSTRUMENT_OPTIONAL_FIELDS:
+                    value = getattr(fact, name)
+                    values[name] = None if value is MISSING else value
+                    values[f"{name}_state"] = "missing" if value is MISSING else (
+                        "null" if value is None else "value"
+                    )
+                self.session.add(PrivateSpotInstrumentRecord(
+                    account_scope_id=scope_id, payload_hash=payload_hash,
+                    received_at=received_at, **values,
+                ))
+            self.session.flush()
+        # Preserve response order and return detached records, including on replay.
+        response = self.session.get(PrivateSpotInstrumentResponseRecord, (scope_id, payload_hash))
+        records = self.session.exec(select(PrivateSpotInstrumentRecord).where(
+            PrivateSpotInstrumentRecord.account_scope_id == scope_id,
+            PrivateSpotInstrumentRecord.payload_hash == payload_hash,
+        )).all()
+        detached = {}
+        for record in records:
+            copy = _exact_copy(record)
+            copy._raw_json = response.raw_json
+            detached[record.inst_id] = copy
+        return [detached[fact.inst_id] for fact in facts]
+
+    def get_private_spot_instruments(
+        self, inst_id: str | None = None,
+    ) -> list[PrivateSpotInstrumentRecord]:
+        scope_id = _receipt_scope(self.session)
+        if inst_id is not None:
+            canonical_spot_symbol(inst_id)
+        responses = self.session.exec(select(PrivateSpotInstrumentResponseRecord)).all()
+        records = self.session.exec(select(PrivateSpotInstrumentRecord).order_by(
+            PrivateSpotInstrumentRecord.received_at, text("private_spot_instrument.rowid"),
+        )).all()
+        if any(r.account_scope_id != scope_id for r in (*responses, *records)):
+            raise ValueError("Spot instrument account scope mismatch")
+        response_by_hash = {response.payload_hash: response for response in responses}
+        result = []
+        for record in records:
+            response = response_by_hash.get(record.payload_hash)
+            if response is None or response.received_at != record.received_at:
+                raise ValueError("Spot instrument response mismatch")
+            if inst_id is None or inst_id == record.inst_id:
+                detached = _exact_copy(record)
+                detached._raw_json = response.raw_json
+                result.append(detached)
+        return result
 
     def bind_private_uid(self, uid: str, first_seen_at: int) -> PrivateUIDBindingRecord:
         scope_id = _receipt_scope(self.session)
@@ -1605,6 +1684,23 @@ class Repository:
     def get_private_uid(self) -> str | None:
         with Session(self.engine) as session:
             return _AccountingTransaction(session).get_private_uid()
+
+    def commit_private_spot_instruments(
+        self, facts: tuple[SpotInstrumentFact, ...], *, raw_payload: object,
+        received_at: int, requested_inst_id: str | None = None,
+    ) -> list[PrivateSpotInstrumentRecord]:
+        return self.atomic_accounting(
+            lambda transaction: transaction.commit_private_spot_instruments(
+                facts, raw_payload=raw_payload, received_at=received_at,
+                requested_inst_id=requested_inst_id,
+            ),
+        )
+
+    def get_private_spot_instruments(
+        self, inst_id: str | None = None,
+    ) -> list[PrivateSpotInstrumentRecord]:
+        with Session(self.engine) as session:
+            return _AccountingTransaction(session).get_private_spot_instruments(inst_id)
 
     def bind_private_uid(self, uid: str, first_seen_at: int) -> PrivateUIDBindingRecord:
         return self.atomic_accounting(lambda transaction: transaction.bind_private_uid(

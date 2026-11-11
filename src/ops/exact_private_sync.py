@@ -15,6 +15,7 @@ from src.data.models import (
     ExactSpotFillCursorRecord,
     PrivateAccountBalanceRecord,
     PrivateAccountConfigRecord,
+    PrivateSpotInstrumentRecord,
 )
 from src.exchange.okx_account_facts import (
     AccountConfigFact,
@@ -26,11 +27,21 @@ from src.exchange.okx_balance_facts import (
     OKXAccountBalanceFactsAdapter,
     RawOKXAccountBalanceExchange,
 )
+from src.exchange.okx_instrument_facts import (
+    OKXSpotInstrumentFactsAdapter,
+    RawOKXInstrumentExchange,
+    SpotInstrumentFact,
+)
 from src.exchange.okx_private_facts import OKXSpotFillFactsAdapter, RawOKXFillExchange
 
 
 class ExactPrivateFactsRepository(Protocol):
     def get_private_uid(self) -> str | None: ...
+
+    def commit_private_spot_instruments(
+        self, facts: tuple[SpotInstrumentFact, ...], *, raw_payload: object,
+        received_at: int, requested_inst_id: str | None = None,
+    ) -> list[PrivateSpotInstrumentRecord]: ...
 
     def commit_private_account_balance(
         self, fact: AccountBalanceFact, *, raw_payload: object, received_at: int,
@@ -61,6 +72,32 @@ class _CapturedConfigExchange:
     async def private_get_account_config(self, params: dict[str, str]) -> object:
         self.payload = await self.exchange.private_get_account_config(params)
         return self.payload
+
+
+class _CapturedInstrumentExchange:
+    def __init__(self, exchange: RawOKXInstrumentExchange) -> None:
+        self.exchange = exchange
+        self.payload: object = None
+
+    async def public_get_public_instruments(self, params: dict[str, str]) -> object:
+        self.payload = await self.exchange.public_get_public_instruments(params)
+        return self.payload
+
+
+async def sync_exact_spot_instruments(
+    repository: ExactPrivateFactsRepository,
+    exchange: RawOKXInstrumentExchange,
+    received_at: int,
+    *, inst_id: str | None = None,
+) -> list[PrivateSpotInstrumentRecord]:
+    """Retain exactly one public SPOT response, without requiring a private UID."""
+    captured = _CapturedInstrumentExchange(exchange)
+    facts = await OKXSpotInstrumentFactsAdapter(captured).fetch(inst_id)
+    await asyncio.sleep(0)
+    return repository.commit_private_spot_instruments(
+        facts, raw_payload=captured.payload, received_at=received_at,
+        requested_inst_id=inst_id,
+    )
 
 
 class _CapturedBalanceExchange:
