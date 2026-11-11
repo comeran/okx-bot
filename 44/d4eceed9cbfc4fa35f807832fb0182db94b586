@@ -1,0 +1,32 @@
+src/ops/spot_preflight.py
+  s_5754a483f5e2c0::t_f9aa69938edc8c 1-130,132-208,210-238
+  s_5754a483f5e2c0::t_ccd16cb67b3ffc 131,209
+docs/superpowers/plans/2026-11-11-quant-system-roadmap.md
+  s_5754a483f5e2c0::t_c0c643da892250 28-29,49,54-55
+tests/unit/test_spot_preflight.py
+  s_5754a483f5e2c0::t_39bfa0fb82558b 1-252
+docs/superpowers/plans/2026-11-12-spot-preflight-plan.md
+  s_5754a483f5e2c0::t_c0c643da892250 1-24,28-34
+  s_5754a483f5e2c0::t_ce6a420b6a63a5 25-27
+docs/superpowers/specs/2026-11-12-spot-preflight-design.md
+  s_5754a483f5e2c0::t_c0c643da892250 1-70
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "44d4eceed9cbfc4fa35f807832fb0182db94b586",
+  "prompts": {},
+  "logical_commit_id": "44d4eceed9cbfc4fa35f807832fb0182db94b586",
+  "sessions": {
+    "s_5754a483f5e2c0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1be4b-8fcb-7f73-917c-6d11f8ef4f92",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Zane <zane@bigo.sg>",
+      "total_additions": 602,
+      "total_deletions": 5
+    }
+  }
+}
