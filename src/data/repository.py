@@ -872,18 +872,40 @@ class _AccountingTransaction:
             scope_id, uid, endpoint, page.inst_id, page.requested_before,
         )
         decoded, raw_json, payload_hash = _exact_payload(raw_payload)
-        parsed = parse_okx_spot_fill_page(
-            decoded, inst_id=page.inst_id, after=page.requested_after,
-            before=page.requested_before,
-        )
-        if parsed.fills != page.fills or parsed.next_after != page.next_after:
-            raise ValueError("Exact typed page conflicts with raw payload")
         page_id = _exact_hash([traversal, page.requested_after])
         existing = self.session.get(ExactSpotFillPageRecord, page_id)
         cursor = self.session.get(ExactSpotFillCursorRecord, traversal)
         for record in (existing, cursor):
             if record is not None and (record.account_scope_id != scope_id or record.uid != uid):
                 raise ValueError("Exact page/cursor account scope mismatch")
+        previous_pages: list[SpotFillPage] = []
+        # Reconstruct traversal evidence from durable raw pages, rather than
+        # trusting caller-supplied history or only the current cursor value.
+        # A legal replay already has an identity and must bypass repeated-page
+        # detection while still validating the typed/raw response below.
+        if existing is None:
+            prior_records = self.session.exec(select(ExactSpotFillPageRecord).where(
+                ExactSpotFillPageRecord.traversal_id == traversal,
+            ).order_by(text("exact_spot_fill_page.rowid"))).all()
+            for prior in prior_records:
+                if prior.account_scope_id != scope_id or prior.uid != uid:
+                    raise ValueError("Exact page account scope mismatch")
+                observed = parse_okx_spot_fill_page(
+                    json.loads(prior.raw_json), inst_id=prior.inst_id,
+                    after=prior.requested_after, before=prior.requested_before,
+                    previous_pages=previous_pages,
+                )
+                if (observed.next_after != prior.next_after
+                        or observed.coverage.value != prior.coverage):
+                    raise ValueError("Persisted exact page evidence conflict")
+                previous_pages.append(observed)
+        parsed = parse_okx_spot_fill_page(
+            decoded, inst_id=page.inst_id, after=page.requested_after,
+            before=page.requested_before, previous_pages=previous_pages,
+        )
+        if (parsed.fills != page.fills or parsed.next_after != page.next_after
+                or parsed.coverage is not page.coverage):
+            raise ValueError("Exact typed page conflicts with raw payload or coverage")
         if existing is not None:
             if (existing.payload_hash != payload_hash or existing.next_after != page.next_after
                     or existing.coverage != page.coverage.value):

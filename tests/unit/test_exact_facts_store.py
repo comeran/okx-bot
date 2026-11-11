@@ -1,6 +1,7 @@
 """Durable raw observations must never become trading or activation evidence."""
 
 import json
+from dataclasses import replace
 
 import pytest
 from sqlalchemy import text
@@ -250,3 +251,32 @@ def test_cursor_reads_fail_closed_on_foreign_account_record(stores):
         connection.execute(text("UPDATE exact_spot_fill_cursor SET account_scope_id='foreign'"))
     with pytest.raises(ValueError, match="scope"):
         repo.get_exact_spot_fill_cursor(uid="00123")
+
+
+
+def test_reopened_traversal_rejects_cycle_to_a_persisted_cursor(stores):
+    _, (repo, _) = stores
+    commit(repo, payload("3"))
+    commit(repo, payload("2"), after="3", version=1)
+    reopened = Repository(engine=repo.engine)
+    with pytest.raises(ValueError, match="non-advancing|duplicate"):
+        commit(reopened, payload("3"), after="2", version=2)
+    cursor = reopened.get_exact_spot_fill_cursor(uid="00123")
+    assert (cursor.version, cursor.next_after, cursor.complete) == (2, "2", False)
+    assert len(reopened.get_exact_spot_fill_pages(uid="00123")) == 2
+    assert {fact.bill_id for fact in reopened.get_exact_spot_fills(uid="00123")} == {"2", "3"}
+    # Persisted evidence must not make an exact replay fail as a repeated cursor.
+    replay = commit(reopened, payload("3"))
+    assert (replay.version, replay.next_after) == (2, "2")
+
+
+@pytest.mark.parametrize("raw", [payload(), {"code": "0", "data": []}])
+def test_caller_cannot_persist_complete_coverage_for_an_okx_page(stores, raw):
+    _, (repo, _) = stores
+    page = replace(parse_okx_spot_fill_page(raw), coverage=FactCoverage.COMPLETE)
+    with pytest.raises(ValueError, match="typed page|coverage"):
+        repo.commit_exact_spot_fill_page(page, uid="00123", raw_payload=raw, received_at=10)
+    assert repo.get_private_uid() is None
+    assert repo.get_exact_spot_fill_cursor(uid="00123") is None
+    assert repo.get_exact_spot_fill_pages(uid="00123") == []
+    assert repo.get_exact_spot_fills(uid="00123") == []
