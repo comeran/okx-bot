@@ -211,6 +211,110 @@ for _action in ("UPDATE", "DELETE", "INSERT"):
     )
 
 
+class PrivateSpotInstrumentResponseRecord(SQLModel, table=True):
+    """One bounded raw public response, retained once within an account scope."""
+
+    __tablename__ = "private_spot_instrument_response"
+    __table_args__ = (
+        CheckConstraint("received_at >= 0", name="ck_instrument_response_received"),
+        CheckConstraint("length(payload_hash) = 64", name="ck_instrument_response_hash"),
+        CheckConstraint("length(CAST(raw_json AS BLOB)) <= 4194304",
+                        name="ck_instrument_response_size"),
+    )
+
+    account_scope_id: str = Field(primary_key=True)
+    payload_hash: str = Field(primary_key=True)
+    received_at: int
+    raw_json: str = Field(sa_column=Column(Text, nullable=False))
+
+
+class PrivateSpotInstrumentRecord(SQLModel, table=True):
+    """Append-only public rule evidence; no UID, freshness or trading authority.
+
+    Raw JSON lives in the response table. Repository reads attach that immutable
+    text to detached values so callers need no open storage session.
+    """
+
+    __tablename__ = "private_spot_instrument"
+    __table_args__ = (
+        CheckConstraint("received_at >= 0", name="ck_spot_instrument_received"),
+        CheckConstraint("length(payload_hash) = 64", name="ck_spot_instrument_hash"),
+        CheckConstraint("inst_id = base_ccy || '-' || quote_ccy",
+                        name="ck_spot_instrument_currencies"),
+        *(CheckConstraint(
+            f"length({name}) BETWEEN 1 AND 128", name=f"ck_spot_instrument_{name}_length",
+        ) for name in ("tick_sz", "lot_sz", "min_sz")),
+        *(CheckConstraint(
+            f"({name}_state IN ('missing','null') AND {name} IS NULL) OR "
+            f"({name}_state = 'value' AND {name} IS NOT NULL AND length({name}) <= 256)",
+            name=f"ck_spot_instrument_{name}_state",
+        ) for name in (
+            "state", "rule_type", "trade_quote_ccy", "max_lmt_sz", "max_mkt_sz", "lever",
+        )),
+    )
+
+    account_scope_id: str = Field(primary_key=True)
+    payload_hash: str = Field(primary_key=True)
+    inst_id: str = Field(primary_key=True)
+    received_at: int
+    base_ccy: str
+    quote_ccy: str
+    tick_sz: str
+    lot_sz: str
+    min_sz: str
+    state: str | None = None
+    state_state: str
+    rule_type: str | None = None
+    rule_type_state: str
+    trade_quote_ccy: str | None = None
+    trade_quote_ccy_state: str
+    max_lmt_sz: str | None = None
+    max_lmt_sz_state: str
+    max_mkt_sz: str | None = None
+    max_mkt_sz_state: str
+    lever: str | None = None
+    lever_state: str
+    _raw_json: str = PrivateAttr(default="")
+
+    @property
+    def raw_json(self) -> str:
+        return self._raw_json
+
+
+event.listen(
+    PrivateSpotInstrumentRecord.__table__, "after_create",
+    DDL(
+        "CREATE TRIGGER private_spot_instrument_response_required BEFORE INSERT "
+        "ON private_spot_instrument WHEN NOT EXISTS "
+        "(SELECT 1 FROM private_spot_instrument_response "
+        "WHERE account_scope_id = NEW.account_scope_id AND payload_hash = NEW.payload_hash "
+        "AND received_at = NEW.received_at) "
+        "BEGIN SELECT RAISE(ABORT, 'spot instrument response mismatch'); END"
+    ).execute_if(dialect="sqlite"),
+)
+
+
+# Prevent UPDATE/DELETE and SQLite REPLACE collisions for rows and raw evidence.
+for _model in (PrivateSpotInstrumentResponseRecord, PrivateSpotInstrumentRecord):
+    _table_name = _model.__tablename__
+    for _action in ("UPDATE", "DELETE", "INSERT"):
+        _identity = " AND ".join(
+            f"{column.name} = NEW.{column.name}" for column in _model.__table__.primary_key
+        )
+        _condition = (
+            f" WHEN EXISTS (SELECT 1 FROM {_table_name} WHERE {_identity})"
+            if _action == "INSERT" else ""
+        )
+        event.listen(
+            _model.__table__, "after_create",
+            DDL(
+                f"CREATE TRIGGER {_table_name}_no_{_action.lower()} BEFORE {_action} "
+                f"ON {_table_name}{_condition} "
+                "BEGIN SELECT RAISE(ABORT, 'append-only spot instrument evidence'); END"
+            ).execute_if(dialect="sqlite"),
+        )
+
+
 class ExactSpotFillRecord(SQLModel, table=True):
     """Exact provider text. Optional state distinguishes absent, null and value."""
 

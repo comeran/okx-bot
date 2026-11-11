@@ -9,6 +9,14 @@
 - [x] Injected single-response public adapter with exact raw SPOT parameters and
   requested-instrument validation before transport and after response parsing.
 - [x] Keep acquisition isolated from persistence, trading authorization and orders.
+- [x] Add append-only account/environment-scoped response and instrument tables,
+  storing raw JSON once and retaining exact strings and all optional value states.
+- [x] Add atomic raw/typed repository commit validation, detached reads,
+  canonical-payload replay idempotence and changed-observation history.
+- [x] Add single-response raw instrument sync with cancellation before commit,
+  exact SPOT/filter parameters and no private UID requirement.
+- [x] Cover scope isolation, restart, direct SQL immutability, response integrity,
+  credential/size guards and provider/parser/storage failure rollback.
 
 ## Verification
 
@@ -28,6 +36,17 @@ shared test fixture blocks external network.
 
 ## Deferred
 
-Instrument-rule persistence and provenance, freshness policy, order constraint
-enforcement, automatic refresh, reconciliation and funded allocation/activation
-remain future work. This slice makes no real exchange requests.
+Freshness policy, order constraint enforcement, automatic refresh, reconciliation
+and funded allocation/activation remain future work. These slices make no real
+exchange requests.
+
+## Durable extension verification
+
+- TDD RED: 61 new persistence/sync cases failed against absent interfaces before
+  production changes. Additional direct-insert tests demonstrated orphan response
+  links were initially accepted; the response integrity trigger closes that gap.
+- Focused GREEN: 343 instrument and exact config/balance/fill storage/sync cases
+  passed, including 65 new durable instrument cases.
+- Ruff across `src` and `tests`: passed.
+- Full backend suite: 3138 passed in 41.01s, with the existing aiohttp
+  deprecation warning. `git diff --check`: passed.
