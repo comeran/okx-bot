@@ -21,6 +21,7 @@ Acceptance: explicit draft configuration persists without granting trading permi
 - [x] Persist environment/account identity on live account, order, fill, position and reconciliation state through immutable scoped facts stores; keep legacy ambiguous rows audit-only.
 - [x] Deliver exact internal spot accounting and a read-only saved-draft readiness preview (Phase 2b); this prepares accounting without funding or activation.
 - [x] Add durable private-sync attempts/receipts and conservative coverage status (Phase 2c-a); this records partial/failed evidence without certifying completeness.
+- [x] Retain exact OKX account-configuration observations and bind the provider `uid` immutably; borrow and mode flags remain evidence only and do not open activation.
 - [ ] Define exclusive initial spot ownership, budget consumption/reservations and strategy-local cash/position/PnL queries.
 - [ ] Account-mode, instrument-unit and available-funds preflight. Derivatives require their own account/risk design before activation.
 - [ ] Atomically validate/activate a draft from trusted fresh exchange facts; refuse overlapping/excess allocation and unsafe runtime edits.

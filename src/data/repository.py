@@ -45,6 +45,7 @@ from src.data.models import (
     KlineCache,
     OrderRecord,
     PositionRecord,
+    PrivateAccountConfigRecord,
     PrivateSyncReceiptRecord,
     PrivateUIDBindingRecord,
     RiskEventRecord,
@@ -55,6 +56,11 @@ from src.data.models import (
     normalize_account_assets,
 )
 from src.exchange.base import canonical_symbol
+from src.exchange.okx_account_facts import (
+    ACCOUNT_CONFIG_FIELDS,
+    AccountConfigFact,
+    parse_okx_account_config,
+)
 from src.exchange.okx_private_facts import parse_okx_spot_fill_page
 
 logger = logging.getLogger(__name__)
@@ -827,6 +833,51 @@ class _AccountingTransaction:
             raise ValueError("Private UID binding conflict")
         return scope_id
 
+    def commit_private_account_config(
+        self, fact: AccountConfigFact, *, raw_payload: object, received_at: int,
+    ) -> PrivateAccountConfigRecord:
+        """Retain raw config evidence and bind its UID, with no operational writes."""
+        scope_id = _receipt_scope(self.session)
+        received_at = _receipt_integer(received_at, "account config received time")
+        decoded, raw_json, payload_hash = _exact_payload(raw_payload)
+        if not isinstance(fact, AccountConfigFact) or parse_okx_account_config(decoded) != fact:
+            raise ValueError("Raw account config does not match typed fact")
+        self._exact_uid_scope(fact.uid)
+        self.bind_private_uid(fact.uid, received_at)
+        existing = self.session.get(
+            PrivateAccountConfigRecord, (scope_id, fact.uid, payload_hash),
+        )
+        if existing is not None:
+            return _exact_copy(existing)
+        values = {}
+        for name in ACCOUNT_CONFIG_FIELDS:
+            value = getattr(fact, name)
+            values[name] = None if value is MISSING else value
+            values[f"{name}_state"] = "missing" if value is MISSING else (
+                "null" if value is None else "value"
+            )
+        record = PrivateAccountConfigRecord(
+            account_scope_id=scope_id, uid=fact.uid, payload_hash=payload_hash,
+            received_at=received_at, raw_json=raw_json, **values,
+        )
+        self.session.add(record)
+        self.session.flush()
+        return _exact_copy(record)
+
+    def get_private_account_config(
+        self, uid: str | None = None,
+    ) -> list[PrivateAccountConfigRecord]:
+        scope_id = _receipt_scope(self.session)
+        bound_uid = self.get_private_uid()
+        if uid is not None:
+            self._exact_uid_scope(uid)
+        records = self.session.exec(select(PrivateAccountConfigRecord).order_by(
+            PrivateAccountConfigRecord.received_at, text("private_account_config.rowid"),
+        )).all()
+        if any(r.account_scope_id != scope_id or r.uid != bound_uid for r in records):
+            raise ValueError("Private account config scope or UID mismatch")
+        return [_exact_copy(record) for record in records]
+
     def get_exact_spot_fills(self, *, uid: str) -> list[SpotFillFact]:
         scope_id = self._exact_uid_scope(uid)
         records = self.session.exec(select(ExactSpotFillRecord).where(
@@ -1510,6 +1561,19 @@ class Repository:
             page, uid=uid, raw_payload=raw_payload, received_at=received_at,
             expected_cursor_version=expected_cursor_version, endpoint=endpoint,
         ))
+
+    def commit_private_account_config(
+        self, fact: AccountConfigFact, *, raw_payload: object, received_at: int,
+    ) -> PrivateAccountConfigRecord:
+        return self.atomic_accounting(lambda transaction: transaction.commit_private_account_config(
+            fact, raw_payload=raw_payload, received_at=received_at,
+        ))
+
+    def get_private_account_config(
+        self, uid: str | None = None,
+    ) -> list[PrivateAccountConfigRecord]:
+        with Session(self.engine) as session:
+            return _AccountingTransaction(session).get_private_account_config(uid=uid)
 
     def get_exact_spot_fills(self, *, uid: str) -> list[SpotFillFact]:
         with Session(self.engine) as session:
