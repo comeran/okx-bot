@@ -75,6 +75,21 @@ Allocation drafts do not activate strategy funds or grant live trading permissio
 Live strategy performance/aggregate views remain empty until strategy ownership,
 accounting and reconciliation are implemented.
 
+Saved allocation drafts have a read-only readiness preview in the strategy page.
+It compares proposals in their native quote currency and shows missing or blocking
+evidence. Cached asset availability is indicative: a recent provider timestamp or
+an empty stored order list does not prove a complete current exchange snapshot.
+The preview never allocates funds, initializes a ledger, or enables activation.
+
+The internal spot accounting kernel stores decimal strings in account-scoped
+tables. It supports cash-only prepared balances, buy/sell reservations, idempotent
+incremental fills with base/quote fees, cost basis and reconciled terminal release.
+Prepared balances model local accounting; they do not prove exchange funding or
+adopt existing holdings. This kernel is not connected to live order submission.
+Exact provider quote costs, other fee currencies/rebates, trusted synchronization
+receipts, account-wide funded allocation and reconciliation remain prerequisites
+for that integration. Unknown order outcomes retain reservations.
+
 ## Run locally
 
 Start the backend API on port 8080:

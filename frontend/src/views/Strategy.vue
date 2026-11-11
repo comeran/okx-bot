@@ -501,6 +501,7 @@ onMounted(() => {
     <StrategyAllocationPanel
       v-if="mode === 'edit' && selectedName && configByName(selectedName)"
       :strategy-name="selectedName"
+      :strategy-symbol="configByName(selectedName)?.symbol"
       :status="selectedStatus ?? 'unknown'"
     />
   </section>

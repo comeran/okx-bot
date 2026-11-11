@@ -19,6 +19,7 @@ Acceptance: explicit draft configuration persists without granting trading permi
 ## Phase 2 — account isolation and active strategy allocation
 
 - [x] Persist environment/account identity on live account, order, fill, position and reconciliation state through immutable scoped facts stores; keep legacy ambiguous rows audit-only.
+- [x] Deliver exact internal spot accounting and a read-only saved-draft readiness preview (Phase 2b); this prepares accounting without funding or activation.
 - [ ] Define exclusive initial spot ownership, budget consumption/reservations and strategy-local cash/position/PnL queries.
 - [ ] Account-mode, instrument-unit and available-funds preflight. Derivatives require their own account/risk design before activation.
 - [ ] Atomically validate/activate a draft from trusted fresh exchange facts; refuse overlapping/excess allocation and unsafe runtime edits.
@@ -30,7 +31,12 @@ Phase 2a implements account isolation for cached snapshots and explicit private 
 Spec: `docs/superpowers/specs/2026-11-11-account-isolation-design.md`.
 Plan/evidence: `docs/superpowers/plans/2026-11-11-account-isolation-plan.md` and `2026-11-11-account-isolation-progress.md`.
 
-Next slice: strategy-local cash/spot ownership, reservations and allocation preflight. Connect these to the scoped facts store and effective global/account kill state before considering activation; Phase 3 reconciliation/recovery remains an activation prerequisite.
+Phase 2b adds a separate Decimal ledger in scoped facts stores and a diagnostic preview that includes global/account kill state. Internal prepared ledgers do not prove funding or adopt exchange holdings. Available quote observations and provider timestamps remain indicative; missing identity, account mode, metadata, full synchronization and reconciliation keep activation closed.
+
+Spec: `docs/superpowers/specs/2026-11-11-spot-allocation-ledger-design.md`.
+Plan/evidence: `docs/superpowers/plans/2026-11-11-spot-allocation-ledger-plan.md` and `2026-11-11-spot-allocation-ledger-progress.md`.
+
+Next slice: trustworthy exact private-state ingestion and synchronization receipts, followed by durable reconciliation/recovery. Funded account-wide allocations and order-manager integration remain pending until these prerequisites have evidence.
 
 ## Phase 3 — reconciliation, unknown outcomes and lifecycle recovery
 

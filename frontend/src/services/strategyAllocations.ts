@@ -3,6 +3,8 @@ import axios from 'axios';
 import type {
   AllocationContext,
   StrategyAllocationEnvelope,
+  StrategyAllocationReadiness,
+  StrategyAllocationReadinessRequest,
   StrategyAllocationUpdate,
 } from '@/types/strategyAllocation';
 
@@ -17,6 +19,16 @@ export async function getAllocationContext(): Promise<AllocationContext> {
 
 export async function getStrategyAllocation(strategy: string): Promise<StrategyAllocationEnvelope> {
   const response = await axios.get<StrategyAllocationEnvelope>(allocationUrl(strategy));
+  return response.data;
+}
+
+export async function getStrategyAllocationReadiness(
+  strategy: string,
+  request: StrategyAllocationReadinessRequest,
+): Promise<StrategyAllocationReadiness> {
+  const response = await axios.get<StrategyAllocationReadiness>(`${allocationUrl(strategy)}/readiness`, {
+    params: request,
+  });
   return response.data;
 }
 
