@@ -1,0 +1,45 @@
+src/data/models.py
+  s_5754a483f5e2c0::t_e290ef32da18e4 168-213
+src/ops/exact_private_sync.py
+  s_5754a483f5e2c0::t_e290ef32da18e4 13-18,24-28,33-39,63-72,74-75,98-124
+tests/unit/test_account_balance_store.py
+  s_5754a483f5e2c0::t_25458dffef1ef1 28-30
+  s_5754a483f5e2c0::t_03e17110677ce5 1-27,31-184
+src/data/repository.py
+  s_5754a483f5e2c0::t_e290ef32da18e4 48,65-69,885-936,938,1635-1639,1645-1650
+  s_5754a483f5e2c0::t_25458dffef1ef1 1640-1644
+tests/unit/test_okx_balance_facts.py
+  s_5754a483f5e2c0::t_03e17110677ce5 1-148
+  s_5754a483f5e2c0::t_81cd9265d5cabe 149-151
+docs/superpowers/specs/2026-11-12-account-balance-facts-design.md
+  s_5754a483f5e2c0::t_e5b63236f4e0f1 1-43
+docs/superpowers/plans/2026-11-11-quant-system-roadmap.md
+  s_5754a483f5e2c0::t_e5b63236f4e0f1 25,47-49
+docs/superpowers/plans/2026-11-12-account-balance-facts-plan.md
+  s_5754a483f5e2c0::t_e5b63236f4e0f1 1-24,27-38
+  s_5754a483f5e2c0::t_19308c432e05d5 25-26
+src/exchange/okx_balance_facts.py
+  s_5754a483f5e2c0::t_e290ef32da18e4 1-126
+tests/unit/test_exact_balance_sync.py
+  s_5754a483f5e2c0::t_03e17110677ce5 1-8,11-15,18,22-102
+  s_5754a483f5e2c0::t_25458dffef1ef1 9-10,16-17,19-21
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "534957cc0840b5b48ad7dfdab2c041f864793ad4",
+  "prompts": {},
+  "logical_commit_id": "534957cc0840b5b48ad7dfdab2c041f864793ad4",
+  "sessions": {
+    "s_5754a483f5e2c0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1be4b-8fcb-7f73-917c-6d11f8ef4f92",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Zane <zane@bigo.sg>",
+      "total_additions": 831,
+      "total_deletions": 14
+    }
+  }
+}
