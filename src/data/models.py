@@ -126,6 +126,45 @@ for _action in ("UPDATE", "DELETE", "INSERT"):
     )
 
 
+class PrivateAccountConfigRecord(SQLModel, table=True):
+    """Append-only API observations, without trading or activation authority."""
+
+    __tablename__ = "private_account_config"
+    __table_args__ = (
+        CheckConstraint("received_at >= 0", name="ck_private_config_received"),
+        *(CheckConstraint(
+            f"({name}_state IN ('missing','null') AND {name} IS NULL) OR "
+            f"({name}_state = 'value' AND {name} IS NOT NULL)",
+            name=f"ck_private_config_{name}_state",
+        ) for name in (
+            "acct_lv", "acct_stp_mode", "pos_mode", "auto_loan", "enable_spot_borrow",
+            "fee_type", "settle_ccy", "main_uid",
+        )),
+    )
+
+    account_scope_id: str = Field(primary_key=True)
+    uid: str = Field(primary_key=True)
+    payload_hash: str = Field(primary_key=True)
+    received_at: int
+    raw_json: str = Field(sa_column=Column(Text, nullable=False))
+    acct_lv: str | None = None
+    acct_lv_state: str
+    acct_stp_mode: str | None = None
+    acct_stp_mode_state: str
+    pos_mode: str | None = None
+    pos_mode_state: str
+    auto_loan: str | None = None
+    auto_loan_state: str
+    enable_spot_borrow: str | None = None
+    enable_spot_borrow_state: str
+    fee_type: str | None = None
+    fee_type_state: str
+    settle_ccy: str | None = None
+    settle_ccy_state: str
+    main_uid: str | None = None
+    main_uid_state: str
+
+
 class ExactSpotFillRecord(SQLModel, table=True):
     """Exact provider text. Optional state distinguishes absent, null and value."""
 
