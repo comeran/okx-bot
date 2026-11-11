@@ -1,0 +1,33 @@
+src/ops/exact_private_sync.py
+  s_5754a483f5e2c0::t_008d5aa2c7679d 1,3,11-15,193-259,261-279
+  s_5754a483f5e2c0::t_ad70aef92a4b9b 260
+docs/superpowers/plans/2026-11-11-quant-system-roadmap.md
+  s_5754a483f5e2c0::t_f54e05fcd29f66 48,59
+docs/superpowers/specs/2026-11-11-exact-private-facts-design.md
+  s_5754a483f5e2c0::t_f54e05fcd29f66 30-57,60-64
+tests/unit/test_exact_fill_catchup.py
+  s_5754a483f5e2c0::t_4fef1270a19823 1-183,185-197,199-248
+  s_5754a483f5e2c0::t_efcf56e714cb65 184,198
+docs/superpowers/plans/2026-11-12-exact-private-sync-orchestration-plan.md
+  s_5754a483f5e2c0::t_f54e05fcd29f66 20,36-56,61,64-66
+  s_5754a483f5e2c0::t_ffe38f5e289847 21-22,57-60
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "db2ee1c678a637c88ddb29b0d7a74b4385a258ae",
+  "prompts": {},
+  "logical_commit_id": "db2ee1c678a637c88ddb29b0d7a74b4385a258ae",
+  "sessions": {
+    "s_5754a483f5e2c0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1be4b-8fcb-7f73-917c-6d11f8ef4f92",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Zane <zane@bigo.sg>",
+      "total_additions": 406,
+      "total_deletions": 21
+    }
+  }
+}
