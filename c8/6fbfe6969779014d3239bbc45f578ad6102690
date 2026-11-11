@@ -1,0 +1,30 @@
+tests/unit/test_account_config_store.py
+  s_5754a483f5e2c0::t_a2f7420515363b 1-146
+tests/unit/test_okx_account_facts.py
+  s_5754a483f5e2c0::t_a2f7420515363b 1-89
+src/data/repository.py
+  s_5754a483f5e2c0::t_71a377227ea87e 48,59-63,835-880,1563-1569,1571-1576
+src/exchange/okx_account_facts.py
+  s_5754a483f5e2c0::t_71a377227ea87e 1-93
+src/data/models.py
+  s_5754a483f5e2c0::t_71a377227ea87e 129-167
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "c86fbfe6969779014d3239bbc45f578ad6102690",
+  "prompts": {},
+  "logical_commit_id": "c86fbfe6969779014d3239bbc45f578ad6102690",
+  "sessions": {
+    "s_5754a483f5e2c0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1be4b-8fcb-7f73-917c-6d11f8ef4f92",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Zane <zane@bigo.sg>",
+      "total_additions": 433,
+      "total_deletions": 5
+    }
+  }
+}
