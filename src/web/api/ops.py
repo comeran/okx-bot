@@ -4,6 +4,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
+from inspect import Parameter, signature
 from types import SimpleNamespace
 
 from ccxt.base.errors import (
@@ -18,6 +19,7 @@ from ccxt.base.errors import (
 )
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, field_validator
+from sqlalchemy.exc import SQLAlchemyError
 
 from src.data.models import EXCHANGE_STRATEGY
 from src.data.repository import Repository
@@ -43,6 +45,15 @@ class KillSwitchRequest(BaseModel):
 class PrivateSyncRequest(BaseModel):
     symbols: list[str] | None = None
     since: int | None = None
+
+    @field_validator("since", mode="before")
+    @classmethod
+    def validate_since(cls, value: object) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 2**63 - 1:
+            raise ValueError("since must be a nonnegative signed 64-bit integer")
+        return value
 
     @field_validator("symbols")
     @classmethod
@@ -159,6 +170,19 @@ def _create_adapter(settings):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def _sync_scope_arguments(account_scope_id: str) -> dict[str, str]:
+    try:
+        parameters = signature(sync_private_state).parameters.values()
+    except (TypeError, ValueError):
+        return {}
+    if any(parameter.kind == Parameter.VAR_KEYWORD or (
+        parameter.name == "account_scope_id"
+        and parameter.kind in {Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY}
+    ) for parameter in parameters):
+        return {"account_scope_id": account_scope_id}
+    return {}
+
+
 def create_router(broadcast: RuntimeBroadcaster | None = None) -> APIRouter:
     router = APIRouter()
 
@@ -174,6 +198,27 @@ def create_router(broadcast: RuntimeBroadcaster | None = None) -> APIRouter:
             current_timestamp_ms(),
         )
         return serialize_kill_switch(state)
+
+    @router.get("/sync/private/status")
+    async def get_private_sync_status(
+        expected_account_scope_id: str | None = None,
+    ) -> dict[str, object]:
+        settings = deepcopy(settings_api._load_settings())
+        binding = bind_exchange_store(
+            settings.exchange, Repository(), expected_account_scope_id, require_available=True,
+        )
+        try:
+            status = binding.repository.get_private_sync_status()
+            return {
+                "context": binding.context,
+                **{key: record.model_dump() if record is not None else None
+                   for key, record in status.items()},
+            }
+        except (ValueError, SQLAlchemyError) as exc:
+            raise HTTPException(status_code=503, detail={
+                "code": "private_sync_status_unavailable",
+                "message": "Private synchronization evidence is unavailable",
+            }) from exc
 
     @router.post("/sync/private")
     async def sync_private(
@@ -219,6 +264,7 @@ def create_router(broadcast: RuntimeBroadcaster | None = None) -> APIRouter:
                 since=request.since,
                 timestamp_ms=current_timestamp_ms,
                 risk_event_notifier=publish_high_risk_event,
+                **_sync_scope_arguments(binding.context["account_scope_id"]),
             )
         except HTTPException:
             raise
@@ -242,6 +288,18 @@ def create_router(broadcast: RuntimeBroadcaster | None = None) -> APIRouter:
             ConnectionError,
         ) as exc:
             raise HTTPException(status_code=502, detail="OKX provider unavailable") from exc
+        except (ValueError, SQLAlchemyError) as exc:
+            if isinstance(exc, ValueError) and str(exc) == (
+                "Private sync attempt superseded by a newer committed generation"
+            ):
+                raise HTTPException(status_code=409, detail={
+                    "code": "private_sync_superseded",
+                    "message": "A newer private synchronization has already committed",
+                }) from exc
+            raise HTTPException(status_code=503, detail={
+                "code": "private_sync_unavailable",
+                "message": "Private synchronization is unavailable",
+            }) from exc
         finally:
             if adapter is not None:
                 try:

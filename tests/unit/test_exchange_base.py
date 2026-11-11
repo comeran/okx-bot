@@ -13,7 +13,7 @@ from src.core.types import (
     execution_type_family,
 )
 from src.exchange import base as exchange_base
-from src.exchange.base import OKXBaseAdapter
+from src.exchange.base import OKXBaseAdapter, RecentTradePage
 from src.exchange.errors import AcceptedUnknownOrderResultError, MalformedProviderData
 from src.exchange.factory import create_okx_adapter
 
@@ -3071,6 +3071,75 @@ async def test_okx_base_adapter_accepts_valid_empty_recent_trade_response():
     assert await adapter.fetch_recent_trade_snapshots() == []
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider_row_count", [0, 1, 100])
+async def test_okx_base_adapter_does_not_infer_trade_completeness_from_parsed_page_size(
+    provider_row_count,
+):
+    adapter = OKXBaseAdapter("", "", "", "spot")
+
+    async def fetch_my_trades(symbol=None, since=None, limit=None):
+        assert (symbol, since, limit) == ("BTC/USDT", 1, 200)
+        return [
+            {
+                "id": f"trade-{index}",
+                "order": "order-1",
+                "symbol": "BTC/USDT",
+                "side": "buy",
+                "amount": "0.1",
+                "price": "100",
+                "timestamp": 1000 + index,
+            }
+            for index in range(provider_row_count)
+        ]
+
+    FakeOKX.instances[0].fetch_my_trades = fetch_my_trades
+
+    page = await adapter.fetch_recent_trade_snapshots(["BTC-USDT"], since=1, limit=200)
+
+    assert len(page) == provider_row_count
+    assert page.mode == "since"
+    assert page.since == 1
+    assert page.complete is False
+
+
+@pytest.mark.parametrize(
+    ("since", "complete", "mode"),
+    [
+        (1, "true", "since"),
+        (1, 1, "since"),
+        (1, None, "since"),
+        (1, True, "unknown"),
+        (1, True, ""),
+        (1, True, 1),
+        (None, True, "since"),
+        (1, True, "recent"),
+        (1, True, "cumulative"),
+        (None, True, "recent"),
+        (-1, True, "since"),
+        (True, True, "since"),
+        (1.0, True, "since"),
+        (2**63, True, "since"),
+    ],
+)
+def test_recent_trade_page_rejects_invalid_coverage_metadata(since, complete, mode):
+    with pytest.raises(ValueError, match="trade page"):
+        RecentTradePage([], since=since, complete=complete, mode=mode)
+
+
+@pytest.mark.parametrize(
+    ("since", "mode"),
+    [(None, "cumulative"), (0, "since"), (2**63 - 1, "since")],
+)
+def test_recent_trade_page_preserves_explicit_complete_coverage(since, mode):
+    page = RecentTradePage([], since=since, complete=True, mode=mode)
+
+    assert page == []
+    assert page.complete is True
+    assert page.mode == mode
+    assert page.since == since
+
+
 @pytest.mark.parametrize("fee", [{"cost": "nan"}, {"cost": "inf"}, {"cost": "bad"}])
 def test_okx_base_adapter_rejects_invalid_trade_fee_costs(fee):
     adapter = OKXBaseAdapter("", "", "", "swap")
@@ -4320,7 +4389,11 @@ async def test_okx_base_adapter_empty_trade_scope_does_not_query_provider():
 
     fake.fetch_my_trades = fetch_my_trades
 
-    assert await adapter.fetch_recent_trade_snapshots([]) == []
+    page = await adapter.fetch_recent_trade_snapshots([])
+
+    assert page == []
+    assert page.mode == "recent"
+    assert page.complete is False
     assert calls == []
 
 
