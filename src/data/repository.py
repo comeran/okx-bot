@@ -20,6 +20,7 @@ from src.core.types import (
     _safe_timestamp,
     stable_blank_trade_fingerprint,
 )
+from src.data.allocations import release_strategy_drafts
 from src.data.models import (
     EXCHANGE_STRATEGY,
     AccountRecord,
@@ -1663,6 +1664,7 @@ class Repository:
             ).first()
             if existing is None:
                 return False
+            release_strategy_drafts(session, name, int(time.time() * 1000))
             session.delete(existing)
             session.commit()
             return True

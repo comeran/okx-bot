@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from src.data.repository import Repository
-from src.web.api import backtest, market, ops, settings, strategies, trading
+from src.web.api import allocations, backtest, market, ops, settings, strategies, trading
 from src.web.ws import WebSocketManager
 
 ws_manager = WebSocketManager()
@@ -166,6 +166,10 @@ def create_app() -> FastAPI:
         strategies.create_router(ws_manager.broadcast, strategy_runtime),
         prefix="/api/strategies",
         tags=["strategies"],
+    )
+    app.include_router(
+        allocations.create_router(strategy_runtime),
+        prefix="/api/allocations", tags=["allocations"],
     )
     app.include_router(backtest.router, prefix="/api/backtest", tags=["backtest"])
     app.include_router(trading.router, prefix="/api/trading", tags=["trading"])

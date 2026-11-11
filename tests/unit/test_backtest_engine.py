@@ -169,26 +169,36 @@ async def test_round_trip_metrics_use_position_pnl() -> None:
 
 
 async def test_sell_trade_marker_fields() -> None:
+    class FundedSellStrategy(BaseStrategy):
+        name = "funded_sell"
+
+        async def on_bar(self, bar):
+            if bar.timestamp == 1700000000000:
+                return await self.buy("BTC-USDT", 2)
+            if bar.timestamp == 1700000060000:
+                return await self.sell("BTC-USDT", 2)
+
     bars = [
         Bar(timestamp=1700000000000, open=100, high=101, low=99, close=100, volume=10),
         Bar(timestamp=1700000060000, open=100, high=101, low=99, close=100, volume=10),
+        Bar(timestamp=1700000120000, open=100, high=101, low=99, close=100, volume=10),
     ]
     engine = BacktestEngine(
         initial_capital=100000,
         matcher=OrderMatcher(slippage=0, fee_rate=0.001),
     )
 
-    report = await engine.run(SellStrategy(), bars)
+    report = await engine.run(FundedSellStrategy(), bars)
 
-    assert report.trades == [
+    assert report.trades[1:] == [
         {
             "symbol": "BTC-USDT",
             "side": "sell",
             "amount": 2,
             "price": 100,
-            "pnl": 0.0,
+            "pnl": -0.4,
             "fee": 0.2,
-            "timestamp": 1700000060000,
+            "timestamp": 1700000120000,
         }
     ]
 

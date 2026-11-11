@@ -6,6 +6,7 @@ import { useI18n } from 'vue-i18n';
 
 import AppPageHeader from '@/components/ui/AppPageHeader.vue';
 import StrategyEditorPanel from '@/components/strategy/StrategyEditorPanel.vue';
+import StrategyAllocationPanel from '@/components/strategy/StrategyAllocationPanel.vue';
 import StrategyList, { type StrategyListRow, type StrategyListStatusTone } from '@/components/strategy/StrategyList.vue';
 import { useDirtyGuard } from '@/composables/useDirtyGuard';
 import {
@@ -497,6 +498,11 @@ onMounted(() => {
         @leave-advanced="leaveAdvancedMode"
       />
     </div>
+    <StrategyAllocationPanel
+      v-if="mode === 'edit' && selectedName && configByName(selectedName)"
+      :strategy-name="selectedName"
+      :status="selectedStatus ?? 'unknown'"
+    />
   </section>
 </template>
 

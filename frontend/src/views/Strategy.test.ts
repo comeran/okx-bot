@@ -62,6 +62,18 @@ vi.mock('@/stores/strategies', () => ({
   useStrategiesStore: () => store,
 }));
 
+vi.mock('@/components/strategy/StrategyAllocationPanel.vue', async () => {
+  const { defineComponent, h } = await import('vue');
+  return {
+    default: defineComponent({
+      props: ['strategyName', 'status'],
+      setup(props) {
+        return () => h('allocation-panel', { 'data-testid': 'strategy-allocation', ...props });
+      },
+    }),
+  };
+});
+
 vi.mock('@/components/strategy/StrategyList.vue', async () => {
   const { defineComponent, h } = await import('vue');
   return {
@@ -301,6 +313,21 @@ describe('Strategy page', () => {
     expect(wrapper.text()).toContain('desk:eth');
     expect(selectButton(wrapper, 'strategies.actions.select:desk:btc').props['aria-pressed']).toBe('false');
     expect(selectButton(wrapper, 'strategies.actions.select:desk:eth').props['aria-pressed']).toBe('false');
+  });
+
+  it('opens independent allocation configuration only for an existing selected strategy, never a clone draft', async () => {
+    store.statuses['desk:btc'].status = 'stopped';
+    const wrapper = await mountPage();
+    expect(wrapper.findAll((node) => node.type === 'allocation-panel')).toHaveLength(0);
+    await wrapper.trigger(selectButton(wrapper, 'strategies.actions.select:desk:btc'), 'click');
+    expect(wrapper.getByTestId('strategy-allocation').props.strategyName).toBe('desk:btc');
+    expect(wrapper.getByTestId('strategy-allocation').props.status).toBe('stopped');
+    expect(store.start).not.toHaveBeenCalled();
+    await wrapper.trigger(buttons(wrapper, 'strategies.actions.clone:desk:btc')[0], 'click');
+    expect(wrapper.findAll((node) => node.type === 'allocation-panel')).toHaveLength(0);
+    expect(store.cloneConfig).not.toHaveBeenCalled();
+    expect(store.start).not.toHaveBeenCalled();
+    wrapper.unmount();
   });
 
   it('runs create, edit, clone, delete, start, and stop interactions with per-action loading', async () => {
