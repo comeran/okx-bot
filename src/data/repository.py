@@ -45,6 +45,7 @@ from src.data.models import (
     KlineCache,
     OrderRecord,
     PositionRecord,
+    PrivateAccountBalanceRecord,
     PrivateAccountConfigRecord,
     PrivateSyncReceiptRecord,
     PrivateUIDBindingRecord,
@@ -60,6 +61,11 @@ from src.exchange.okx_account_facts import (
     ACCOUNT_CONFIG_FIELDS,
     AccountConfigFact,
     parse_okx_account_config,
+)
+from src.exchange.okx_balance_facts import (
+    ACCOUNT_BALANCE_FIELDS,
+    AccountBalanceFact,
+    parse_okx_account_balance,
 )
 from src.exchange.okx_private_facts import parse_okx_spot_fill_page
 
@@ -878,6 +884,58 @@ class _AccountingTransaction:
             raise ValueError("Private account config scope or UID mismatch")
         return [_exact_copy(record) for record in records]
 
+    def commit_private_account_balance(
+        self, fact: AccountBalanceFact, *, raw_payload: object, received_at: int,
+        uid: str | None = None,
+    ) -> PrivateAccountBalanceRecord:
+        """Retain balance evidence under an existing UID, never bind from balances."""
+        scope_id = _receipt_scope(self.session)
+        received_at = _receipt_integer(received_at, "account balance received time")
+        decoded, raw_json, payload_hash = _exact_payload(raw_payload)
+        if not isinstance(fact, AccountBalanceFact) or parse_okx_account_balance(decoded) != fact:
+            raise ValueError("Raw account balance does not match typed fact")
+        bound_uid = self.get_private_uid()
+        if bound_uid is None:
+            raise ValueError("Account balance requires an existing private UID binding")
+        if uid is not None:
+            self._exact_uid_scope(uid)
+        existing = self.session.get(
+            PrivateAccountBalanceRecord, (scope_id, bound_uid, payload_hash),
+        )
+        if existing is not None:
+            return _exact_copy(existing)
+        values = {}
+        for name in ACCOUNT_BALANCE_FIELDS:
+            value = getattr(fact, name)
+            values[name] = None if value is MISSING else value
+            values[f"{name}_state"] = "missing" if value is MISSING else (
+                "null" if value is None else "value"
+            )
+        record = PrivateAccountBalanceRecord(
+            account_scope_id=scope_id, uid=bound_uid, payload_hash=payload_hash,
+            received_at=received_at, raw_json=raw_json,
+            details_json=json.dumps(decoded["data"][0]["details"], allow_nan=False,
+                                    sort_keys=True, separators=(",", ":")),
+            **values,
+        )
+        self.session.add(record)
+        self.session.flush()
+        return _exact_copy(record)
+
+    def get_private_account_balances(
+        self, uid: str | None = None,
+    ) -> list[PrivateAccountBalanceRecord]:
+        scope_id = _receipt_scope(self.session)
+        bound_uid = self.get_private_uid()
+        if uid is not None:
+            self._exact_uid_scope(uid)
+        records = self.session.exec(select(PrivateAccountBalanceRecord).order_by(
+            PrivateAccountBalanceRecord.received_at, text("private_account_balance.rowid"),
+        )).all()
+        if any(r.account_scope_id != scope_id or r.uid != bound_uid for r in records):
+            raise ValueError("Private account balance scope or UID mismatch")
+        return [_exact_copy(record) for record in records]
+
     def get_exact_spot_fills(self, *, uid: str) -> list[SpotFillFact]:
         scope_id = self._exact_uid_scope(uid)
         records = self.session.exec(select(ExactSpotFillRecord).where(
@@ -1574,6 +1632,22 @@ class Repository:
     ) -> list[PrivateAccountConfigRecord]:
         with Session(self.engine) as session:
             return _AccountingTransaction(session).get_private_account_config(uid=uid)
+
+    def commit_private_account_balance(
+        self, fact: AccountBalanceFact, *, raw_payload: object, received_at: int,
+        uid: str | None = None,
+    ) -> PrivateAccountBalanceRecord:
+        return self.atomic_accounting(
+            lambda transaction: transaction.commit_private_account_balance(
+                fact, uid=uid, raw_payload=raw_payload, received_at=received_at,
+            ),
+        )
+
+    def get_private_account_balances(
+        self, uid: str | None = None,
+    ) -> list[PrivateAccountBalanceRecord]:
+        with Session(self.engine) as session:
+            return _AccountingTransaction(session).get_private_account_balances(uid=uid)
 
     def get_exact_spot_fills(self, *, uid: str) -> list[SpotFillFact]:
         with Session(self.engine) as session:

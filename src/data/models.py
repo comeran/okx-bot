@@ -165,6 +165,52 @@ class PrivateAccountConfigRecord(SQLModel, table=True):
     main_uid_state: str
 
 
+class PrivateAccountBalanceRecord(SQLModel, table=True):
+    """Append-only raw balances; USD equity never represents USDT cash."""
+
+    __tablename__ = "private_account_balance"
+    __table_args__ = (
+        CheckConstraint("received_at >= 0", name="ck_private_balance_received"),
+        *(CheckConstraint(
+            f"({name}_state IN ('missing','null') AND {name} IS NULL) OR "
+            f"({name}_state = 'value' AND {name} IS NOT NULL)",
+            name=f"ck_private_balance_{name}_state",
+        ) for name in ("total_eq", "adj_eq", "avail_eq", "u_time")),
+    )
+
+    account_scope_id: str = Field(primary_key=True)
+    uid: str = Field(primary_key=True)
+    payload_hash: str = Field(primary_key=True)
+    received_at: int
+    raw_json: str = Field(sa_column=Column(Text, nullable=False))
+    details_json: str = Field(sa_column=Column(Text, nullable=False))
+    total_eq: str | None = None
+    total_eq_state: str
+    adj_eq: str | None = None
+    adj_eq_state: str
+    avail_eq: str | None = None
+    avail_eq_state: str
+    u_time: str | None = None
+    u_time_state: str
+
+
+# Keep audit observations append-only, including INSERT OR REPLACE collisions.
+for _action in ("UPDATE", "DELETE", "INSERT"):
+    _condition = (
+        " WHEN EXISTS (SELECT 1 FROM private_account_balance "
+        "WHERE account_scope_id = NEW.account_scope_id AND uid = NEW.uid "
+        "AND payload_hash = NEW.payload_hash)" if _action == "INSERT" else ""
+    )
+    event.listen(
+        PrivateAccountBalanceRecord.__table__, "after_create",
+        DDL(
+            f"CREATE TRIGGER private_balance_no_{_action.lower()} BEFORE {_action} "
+            f"ON private_account_balance{_condition} "
+            "BEGIN SELECT RAISE(ABORT, 'append-only private balance observation'); END"
+        ).execute_if(dialect="sqlite"),
+    )
+
+
 class ExactSpotFillRecord(SQLModel, table=True):
     """Exact provider text. Optional state distinguishes absent, null and value."""
 
