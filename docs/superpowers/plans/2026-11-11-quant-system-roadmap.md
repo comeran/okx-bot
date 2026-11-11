@@ -22,6 +22,7 @@ Acceptance: explicit draft configuration persists without granting trading permi
 - [x] Deliver exact internal spot accounting and a read-only saved-draft readiness preview (Phase 2b); this prepares accounting without funding or activation.
 - [x] Add durable private-sync attempts/receipts and conservative coverage status (Phase 2c-a); this records partial/failed evidence without certifying completeness.
 - [x] Retain exact OKX account-configuration observations and bind the provider `uid` immutably; borrow and mode flags remain evidence only and do not open activation.
+- [x] Retain exact raw account-balance observations under the existing scoped UID binding, preserving USD equity, per-currency cash strings and missing/null/empty states. Identical payload replay is idempotent; this evidence does not fund allocations or prove available funds.
 - [ ] Define exclusive initial spot ownership, budget consumption/reservations and strategy-local cash/position/PnL queries.
 - [ ] Account-mode, instrument-unit and available-funds preflight. Derivatives require their own account/risk design before activation.
 - [ ] Atomically validate/activate a draft from trusted fresh exchange facts; refuse overlapping/excess allocation and unsafe runtime edits.
@@ -43,7 +44,9 @@ Phase 2c-a adds account-bound attempt/receipt status, same-transaction projectio
 Spec: `docs/superpowers/specs/2026-11-11-private-sync-receipts-design.md`.
 Plan/evidence: `docs/superpowers/plans/2026-11-11-private-sync-receipts-plan.md`.
 
-Next slice: instrument-rule evidence, bounded catch-up policy and reconciliation/recovery, building on the delivered single-response account-config acquisition and resumable exact fill-page ingestion. Funded account-wide allocations and order-manager integration remain pending until these prerequisites have evidence.
+Next slice: instrument-rule evidence, bounded catch-up policy and reconciliation/recovery, building on the delivered single-response account-config/balance acquisition and resumable exact fill-page ingestion. Funded account-wide allocations and order-manager integration remain pending until these prerequisites have evidence.
+
+Balance spec/evidence: `docs/superpowers/specs/2026-11-12-account-balance-facts-design.md` and `docs/superpowers/plans/2026-11-12-account-balance-facts-plan.md`.
 
 ## Phase 3 — reconciliation, unknown outcomes and lifecycle recovery
 

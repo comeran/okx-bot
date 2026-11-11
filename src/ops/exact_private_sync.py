@@ -10,17 +10,33 @@ from __future__ import annotations
 import asyncio
 from typing import Protocol
 
-from src.core.private_facts import SpotFillPage
-from src.data.models import ExactSpotFillCursorRecord, PrivateAccountConfigRecord
+from src.core.private_facts import SpotFillPage, validate_raw_text
+from src.data.models import (
+    ExactSpotFillCursorRecord,
+    PrivateAccountBalanceRecord,
+    PrivateAccountConfigRecord,
+)
 from src.exchange.okx_account_facts import (
     AccountConfigFact,
     OKXAccountConfigFactsAdapter,
     RawOKXAccountConfigExchange,
 )
+from src.exchange.okx_balance_facts import (
+    AccountBalanceFact,
+    OKXAccountBalanceFactsAdapter,
+    RawOKXAccountBalanceExchange,
+)
 from src.exchange.okx_private_facts import OKXSpotFillFactsAdapter, RawOKXFillExchange
 
 
 class ExactPrivateFactsRepository(Protocol):
+    def get_private_uid(self) -> str | None: ...
+
+    def commit_private_account_balance(
+        self, fact: AccountBalanceFact, *, raw_payload: object, received_at: int,
+        uid: str | None = None,
+    ) -> PrivateAccountBalanceRecord: ...
+
     def commit_private_account_config(
         self, fact: AccountConfigFact, *, raw_payload: object, received_at: int,
     ) -> PrivateAccountConfigRecord: ...
@@ -47,6 +63,16 @@ class _CapturedConfigExchange:
         return self.payload
 
 
+class _CapturedBalanceExchange:
+    def __init__(self, exchange: RawOKXAccountBalanceExchange) -> None:
+        self.exchange = exchange
+        self.payload: object = None
+
+    async def private_get_account_balance(self, params: dict[str, str]) -> object:
+        self.payload = await self.exchange.private_get_account_balance(params)
+        return self.payload
+
+
 class _CapturedFillExchange:
     def __init__(self, exchange: RawOKXFillExchange) -> None:
         self.exchange = exchange
@@ -69,6 +95,33 @@ async def sync_exact_account_config(
     await asyncio.sleep(0)
     return repository.commit_private_account_config(
         fact, raw_payload=captured.payload, received_at=received_at,
+    )
+
+
+async def sync_exact_account_balance(
+    repository: ExactPrivateFactsRepository,
+    exchange: RawOKXAccountBalanceExchange,
+    received_at: int,
+    *,
+    uid: str | None = None,
+) -> PrivateAccountBalanceRecord:
+    """Collect one raw balance for a previously bound UID, without funding policy.
+
+    The endpoint does not supply identity. The caller must provide the transport
+    for the already bound account; this helper cannot verify credential ownership.
+    """
+    bound_uid = repository.get_private_uid()
+    if bound_uid is None:
+        raise ValueError("Account balance requires an existing private UID binding")
+    if uid is not None:
+        validate_raw_text(uid, "UID")
+        if uid != bound_uid:
+            raise ValueError("Private UID binding conflict")
+    captured = _CapturedBalanceExchange(exchange)
+    fact = await OKXAccountBalanceFactsAdapter(captured).fetch()
+    await asyncio.sleep(0)
+    return repository.commit_private_account_balance(
+        fact, uid=bound_uid, raw_payload=captured.payload, received_at=received_at,
     )
 
 
