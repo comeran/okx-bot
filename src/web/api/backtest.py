@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import math
 import time
+from typing import Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from src.backtest.engine import BacktestEngine
+from src.backtest.engine import BacktestEngine, spot_backtest_symbol
 from src.backtest.historical_data import (
     MAX_PAGE_LIMIT,
     InsufficientHistoricalDataError,
@@ -34,14 +36,19 @@ class BacktestRequest(BaseModel):
     start_time: int
     end_time: int
     initial_capital: float
+    market_type: Literal["spot"] = "spot"
 
 
 @router.post("/run")
 async def run_backtest(req: BacktestRequest) -> dict[str, float | int]:
     if req.end_time <= req.start_time:
         raise HTTPException(status_code=422, detail="end_time must be after start_time")
-    if req.initial_capital <= 0:
+    if not math.isfinite(req.initial_capital) or req.initial_capital <= 0:
         raise HTTPException(status_code=422, detail="initial_capital must be greater than 0")
+    try:
+        symbol = spot_backtest_symbol(req.symbol)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
     timeframe_ms = OKX_RUNTIME_TIMEFRAME_MILLISECONDS.get(req.timeframe)
     if timeframe_ms:
         requested_bars = (req.end_time - req.start_time) // timeframe_ms + 1
@@ -73,10 +80,15 @@ async def run_backtest(req: BacktestRequest) -> dict[str, float | int]:
     else:
         raise HTTPException(status_code=404, detail="Strategy not found")
 
+    # Research requests may override a saved strategy's instrument and timeframe.
+    # Apply both before loading data so the strategy and account share one context.
+    strategy.symbol = symbol
+    strategy.timeframe = req.timeframe
+
     try:
         bars = await ensure_historical_bars(
             repo=repository,
-            symbol=req.symbol,
+            symbol=symbol,
             timeframe=req.timeframe,
             start=req.start_time,
             end=req.end_time,
@@ -113,9 +125,6 @@ async def run_backtest(req: BacktestRequest) -> dict[str, float | int]:
             detail="insufficient historical data for requested backtest range",
         )
 
-    if hasattr(strategy, "symbol"):
-        strategy.symbol = req.symbol
-
     backtest_config = load_backtest_config()
     report = await BacktestEngine(
         initial_capital=req.initial_capital,
@@ -123,6 +132,8 @@ async def run_backtest(req: BacktestRequest) -> dict[str, float | int]:
             slippage=backtest_config.slippage,
             fee_rate=backtest_config.fee_rate,
         ),
+        market_type=req.market_type,
+        symbol=symbol,
     ).run(strategy, bars)
     metrics = {
         "total_return": report.total_return,
@@ -136,7 +147,7 @@ async def run_backtest(req: BacktestRequest) -> dict[str, float | int]:
     result = BacktestResultRecord(
         id=result_id,
         strategy=req.strategy,
-        symbol=req.symbol,
+        symbol=symbol,
         timeframe=req.timeframe,
         start_time=req.start_time,
         end_time=req.end_time,
