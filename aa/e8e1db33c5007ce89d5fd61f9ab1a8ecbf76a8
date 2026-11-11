@@ -1,0 +1,125 @@
+src/data/allocations.py
+  s_5754a483f5e2c0::t_154fd7e466fbe7 126-144
+  s_5754a483f5e2c0::t_6eaed8152499d9 191-192
+  s_5754a483f5e2c0::t_823dc0f017401d 1-125,145-190,193-255
+src/web/api/backtest.py
+  s_5754a483f5e2c0::t_518c43b8f09305 3,5,11,39,46,48-51,83-87,91,135-136,150
+frontend/src/locales/en.ts
+  s_5754a483f5e2c0::t_dc6862e234cf35 183-213
+docs/superpowers/plans/2026-11-11-quant-foundation-progress.md
+  s_5754a483f5e2c0::t_e3c023a14d22c7 45
+  s_5754a483f5e2c0::t_c44f73c839b3aa 21-23,25-27
+  s_5754a483f5e2c0::t_e2ce9c63db2222 24,30-34
+  s_5754a483f5e2c0::t_e6a9819f23bbc4 28
+  s_5754a483f5e2c0::t_1870ce10450ce9 1-6,9-20,29,38-40
+  s_5754a483f5e2c0::t_37e64e2ffd668f 7-8
+  s_5754a483f5e2c0::t_9d11b875c389b4 35
+  s_5754a483f5e2c0::t_2e4793a734ad19 41-44
+  s_5754a483f5e2c0::t_52b11431241f8f 46
+  s_5754a483f5e2c0::t_77d63d4797e8d0 36-37
+tests/integration/test_allocation_api.py
+  s_5754a483f5e2c0::t_19b6c8477a377d 17-22,24-26,60,78,83,90,100,107,110,119,136,162,185,190,207
+  s_5754a483f5e2c0::t_8a175d3dd7ad0f 281-324
+  s_5754a483f5e2c0::t_1dcdf173c1bd50 2-5,7-16,27-58,61-77,79-81,84-88,91-98,101-105,108-109,111-117,120-134,137-150,155-160,163-183,186-188,191-205,208-209
+  s_5754a483f5e2c0::t_b3b8b44d0cef6a 23,59,82,89,99,106,118,135,161,184,189,206,217,230,234,250,272
+  s_5754a483f5e2c0::t_ded8be4212bb8b 1,6,254-271,273-280
+  s_5754a483f5e2c0::t_6eaed8152499d9 151-154
+  s_5754a483f5e2c0::t_474325037f3b6b 210-216,218-229,231-233,235-249,251-253
+frontend/src/services/strategyAllocations.ts
+  s_5754a483f5e2c0::t_9b3f3a66de8872 1-33,36-37,39-41
+  s_5754a483f5e2c0::t_77da3443c26d3b 34
+  s_5754a483f5e2c0::t_b2b1cc3709acca 35,38
+tests/unit/test_allocations.py
+  s_5754a483f5e2c0::t_b05dc045fe0afb 1-9,12-167
+  s_5754a483f5e2c0::t_ded8be4212bb8b 168-200,241-242
+  s_5754a483f5e2c0::t_6eaed8152499d9 11
+  s_5754a483f5e2c0::t_8a175d3dd7ad0f 10,201-240
+src/backtest/engine.py
+  s_5754a483f5e2c0::t_8fb7f126e90829 22-29,163-164
+  s_5754a483f5e2c0::t_460c38c41b441a 34,191
+  s_5754a483f5e2c0::t_518c43b8f09305 1-2,4,10-21,30-33,35,39-45,49-51,98-115,120-139,147-162,165-175,179-180,182-183,185-186,188-190,194-197,219-226,229,237-241,243,252-253,265-269,272-273,290,294,305-309,320-328
+  s_5754a483f5e2c0::t_8b8342b743afae 258-262
+  s_5754a483f5e2c0::t_d7fee506897f4e 116-119,242
+  s_5754a483f5e2c0::t_fbaa62249eed87 264
+frontend/src/views/Strategy.vue
+  s_5754a483f5e2c0::t_dc6862e234cf35 9,501-505
+docs/superpowers/plans/2026-11-11-quant-system-roadmap.md
+  s_5754a483f5e2c0::t_37e64e2ffd668f 5-6
+  s_5754a483f5e2c0::t_e2ce9c63db2222 9-12
+  s_5754a483f5e2c0::t_1870ce10450ce9 1-4,7-8,13-67
+src/web/api/allocations.py
+  s_5754a483f5e2c0::t_26c34bf1338107 1-30,33-85,88-118,122-125,141-155,159-171,174-175,178-188
+  s_5754a483f5e2c0::t_154fd7e466fbe7 32,119-121,133-140,156-158,173,176-177
+  s_5754a483f5e2c0::t_6eaed8152499d9 86-87,126-128
+  s_5754a483f5e2c0::t_9dfa1761adc8a9 31,129-132,172
+frontend/src/types/strategyAllocation.ts
+  s_5754a483f5e2c0::t_77da3443c26d3b 43
+  s_5754a483f5e2c0::t_9b3f3a66de8872 1-42,45
+  s_5754a483f5e2c0::t_b2b1cc3709acca 44
+frontend/src/locales/zh-CN.ts
+  s_5754a483f5e2c0::t_dc6862e234cf35 183-213
+tests/unit/test_backtest_engine.py
+  s_5754a483f5e2c0::t_8a9a09282f2190 172-180,184,191,193,199,201
+docs/superpowers/plans/2026-11-11-quant-foundation-plan.md
+  s_5754a483f5e2c0::t_e2ce9c63db2222 110-111
+  s_5754a483f5e2c0::t_8822c9e1c00e02 36-55,57
+  s_5754a483f5e2c0::t_1870ce10450ce9 1-31,33,35,59-68,73-77,79,81-82,85-87,91-97,103-107
+  s_5754a483f5e2c0::t_e3c023a14d22c7 32,34,56,83-84
+  s_5754a483f5e2c0::t_2e4793a734ad19 78
+  s_5754a483f5e2c0::t_3dbfa739294bb6 58,69-72,80,88-90,98-102,108-109
+src/web/app.py
+  s_5754a483f5e2c0::t_26c34bf1338107 12,169-170
+  s_5754a483f5e2c0::t_6eaed8152499d9 171-172
+docs/superpowers/specs/2026-11-11-quant-foundation-design.md
+  s_5754a483f5e2c0::t_37e64e2ffd668f 7-8
+  s_5754a483f5e2c0::t_e3c023a14d22c7 15
+  s_5754a483f5e2c0::t_1870ce10450ce9 1-6,9-14,16-45
+frontend/src/views/Strategy.test.ts
+  s_5754a483f5e2c0::t_57fcfb2e3dd91d 65-76,316-330
+.gitignore
+  s_5754a483f5e2c0::t_52b11431241f8f 9
+frontend/src/components/strategy/StrategyAllocationPanel.vue
+  s_5754a483f5e2c0::t_fed73a079e2cc1 141,186
+  s_5754a483f5e2c0::t_77da3443c26d3b 29,84,95,99-102,104,116,120
+  s_5754a483f5e2c0::t_9b3f3a66de8872 1-28,30-83,85-94,97-98,105-115,117-119,122-125,127-140,142-185,187-200
+  s_5754a483f5e2c0::t_b2b1cc3709acca 96,103,121,126
+src/data/repository.py
+  s_5754a483f5e2c0::t_154fd7e466fbe7 23,1667
+tests/unit/test_backtest_spot_account.py
+  s_5754a483f5e2c0::t_e3ee5785ac5384 340-342
+  s_5754a483f5e2c0::t_8a9a09282f2190 188-193,389-449
+  s_5754a483f5e2c0::t_6ce1b55cc73d57 1,3-7,9-13,18-160,164-187,194-195,197-210,212-230,256-270,275,292-293,343-348,350-388
+  s_5754a483f5e2c0::t_8bca7bc7b5d6cb 271-274,276-291
+  s_5754a483f5e2c0::t_40463c35202c5c 294-339
+  s_5754a483f5e2c0::t_70839e1174e97d 14-17,349
+  s_5754a483f5e2c0::t_6501715f84adba 2,8,161-163,196,211,231-255
+  s_5754a483f5e2c0::t_bd6e1035d098d7 450-468
+frontend/src/components/strategy/StrategyAllocationPanel.test.ts
+  s_5754a483f5e2c0::t_29a5fe190cebfe 1-71,73-81,83,85-100,141-177
+  s_5754a483f5e2c0::t_cb675830ab1f8d 72,82,84,106,115-137
+  s_5754a483f5e2c0::t_f01b4461dbadcc 101-105,107-114,138-140
+frontend/src/services/strategyAllocations.test.ts
+  s_5754a483f5e2c0::t_29a5fe190cebfe 1-18,23-26,29-30
+  s_5754a483f5e2c0::t_cb675830ab1f8d 19-22,27-28
+tests/integration/test_backtest_flow.py
+  s_5754a483f5e2c0::t_8bca7bc7b5d6cb 2-3,9,11-12,96-198
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "aae8e1db33c5007ce89d5fd61f9ab1a8ecbf76a8",
+  "prompts": {},
+  "logical_commit_id": "aae8e1db33c5007ce89d5fd61f9ab1a8ecbf76a8",
+  "sessions": {
+    "s_5754a483f5e2c0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1be4b-8fcb-7f73-917c-6d11f8ef4f92",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Zane <zane@bigo.sg>",
+      "total_additions": 2768,
+      "total_deletions": 161
+    }
+  }
+}
