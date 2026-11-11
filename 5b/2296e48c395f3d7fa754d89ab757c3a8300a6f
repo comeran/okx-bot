@@ -1,0 +1,24 @@
+tests/unit/test_exact_facts_store.py
+  s_5754a483f5e2c0::t_f765d11ad41e5a 4,254-282
+src/data/repository.py
+  s_5754a483f5e2c0::t_ced4891e96170a 881-908
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "5b2296e48c395f3d7fa754d89ab757c3a8300a6f",
+  "prompts": {},
+  "logical_commit_id": "5b2296e48c395f3d7fa754d89ab757c3a8300a6f",
+  "sessions": {
+    "s_5754a483f5e2c0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1be4b-8fcb-7f73-917c-6d11f8ef4f92",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Zane <zane@bigo.sg>",
+      "total_additions": 718,
+      "total_deletions": 14
+    }
+  }
+}
