@@ -51,6 +51,45 @@ Backtests can run with public OKX historical market data; private trading/accoun
 
 Set `OKX_BOT_DB_PATH` to override the default SQLite path (`data/bot.db`); the test suite uses this to keep tests off the real database.
 
+Current private spot facts are stored separately for each API-key fingerprint and
+OKX environment under `account-facts/<master-database-filename>/` next to the master
+database. With the default path this is `data/account-facts/bot.db/`. The master
+database retains strategy configuration, allocation drafts, paper/backtest data and
+legacy live audit records. Legacy live records are not imported into the current
+account view. Changing the API key starts a separate history, even when both keys
+belong to the same exchange account; the key binding is not verified account identity.
+
+Back up the master database and the entire matching facts directory together.
+Stop the backend before copying SQLite files so pending WAL writes are included.
+A facts file with missing or mismatching identity metadata is rejected; it is never
+silently reused as another account's file.
+
+The current-account client first reads `GET /api/trading/context`, then supplies
+its `account_scope_id` as `expected_account_scope_id` for snapshot reads, exchange
+views, private refresh/sync and the exchange WebSocket. Context and cached snapshot
+reads do not contact OKX. Missing snapshots remain unavailable until an explicit
+private refresh/sync succeeds. Local `paper`/`demo` execution is distinct from the
+OKX sandbox environment selected by `exchange.demo`.
+
+Allocation drafts do not activate strategy funds or grant live trading permission.
+Live strategy performance/aggregate views remain empty until strategy ownership,
+accounting and reconciliation are implemented.
+
+Saved allocation drafts have a read-only readiness preview in the strategy page.
+It compares proposals in their native quote currency and shows missing or blocking
+evidence. Cached asset availability is indicative: a recent provider timestamp or
+an empty stored order list does not prove a complete current exchange snapshot.
+The preview never allocates funds, initializes a ledger, or enables activation.
+
+The internal spot accounting kernel stores decimal strings in account-scoped
+tables. It supports cash-only prepared balances, buy/sell reservations, idempotent
+incremental fills with base/quote fees, cost basis and reconciled terminal release.
+Prepared balances model local accounting; they do not prove exchange funding or
+adopt existing holdings. This kernel is not connected to live order submission.
+Exact provider quote costs, other fee currencies/rebates, trusted synchronization
+receipts, account-wide funded allocation and reconciliation remain prerequisites
+for that integration. Unknown order outcomes retain reservations.
+
 ## Run locally
 
 Start the backend API on port 8080:

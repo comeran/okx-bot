@@ -4,12 +4,14 @@ import os
 import re
 import secrets
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from src.core.runtime_settings import load_runtime_settings
 from src.data.repository import Repository
 from src.web.api import allocations, backtest, market, ops, settings, strategies, trading
+from src.web.exchange_context import BoundExchangeStore, bind_exchange_store
 from src.web.ws import WebSocketManager
 
 ws_manager = WebSocketManager()
@@ -35,8 +37,10 @@ def _supplied_api_token(headers: object, query_token: str | None = None) -> str:
 
 
 
-def runtime_snapshot(strategy_runtime: strategies.StrategyRuntimeState) -> dict[str, object]:
-    return ops.exchange_snapshot(Repository())
+def runtime_snapshot(binding: BoundExchangeStore) -> dict[str, object]:
+    return ops.exchange_snapshot(
+        binding.repository, context=binding.context, master=binding.master,
+    )
 
 
 def strategy_runtime_snapshot(
@@ -147,13 +151,26 @@ def create_app() -> FastAPI:
             if requested_strategy not in known_strategies:
                 await ws.close(code=1008, reason="unknown websocket strategy")
                 return
-        await ws_manager.connect(
+        binding = None
+        if requested_scope == "exchange":
+            try:
+                binding = bind_exchange_store(
+                    load_runtime_settings().exchange, Repository(),
+                    ws.query_params.get("expected_account_scope_id"), require_available=True,
+                )
+            except HTTPException:
+                await ws.close(code=1008, reason="exchange account binding unavailable")
+                return
+        connected = await ws_manager.connect(
             ws,
             scope=requested_scope,
             strategy=requested_strategy,
+            context=binding.context if binding is not None else None,
         )
+        if not connected:
+            return
         if requested_scope == "exchange":
-            await ws.send_json(runtime_snapshot(strategy_runtime))
+            await ws.send_json(runtime_snapshot(binding))
         if requested_scope == "strategy":
             await ws.send_json(strategy_runtime_snapshot(strategy_runtime, requested_strategy))
         try:
@@ -175,7 +192,9 @@ def create_app() -> FastAPI:
     app.include_router(trading.router, prefix="/api/trading", tags=["trading"])
     app.include_router(market.router, prefix="/api/market", tags=["market"])
     app.include_router(ops.create_router(ws_manager.broadcast), prefix="/api/ops", tags=["ops"])
-    app.include_router(settings.create_router(), prefix="/api/settings", tags=["settings"])
+    app.include_router(
+        settings.create_router(ws_manager.broadcast), prefix="/api/settings", tags=["settings"],
+    )
     return app
 
 

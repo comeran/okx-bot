@@ -1,13 +1,22 @@
 import axios from 'axios';
 import { describe, expect, it, vi } from 'vitest';
 
-import { fetchStrategyPerformance } from './trading';
+import { fetchExchangeSnapshot, fetchStrategyPerformance, fetchTradingContext } from './trading';
 
 vi.mock('axios');
 
 const mockedAxios = vi.mocked(axios);
 
 describe('trading service', () => {
+  it('reads authoritative context and binds snapshots and performance queries', async () => {
+    mockedAxios.get.mockResolvedValue({ data: { available: true } });
+    await fetchTradingContext();
+    await fetchExchangeSnapshot('scope/A');
+    await fetchStrategyPerformance('scope/A');
+    expect(mockedAxios.get).toHaveBeenCalledWith('/api/trading/context');
+    expect(mockedAxios.get).toHaveBeenCalledWith('/api/trading/snapshot', { params: { expected_account_scope_id: 'scope/A' } });
+    expect(mockedAxios.get).toHaveBeenCalledWith('/api/trading/strategy-performance', { params: { expected_account_scope_id: 'scope/A' } });
+  });
   it('fetches strategy performance from the trading API', async () => {
     const rows = [
       {

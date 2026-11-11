@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 
 import SectionCard from '@/components/ui/SectionCard.vue';
+import StrategyAllocationReadiness from './StrategyAllocationReadiness.vue';
+import { matchesExecutionContext, useAccountContextStore } from '@/stores/accountContext';
 import {
   deleteStrategyAllocation,
   getStrategyAllocation,
@@ -10,8 +12,9 @@ import {
 } from '@/services/strategyAllocations';
 import type { StrategyAllocationEnvelope } from '@/types/strategyAllocation';
 
-const props = defineProps<{ strategyName: string; status?: string }>();
+const props = defineProps<{ strategyName: string; status?: string; strategySymbol?: string }>();
 const { t } = useI18n();
+const accountContext = useAccountContextStore();
 const allocation = ref<StrategyAllocationEnvelope | null>(null);
 const budget = ref('');
 const loading = ref(false);
@@ -28,6 +31,7 @@ const canEdit = computed(() => Boolean(
   allocation.value?.context.available
   && allocation.value.context.scope_id
   && allocation.value.can_edit
+  && matchesExecutionContext(accountContext.context, allocation.value.execution_context)
   && stopped.value
   && !loading.value && !busy.value && !needsRefresh.value,
 ));
@@ -45,6 +49,14 @@ const unavailableMessage = computed(() => (
 
 function applyEnvelope(envelope: StrategyAllocationEnvelope): void {
   if (envelope.strategy !== props.strategyName) throw new Error(t('strategies.allocation.loadFailed'));
+  const context = accountContext.context;
+  const unavailableMatch = context && !context.available && !envelope.execution_context?.available
+    && !envelope.context.available && envelope.execution_context?.account_scope_id === null
+    && envelope.execution_context.environment === context.environment
+    && envelope.execution_context.market_type === context.market_type;
+  if (!matchesExecutionContext(context, envelope.execution_context) && !unavailableMatch) {
+    throw new Error(t('strategies.allocation.loadFailed'));
+  }
   allocation.value = envelope;
   budget.value = envelope.draft === null ? '' : String(envelope.draft.budget);
 }
@@ -63,6 +75,7 @@ function showFailure(cause: unknown, fallback: string): void {
 async function load(): Promise<void> {
   const sequence = ++requestSequence;
   const strategy = props.strategyName;
+  const epoch = accountContext.epoch;
   allocation.value = null;
   budget.value = '';
   loading.value = true;
@@ -70,13 +83,14 @@ async function load(): Promise<void> {
   error.value = '';
   notice.value = '';
   needsRefresh.value = false;
+  if (!accountContext.context) { loading.value = false; return; }
   try {
     const result = await getStrategyAllocation(strategy);
-    if (sequence === requestSequence) applyEnvelope(result);
+    if (sequence === requestSequence && epoch === accountContext.epoch) applyEnvelope(result);
   } catch (cause) {
-    if (sequence === requestSequence) showFailure(cause, t('strategies.allocation.loadFailed'));
+    if (sequence === requestSequence && epoch === accountContext.epoch) showFailure(cause, t('strategies.allocation.loadFailed'));
   } finally {
-    if (sequence === requestSequence) loading.value = false;
+    if (sequence === requestSequence && epoch === accountContext.epoch) loading.value = false;
   }
 }
 
@@ -91,6 +105,7 @@ async function save(): Promise<void> {
   }
   const sequence = ++requestSequence;
   const strategy = props.strategyName;
+  const epoch = accountContext.epoch;
   const revision = allocation.value?.draft?.revision ?? 0;
   const scopeId = allocation.value.context.scope_id;
   const symbol = allocation.value.symbol;
@@ -102,13 +117,13 @@ async function save(): Promise<void> {
       expected_scope_id: scopeId,
       expected_symbol: symbol,
     });
-    if (sequence !== requestSequence) return;
+    if (sequence !== requestSequence || epoch !== accountContext.epoch) return;
     applyEnvelope(result);
     notice.value = t('strategies.allocation.saved');
   } catch (cause) {
-    if (sequence === requestSequence) showFailure(cause, t('strategies.allocation.saveFailed'));
+    if (sequence === requestSequence && epoch === accountContext.epoch) showFailure(cause, t('strategies.allocation.saveFailed'));
   } finally {
-    if (sequence === requestSequence) busy.value = false;
+    if (sequence === requestSequence && epoch === accountContext.epoch) busy.value = false;
   }
 }
 
@@ -116,6 +131,7 @@ async function remove(): Promise<void> {
   if (!canEdit.value || !allocation.value?.draft || !allocation.value.context.scope_id) return;
   const sequence = ++requestSequence;
   const strategy = props.strategyName;
+  const epoch = accountContext.epoch;
   const revision = allocation.value.draft.revision;
   const scopeId = allocation.value.context.scope_id;
   const symbol = allocation.value.symbol;
@@ -124,17 +140,20 @@ async function remove(): Promise<void> {
   notice.value = '';
   try {
     const result = await deleteStrategyAllocation(strategy, revision, scopeId, symbol);
-    if (sequence !== requestSequence) return;
+    if (sequence !== requestSequence || epoch !== accountContext.epoch) return;
     applyEnvelope(result);
     notice.value = t('strategies.allocation.removed');
   } catch (cause) {
-    if (sequence === requestSequence) showFailure(cause, t('strategies.allocation.removeFailed'));
+    if (sequence === requestSequence && epoch === accountContext.epoch) showFailure(cause, t('strategies.allocation.removeFailed'));
   } finally {
-    if (sequence === requestSequence) busy.value = false;
+    if (sequence === requestSequence && epoch === accountContext.epoch) busy.value = false;
   }
 }
 
-watch(() => props.strategyName, () => { void load(); }, { immediate: true });
+watch(() => [props.strategyName, props.status, props.strategySymbol, accountContext.epoch, accountContext.context], () => {
+  void load();
+}, { immediate: true, flush: 'sync' });
+onMounted(() => { void accountContext.ensure(); });
 onBeforeUnmount(() => { requestSequence += 1; });
 </script>
 
@@ -180,6 +199,12 @@ onBeforeUnmount(() => { requestSequence += 1; });
           <button type="button" data-testid="allocation-delete" :disabled="!canEdit || !allocation.draft" @click="remove">{{ t('strategies.allocation.remove') }}</button>
         </div>
       </form>
+      <StrategyAllocationReadiness
+        :allocation="allocation"
+        :status="status"
+        :suspended="loading || busy || needsRefresh"
+        @conflict="needsRefresh = true"
+      />
     </template>
     <button type="button" data-testid="allocation-refresh" :disabled="loading || busy" @click="load">{{ t('common.refresh') }}</button>
   </SectionCard>

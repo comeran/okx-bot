@@ -1,4 +1,4 @@
-import { defineComponent, h } from 'vue';
+import { defineComponent, h, reactive } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -57,6 +57,18 @@ vi.mock('@/components/trades/TradesTable.vue', () => ({
   }),
 }));
 
+const authority = reactive({
+  epoch: 1,
+  context: { available: true, account_scope_id: 'scope-A' } as {
+    available: boolean;
+    account_scope_id: string;
+  } | null,
+  loading: false,
+  error: null,
+  ensure: async () => authority.context,
+});
+vi.mock('@/stores/accountContext', () => ({ useAccountContextStore: () => authority }));
+
 const TradesView = (await import('./Trades.vue')).default;
 
 const firstTrades: TradeRecord[] = [
@@ -89,6 +101,9 @@ const components = {
 describe('Trades view', () => {
   beforeEach(() => {
     fetchTradesMock.fetchTrades.mockReset();
+    authority.epoch = 1;
+    authority.context = { available: true, account_scope_id: 'scope-A' };
+    authority.loading = false;
   });
 
   it('keeps the loaded trades visible when a refresh fails and shows stale data state', async () => {
@@ -248,6 +263,40 @@ describe('Trades view', () => {
     expect(textContent(table)).toBe('SOL-USDT');
     expect(table.props['data-count']).toBe(1);
 
+    wrapper.unmount();
+  });
+
+  it.each(['success', 'error'])('invalidates old account trade %s and finally while A to B to A is pending', async (outcome) => {
+    let finishOld!: (value: TradeRecord[]) => void;
+    let failOld!: (error: Error) => void;
+    let finishCurrent!: (value: TradeRecord[]) => void;
+    fetchTradesMock.fetchTrades
+      .mockReturnValueOnce(new Promise((resolve, reject) => {
+        finishOld = resolve;
+        failOld = reject;
+      }))
+      .mockReturnValueOnce(new Promise((resolve) => {
+        finishCurrent = resolve;
+      }));
+    const wrapper = await mount(TradesView, { locale: 'en', components });
+    authority.context = null;
+    authority.epoch += 1;
+    authority.epoch += 1;
+    authority.context = { available: true, account_scope_id: 'scope-A' };
+    await wrapper.flush();
+    expect(fetchTradesMock.fetchTrades).toHaveBeenLastCalledWith(undefined, 'scope-A');
+    if (outcome === 'success') {
+      finishOld(firstTrades);
+    } else {
+      failOld(new Error('old account error'));
+    }
+    await wrapper.flush();
+    expect(wrapper.text()).toContain('Loading');
+    expect(wrapper.text()).not.toContain('Failed to load trades');
+    expect(wrapper.text()).not.toContain('BTC-USDT');
+    finishCurrent([{ ...firstTrades[0], symbol: 'CURRENT' }]);
+    await wrapper.flush();
+    expect(wrapper.text()).toContain('CURRENT');
     wrapper.unmount();
   });
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from copy import deepcopy
 from dataclasses import asdict
 from typing import Any
 
@@ -17,6 +18,7 @@ from ccxt.base.errors import (
 from fastapi import APIRouter, HTTPException
 
 from src.analytics.strategy_performance import build_strategy_performance
+from src.core.execution_scope import build_execution_context
 from src.core.runtime_settings import load_runtime_settings
 from src.data.models import EXCHANGE_STRATEGY, AccountRecord, OrderRecord
 from src.data.repository import Repository
@@ -24,6 +26,7 @@ from src.exchange.base import canonical_symbol, is_supported_canonical_symbol
 from src.exchange.errors import LiveConfigurationError, MalformedProviderData
 from src.exchange.live_sync import refresh_okx_live_state
 from src.order.value import position_notional
+from src.web.exchange_context import bind_exchange_store
 
 router = APIRouter()
 
@@ -173,8 +176,12 @@ def validate_strategy_scope(
     raise HTTPException(status_code=404, detail="Strategy not found")
 
 
-def resolve_runtime_scope(runtime_mode: str | None) -> tuple[str, str]:
-    configured_mode = load_runtime_settings().mode.strip().lower()
+def resolve_runtime_scope(
+    runtime_mode: str | None, *, configured_mode: str | None = None,
+) -> tuple[str, str]:
+    if configured_mode is None:
+        configured_mode = load_runtime_settings().mode
+    configured_mode = configured_mode.strip().lower()
     resolved = runtime_mode or {
         "demo": "paper",
         "paper": "paper",
@@ -377,8 +384,10 @@ def serialize_account(
 
 
 @router.post("/live-state/refresh")
-async def refresh_live_state(strategy: str, symbol: str | None = None) -> dict[str, Any]:
-    settings = load_runtime_settings()
+async def refresh_live_state(
+    strategy: str, symbol: str | None = None, expected_account_scope_id: str | None = None,
+) -> dict[str, Any]:
+    settings = deepcopy(load_runtime_settings())
     if settings.mode.strip().lower() != "live":
         raise HTTPException(status_code=400, detail="Live state refresh requires live mode")
     if strategy != "__exchange__":
@@ -399,11 +408,13 @@ async def refresh_live_state(strategy: str, symbol: str | None = None) -> dict[s
         ):
             raise HTTPException(status_code=422, detail="Invalid symbol")
         scoped_symbols = [canonical]
-    repository = Repository()
+    binding = bind_exchange_store(
+        settings.exchange, Repository(), expected_account_scope_id, require_available=True,
+    )
     try:
         result = await refresh_okx_live_state(
-            settings.exchange,
-            repository,
+            binding.exchange,
+            binding.repository,
             strategy,
             scoped_symbols,
             current_timestamp_ms,
@@ -434,6 +445,7 @@ async def refresh_live_state(strategy: str, symbol: str | None = None) -> dict[s
     ) as exc:
         raise HTTPException(status_code=502, detail="OKX provider unavailable") from exc
     return {
+        "context": binding.context,
         "account": serialize_account(
             result.account, scope="exchange", strategy=EXCHANGE_STRATEGY
         ),
@@ -446,6 +458,7 @@ async def get_positions(
     strategy: str | None = None,
     scope: str = "aggregate",
     runtime_mode: str | None = None,
+    expected_account_scope_id: str | None = None,
 ) -> list[dict[str, Any]]:
     scope, strategy = parse_trading_scope(
         scope,
@@ -453,8 +466,18 @@ async def get_positions(
         invalid_scope_detail="Invalid position scope",
     )
 
-    source, runtime_mode = resolve_runtime_scope(runtime_mode)
+    settings = deepcopy(load_runtime_settings())
+    source, runtime_mode = resolve_runtime_scope(runtime_mode, configured_mode=settings.mode)
     repository = Repository()
+    if scope == "exchange":
+        binding = bind_exchange_store(
+            settings.exchange, repository, expected_account_scope_id,
+        )
+        repository = binding.repository
+        if repository is None:
+            return []
+    elif runtime_mode == "live":
+        return []
     if scope == "strategy" and not (
         hasattr(repository, "get_open_positions") or hasattr(repository, "get_positions")
     ):
@@ -515,6 +538,7 @@ async def get_orders(
     strategy: str | None = None,
     scope: str = "aggregate",
     runtime_mode: str | None = None,
+    expected_account_scope_id: str | None = None,
 ) -> list[dict[str, Any]]:
     scope, strategy = parse_trading_scope(
         scope,
@@ -522,8 +546,18 @@ async def get_orders(
         invalid_scope_detail="Invalid order scope",
     )
 
-    source, runtime_mode = resolve_runtime_scope(runtime_mode)
+    settings = deepcopy(load_runtime_settings())
+    source, runtime_mode = resolve_runtime_scope(runtime_mode, configured_mode=settings.mode)
     repository = Repository()
+    if scope == "exchange":
+        binding = bind_exchange_store(
+            settings.exchange, repository, expected_account_scope_id,
+        )
+        repository = binding.repository
+        if repository is None:
+            return []
+    elif runtime_mode == "live":
+        return []
     if scope == "strategy" and not hasattr(repository, "get_orders"):
         validate_strategy_scope(repository, scope, strategy, [])
     orders = (
@@ -558,6 +592,7 @@ async def get_trades(
     strategy: str | None = None,
     scope: str = "aggregate",
     runtime_mode: str | None = None,
+    expected_account_scope_id: str | None = None,
 ) -> list[dict[str, Any]]:
     scope, strategy = parse_trading_scope(
         scope,
@@ -565,8 +600,18 @@ async def get_trades(
         invalid_scope_detail="Invalid trade scope",
     )
 
-    source, runtime_mode = resolve_runtime_scope(runtime_mode)
+    settings = deepcopy(load_runtime_settings())
+    source, runtime_mode = resolve_runtime_scope(runtime_mode, configured_mode=settings.mode)
     repository = Repository()
+    if scope == "exchange":
+        binding = bind_exchange_store(
+            settings.exchange, repository, expected_account_scope_id,
+        )
+        repository = binding.repository
+        if repository is None:
+            return []
+    elif runtime_mode == "live":
+        return []
     if scope == "strategy" and not hasattr(repository, "get_trades"):
         validate_strategy_scope(repository, scope, strategy, [])
     selected_strategy = EXCHANGE_STRATEGY if scope == "exchange" else strategy
@@ -600,6 +645,7 @@ async def get_trades(
 @router.get("/strategy-performance")
 async def get_strategy_performance(
     runtime_mode: str | None = None,
+    expected_account_scope_id: str | None = None,
 ) -> list[dict[str, Any]]:
     if runtime_mode is not None:
         runtime_mode = runtime_mode.strip().lower()
@@ -618,6 +664,8 @@ async def get_strategy_performance(
             status_code=422,
             detail="Strategy performance requires a single paper or live runtime_mode",
         )
+    if runtime_mode == "live":
+        return []
     runtime_modes = {runtime_mode}
 
     repository = Repository()
@@ -656,8 +704,10 @@ async def get_account(
     strategy: str | None = None,
     scope: str | None = None,
     runtime_mode: str | None = None,
+    expected_account_scope_id: str | None = None,
 ) -> dict[str, Any]:
-    source, runtime_mode = resolve_runtime_scope(runtime_mode)
+    settings = deepcopy(load_runtime_settings())
+    source, runtime_mode = resolve_runtime_scope(runtime_mode, configured_mode=settings.mode)
     repository = Repository()
     scope, strategy = parse_trading_scope(
         scope,
@@ -665,8 +715,13 @@ async def get_account(
         invalid_scope_detail="Invalid account scope",
     )
     if scope == "exchange":
-        account = exchange_account(repository)
+        binding = bind_exchange_store(
+            settings.exchange, repository, expected_account_scope_id,
+        )
+        account = exchange_account(binding.repository) if binding.repository is not None else None
         return serialize_account(account, scope="exchange", strategy=EXCHANGE_STRATEGY)
+    if runtime_mode == "live":
+        return serialize_account(None, scope=scope, strategy=strategy)
     if scope == "strategy":
         if not hasattr(repository, "get_account"):
             validate_strategy_scope(repository, scope, strategy, [])
@@ -715,3 +770,21 @@ async def get_account(
     else:
         account = None
     return serialize_account(account, scope="aggregate")
+
+
+@router.get("/context")
+async def get_exchange_context() -> dict[str, object]:
+    context, _ = build_execution_context(deepcopy(load_runtime_settings().exchange))
+    return context
+
+
+@router.get("/snapshot")
+async def get_exchange_snapshot(
+    expected_account_scope_id: str | None = None,
+) -> dict[str, object]:
+    from src.web.api.ops import exchange_snapshot
+
+    binding = bind_exchange_store(
+        load_runtime_settings().exchange, Repository(), expected_account_scope_id,
+    )
+    return exchange_snapshot(binding.repository, context=binding.context, master=binding.master)

@@ -43,6 +43,39 @@ afterEach(() => {
 });
 
 describe('useWebSocket', () => {
+  it.each(['{"type":"account","scope":"exchange"}', 'invalid json'])('ignores a closed socket late message %s before parsing or recording', (data) => {
+    installBrowserGlobals();
+    const onMessage = vi.fn();
+    const websocket = useWebSocket('/ws', { onMessage });
+    websocket.connect();
+    const old = MockWebSocket.instances[0];
+    websocket.disconnect(); websocket.connect();
+    old.onmessage?.({ data });
+    expect(onMessage).not.toHaveBeenCalled(); expect(websocket.messages.value).toEqual([]);
+  });
+  it('clears local history even when disconnected after a remote close', () => {
+    installBrowserGlobals();
+    const websocket = useWebSocket('/ws', { reconnect: false });
+    websocket.connect();
+    MockWebSocket.instances[0].onmessage?.({ data: '{"type":"connected"}' });
+    MockWebSocket.instances[0].onclose?.();
+    websocket.disconnect();
+    expect(websocket.messages.value).toEqual([]);
+  });
+
+  it('opens no unbound socket and reads the current scope when connecting', () => {
+    installBrowserGlobals();
+    let path: string | null = null;
+    const websocket = useWebSocket(() => path);
+    websocket.connect();
+    expect(MockWebSocket.instances).toHaveLength(0);
+    path = '/ws?scope=exchange&expected_account_scope_id=A';
+    websocket.connect();
+    websocket.disconnect();
+    path = '/ws?scope=exchange&expected_account_scope_id=B';
+    websocket.connect();
+    expect(MockWebSocket.instances[1].url).toContain('expected_account_scope_id=B');
+  });
   it('reconnects after the socket closes', () => {
     vi.useFakeTimers();
     installBrowserGlobals();

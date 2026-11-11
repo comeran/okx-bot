@@ -4,6 +4,8 @@ import { useI18n } from 'vue-i18n';
 import { CircleCheckFilled, CircleCloseFilled } from '@element-plus/icons-vue';
 
 import AccountOverview from '@/components/dashboard/AccountOverview.vue';
+import AccountContextNotice from '@/components/dashboard/AccountContextNotice.vue';
+import { useAccountContextStore } from '@/stores/accountContext';
 import DashboardActivity from '@/components/dashboard/DashboardActivity.vue';
 import StrategyPerformanceTable from '@/components/dashboard/StrategyPerformanceTable.vue';
 import AppPageHeader from '@/components/ui/AppPageHeader.vue';
@@ -16,6 +18,7 @@ import { enrichStrategyPerformanceRows } from '@/utils/strategyPerformance';
 
 const { t, locale } = useI18n();
 const dashboard = useDashboardStore();
+const accountContext = useAccountContextStore();
 const strategies = useStrategiesStore();
 
 const latestMessages = computed(() => dashboard.websocketMessages.slice(0, 5));
@@ -156,6 +159,16 @@ onMounted(() => {
         class="dashboard-view__alert"
       />
     </div>
+
+    <AccountContextNotice
+      :context="accountContext.context"
+      :loading="accountContext.loading"
+      :error="accountContext.error"
+      :missing-snapshot="dashboard.account === null
+        && !dashboard.loading && !dashboard.accountLoading
+        && !dashboard.error && !dashboard.accountError
+        && !accountContext.loading && !accountContext.error"
+    />
 
     <el-row :gutter="16" class="dashboard-view__metrics">
       <el-col :xs="24" :sm="12" :lg="4">
