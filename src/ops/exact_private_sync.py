@@ -1,6 +1,6 @@
-"""Single-page raw ingestion into a scoped durable facts store.
+"""Explicitly bounded raw ingestion into a scoped durable facts store.
 
-These helpers never retry, loop, certify history completeness, or modify the
+These helpers never retry, certify history completeness, or modify the
 compatibility projections, accounting ledger, sync receipts or activation state.
 The repository owns atomic commits and validates stored traversal evidence.
 """
@@ -8,9 +8,11 @@ The repository owns atomic commits and validates stored traversal evidence.
 from __future__ import annotations
 
 import asyncio
-from typing import Protocol
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Literal, Protocol
 
-from src.core.private_facts import SpotFillPage, validate_raw_text
+from src.core.private_facts import SpotFillPage, canonical_spot_symbol, validate_raw_text
 from src.data.models import (
     ExactSpotFillCursorRecord,
     PrivateAccountBalanceRecord,
@@ -188,3 +190,90 @@ async def sync_exact_spot_fill_page(
         page, uid=uid, raw_payload=captured.payload, received_at=received_at,
         expected_cursor_version=cursor.version if cursor is not None else 0,
     )
+
+
+@dataclass(frozen=True)
+class ExactSpotFillCursor:
+    """Immutable snapshot of the durable traversal returned to a catch-up caller."""
+
+    traversal_id: str
+    account_scope_id: str
+    uid: str
+    endpoint: str
+    inst_type: str
+    inst_id: str | None
+    requested_before: str | None
+    version: int
+    next_after: str | None
+    complete: bool
+
+
+@dataclass(frozen=True)
+class ExactSpotFillCatchUpResult:
+    """Bounded observations, never a complete history or an accounting watermark."""
+
+    pages_committed: int
+    last_cursor: ExactSpotFillCursor
+    coverage: Literal["unknown", "partial"]
+    stop_reason: Literal["empty_page", "max_pages"]
+
+
+async def catch_up_exact_spot_fills(
+    repository: ExactPrivateFactsRepository,
+    exchange: RawOKXFillExchange,
+    *,
+    uid: str,
+    inst_id: str | None = None,
+    before: str | None = None,
+    limit: int = 100,
+    max_pages: int = 10,
+    received_at_factory: int | Callable[[], int],
+) -> ExactSpotFillCatchUpResult:
+    """Commit sequential pages until an empty observation or explicit page bound.
+
+    Every request resumes the durable filter-bound cursor through the one-page
+    helper. Short pages continue; an empty page stays unknown. Caller-supplied
+    timestamps are validated before each request/commit. Exceptions and caller
+    cancellation propagate without retry, preserving earlier page transactions.
+    """
+    if type(max_pages) is not int or max_pages <= 0:
+        raise ValueError("max_pages must be a positive integer")
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise ValueError("limit must be an integer from 1 to 100")
+    validate_raw_text(uid, "UID")
+    if inst_id is not None:
+        canonical_spot_symbol(inst_id)
+    if before is not None:
+        validate_raw_text(before, "before")
+    if not callable(received_at_factory) and type(received_at_factory) is not int:
+        raise ValueError("received_at_factory must be an integer or callable")
+
+    last_cursor: ExactSpotFillCursor | None = None
+    seen: set[str] = set()
+    for pages_committed in range(1, max_pages + 1):
+        durable = repository.get_exact_spot_fill_cursor(uid=uid, inst_id=inst_id, before=before)
+        previous = ExactSpotFillCursor(**durable.model_dump()) if durable is not None else None
+        if last_cursor is not None and previous != last_cursor:
+            raise ValueError("Durable cursor changed during catch-up")
+        if previous is not None and previous.next_after is not None:
+            seen.add(previous.next_after)
+        received_at = (
+            received_at_factory() if callable(received_at_factory) else received_at_factory
+        )
+        if type(received_at) is not int or not 0 <= received_at <= 2**63 - 1:
+            raise ValueError("received timestamp must be an integer from 0 to 2**63 - 1")
+        committed = await sync_exact_spot_fill_page(
+            repository, exchange, uid=uid, inst_id=inst_id, before=before,
+            limit=limit, received_at=received_at,
+        )
+        last_cursor = ExactSpotFillCursor(**committed.model_dump())
+        if last_cursor.version != (previous.version if previous is not None else 0) + 1:
+            raise ValueError("Committed cursor version did not advance by one")
+        if last_cursor.next_after is None:
+            return ExactSpotFillCatchUpResult(pages_committed, last_cursor, "unknown", "empty_page")
+        if last_cursor.next_after in seen:
+            raise ValueError("Committed cursor did not advance")
+        seen.add(last_cursor.next_after)
+        if pages_committed == max_pages:
+            return ExactSpotFillCatchUpResult(pages_committed, last_cursor, "partial", "max_pages")
+    raise AssertionError("positive max_pages must commit a page or raise")

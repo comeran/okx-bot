@@ -27,16 +27,41 @@ strategy.
   byte-for-byte consistent. Conflicting bill IDs, repeated pages, request-boundary
   echoes, and non-advancing cursors fail closed.
 
+## Delivered bounded catch-up
+
+Account configuration/UID evidence, scoped raw journals, exact facts persistence,
+and transactional durable cursors were delivered in subsequent slices.
+`catch_up_exact_spot_fills` now composes the existing one-page helper sequentially,
+resuming the durable UID/instrument/`before` traversal for every request.
+
+- The caller supplies a positive integer `max_pages` (default 10), integer
+  `limit` from 1 to 100, and a required integer timestamp or zero-argument
+  timestamp factory. Invalid arguments fail before provider access. Each factory
+  result must be an integer from 0 to `2**63 - 1` before that page is requested
+  or committed.
+- A short non-empty page continues. An empty page stops with `unknown` coverage;
+  reaching exactly `max_pages` on a non-empty page stops with `partial` coverage.
+  Neither result certifies provider history completeness or advances a watermark.
+- The frozen result contains `pages_committed`, a frozen `last_cursor` snapshot,
+  `coverage`, and `stop_reason` (`empty_page` or `max_pages`).
+- Cursor version must increase by exactly one per committed page and a non-empty
+  tail must be new within the invocation. A changed/stale durable cursor read
+  fails before another request. Repository history checks remain authoritative
+  for cycles across invocations. An idempotent replay that does not advance the
+  version also fails closed instead of requesting another page.
+- Each page has its own atomic commit. Provider/parser/storage failures and
+  caller cancellation propagate without retries; earlier committed pages remain
+  available after reopening the repository.
+- This helper performs no legacy synchronization, SpotLedger, receipt,
+  readiness, activation, or other operational writes.
+
 ## Deferred work
 
-The next slice must add account UID/mode evidence, a scoped raw journal, exact
-facts persistence, and a transactional durable cursor. It must bind the cursor
-to the account scope, endpoint, SPOT filter, symbol, range, and parser version;
-resume after restarts; and commit page facts and cursor together. It must still
-report the provider's limited retention window and avoid claiming an atomic
-account snapshot. Exact facts remain separate from the prepared ledger until
-currency-aware fees, bills, balances, and reconciliation have passed their own
-invariants.
+Scheduling, retry/freshness policy, reconciliation and lifecycle recovery remain
+separate slices. Provider retention limits still prevent an all-time or atomic
+account-snapshot claim. Exact facts remain separate from the prepared ledger
+until currency-aware fees, bills, balances, and reconciliation have passed their
+own invariants.
 
 ## Verification boundary
 
