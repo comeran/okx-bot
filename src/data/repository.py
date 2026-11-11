@@ -3,7 +3,9 @@ import json
 import logging
 import math
 import os
+import re
 import time
+import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -13,6 +15,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError, OperationalError, SQLAlchemyError
 from sqlmodel import Session, SQLModel, create_engine, select
 
+from src.core.execution_scope import ExecutionScope
 from src.core.types import (
     OrderStatus,
     _finite_or_zero,
@@ -31,6 +34,7 @@ from src.data.models import (
     KlineCache,
     OrderRecord,
     PositionRecord,
+    PrivateSyncReceiptRecord,
     RiskEventRecord,
     StrategyConfigRecord,
     TradeRecord,
@@ -278,6 +282,60 @@ def _merge_order_record(existing: OrderRecord, incoming: OrderRecord) -> OrderRe
         existing.runtime_mode = incoming.runtime_mode
     existing.normalize_fill_amounts()
     return existing
+
+
+def _receipt_integer(value: object, label: str, *, positive: bool = False) -> int:
+    if (
+        isinstance(value, bool) or not isinstance(value, int)
+        or value < (1 if positive else 0) or value > 2**63 - 1
+    ):
+        raise ValueError(f"Invalid private sync {label}")
+    return value
+
+
+def _receipt_json(value: object, label: str) -> dict:
+    if not isinstance(value, dict):
+        raise ValueError(f"Private sync {label} must be an object")
+    try:
+        encoded = json.dumps(value, allow_nan=False, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError, OverflowError, RecursionError):
+        raise ValueError(f"Invalid private sync {label}") from None
+    if len(encoded.encode("utf-8")) > 65_536:
+        raise ValueError(f"Private sync {label} is too large")
+    return json.loads(encoded)
+
+
+def _receipt_identity(value: object) -> str:
+    if (
+        not isinstance(value, str) or not value or len(value) > 128
+        or value != value.strip() or any(ord(character) < 33 for character in value)
+    ):
+        raise ValueError("Invalid private sync attempt identity")
+    return value
+
+
+def _receipt_copy(record: PrivateSyncReceiptRecord) -> PrivateSyncReceiptRecord:
+    return PrivateSyncReceiptRecord(**json.loads(json.dumps(record.model_dump())))
+
+
+def _receipt_scope(session: Session, expected: str | None = None) -> str:
+    try:
+        rows = session.execute(text(
+            "SELECT schema_version, account_scope_id, exchange, environment, "
+            "account_fingerprint FROM execution_scope_header"
+        )).all()
+    except SQLAlchemyError:
+        raise ValueError("Private sync receipts require a validated account facts store") from None
+    if len(rows) != 1 or rows[0][0] != 1:
+        raise ValueError("Invalid private sync account binding")
+    version, scope_id, exchange, environment, fingerprint = rows[0]
+    try:
+        scope = ExecutionScope(exchange, environment, fingerprint)
+    except ValueError:
+        raise ValueError("Invalid private sync account binding") from None
+    if scope_id != scope.account_scope_id or (expected is not None and expected != scope_id):
+        raise ValueError("Private sync account scope changed")
+    return scope_id
 
 
 class _AccountingTransaction:
@@ -617,6 +675,134 @@ class _AccountingTransaction:
             trade.order_id = order.order_id
             trade.strategy = order.strategy
             self.session.add(trade)
+
+    def start_private_sync_receipt(
+        self, *, account_scope_id: str, symbols: list[str] | None, since: int | None,
+        limit: int, started_at: int, attempt_id: str | None = None,
+    ) -> PrivateSyncReceiptRecord:
+        _receipt_scope(self.session, account_scope_id)
+        started_at = _receipt_integer(started_at, "start time")
+        if since is not None:
+            since = _receipt_integer(since, "since")
+        limit = _receipt_integer(limit, "limit", positive=True)
+        if limit > 1000:
+            raise ValueError("Private sync limit exceeds 1000")
+        if symbols is not None and (
+            not isinstance(symbols, list) or len(symbols) > 100
+            or any(not isinstance(symbol, str) or not symbol or len(symbol) > 128
+                   or symbol != symbol.strip() for symbol in symbols)
+        ):
+            raise ValueError("Invalid private sync symbol scope")
+        attempt_id = _receipt_identity(attempt_id if attempt_id is not None else uuid.uuid4().hex)
+        values = dict(account_scope_id=account_scope_id, symbols=symbols, since=since,
+                      limit=limit, started_at=started_at)
+        existing = self.session.exec(select(PrivateSyncReceiptRecord).where(
+            PrivateSyncReceiptRecord.attempt_id == attempt_id,
+        )).first()
+        if existing is not None:
+            if any(getattr(existing, key) != value for key, value in values.items()):
+                raise ValueError("Private sync attempt identity conflicts")
+            return _receipt_copy(existing)
+        previous = self.session.exec(select(PrivateSyncReceiptRecord.generation).order_by(
+            PrivateSyncReceiptRecord.generation.desc(),
+        )).first()
+        record = PrivateSyncReceiptRecord(
+            attempt_id=attempt_id, generation=(previous or 0) + 1, **values,
+        )
+        self.session.add(record)
+        self.session.flush()
+        return _receipt_copy(record)
+
+    def get_private_sync_receipt(self, attempt_id: str) -> PrivateSyncReceiptRecord | None:
+        scope_id = _receipt_scope(self.session)
+        attempt_id = _receipt_identity(attempt_id)
+        record = self.session.exec(select(PrivateSyncReceiptRecord).where(
+            PrivateSyncReceiptRecord.attempt_id == attempt_id,
+        )).first()
+        if record is not None and record.account_scope_id != scope_id:
+            raise ValueError("Private sync receipt account scope mismatch")
+        return _receipt_copy(record) if record is not None else None
+
+    def get_private_sync_status(self) -> dict[str, PrivateSyncReceiptRecord | None]:
+        scope_id = _receipt_scope(self.session)
+        latest = self.session.exec(select(PrivateSyncReceiptRecord).order_by(
+            PrivateSyncReceiptRecord.generation.desc(),
+        )).first()
+        committed = self.session.exec(select(PrivateSyncReceiptRecord).where(
+            PrivateSyncReceiptRecord.state.in_(["committed", "partial"]),
+        ).order_by(PrivateSyncReceiptRecord.generation.desc())).first()
+        if any(record is not None and record.account_scope_id != scope_id
+               for record in (latest, committed)):
+            raise ValueError("Private sync receipt account scope mismatch")
+        return {
+            "latest_attempt": _receipt_copy(latest) if latest is not None else None,
+            "last_committed": _receipt_copy(committed) if committed is not None else None,
+        }
+
+    def _finish_private_sync_receipt(
+        self, attempt_id: str, *, state: str, completed_at: int, received_at: int | None,
+        parts: dict, cursor: dict, result: dict, error_code: str | None,
+    ) -> PrivateSyncReceiptRecord:
+        scope_id = _receipt_scope(self.session)
+        attempt_id = _receipt_identity(attempt_id)
+        record = self.session.exec(select(PrivateSyncReceiptRecord).where(
+            PrivateSyncReceiptRecord.attempt_id == attempt_id,
+        )).first()
+        if record is None or record.account_scope_id != scope_id:
+            raise ValueError("Private sync attempt not found in this account")
+        completed_at = _receipt_integer(completed_at, "completion time")
+        if completed_at < record.started_at:
+            raise ValueError("Private sync completion predates its start")
+        if received_at is not None:
+            received_at = _receipt_integer(received_at, "receipt time")
+            if not record.started_at <= received_at <= completed_at:
+                raise ValueError("Private sync received time is outside its observation interval")
+        values = dict(state=state, completed_at=completed_at, received_at=received_at,
+                      parts=_receipt_json(parts, "parts"), cursor=_receipt_json(cursor, "cursor"),
+                      result=_receipt_json(result, "result"), error_code=error_code)
+        if state in {"committed", "partial"}:
+            newer_committed = self.session.exec(select(PrivateSyncReceiptRecord.generation).where(
+                PrivateSyncReceiptRecord.state.in_(["committed", "partial"]),
+                PrivateSyncReceiptRecord.generation > record.generation,
+            )).first()
+            if newer_committed is not None:
+                # The caller writes projections in this same transaction. Reject
+                # stale retries too, so none can overwrite a newer committed sync.
+                raise ValueError("Private sync attempt superseded by a newer committed generation")
+        if record.state != "in_progress":
+            if any(getattr(record, key) != value for key, value in values.items()):
+                raise ValueError("Private sync terminal receipt conflicts")
+            return _receipt_copy(record)
+        for key, value in values.items():
+            setattr(record, key, value)
+        self.session.add(record)
+        self.session.flush()
+        return _receipt_copy(record)
+
+    def finalize_private_sync_receipt(
+        self, attempt_id: str, *, state: str, completed_at: int, received_at: int,
+        parts: dict, cursor: dict, result: dict,
+    ) -> PrivateSyncReceiptRecord:
+        if state not in {"committed", "partial"}:
+            raise ValueError("Invalid private sync committed state")
+        return self._finish_private_sync_receipt(
+            attempt_id, state=state, completed_at=completed_at, received_at=received_at,
+            parts=parts, cursor=cursor, result=result, error_code=None,
+        )
+
+    def fail_private_sync_receipt(
+        self, attempt_id: str, *, completed_at: int, error_code: str, state: str = "failed",
+        parts: dict | None = None, cursor: dict | None = None,
+    ) -> PrivateSyncReceiptRecord:
+        if state not in {"failed", "abandoned"}:
+            raise ValueError("Invalid private sync failure state")
+        if not isinstance(error_code, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", error_code):
+            raise ValueError("Private sync failure requires a bounded reason code")
+        return self._finish_private_sync_receipt(
+            attempt_id, state=state, completed_at=completed_at, received_at=None,
+            parts=parts if parts is not None else {}, cursor=cursor if cursor is not None else {},
+            result={}, error_code=error_code,
+        )
 
     def get_kill_switch(self) -> KillSwitchRecord:
         state = self.session.exec(select(KillSwitchRecord)).first()
@@ -1025,6 +1211,29 @@ class Repository:
             connection.execute(text(
                 "DELETE FROM live_submission_lease WHERE name = 'live' AND owner = :owner"
             ), {"owner": owner})
+
+    def start_private_sync_receipt(self, **values) -> PrivateSyncReceiptRecord:
+        return self.atomic_private_sync(lambda transaction: transaction.start_private_sync_receipt(
+            **values,
+        ))
+
+    def finalize_private_sync_receipt(self, attempt_id: str, **values) -> PrivateSyncReceiptRecord:
+        return self.atomic_private_sync(
+            lambda transaction: transaction.finalize_private_sync_receipt(attempt_id, **values),
+        )
+
+    def fail_private_sync_receipt(self, attempt_id: str, **values) -> PrivateSyncReceiptRecord:
+        return self.atomic_private_sync(lambda transaction: transaction.fail_private_sync_receipt(
+            attempt_id, **values,
+        ))
+
+    def get_private_sync_receipt(self, attempt_id: str) -> PrivateSyncReceiptRecord | None:
+        with Session(self.engine) as session:
+            return _AccountingTransaction(session).get_private_sync_receipt(attempt_id)
+
+    def get_private_sync_status(self) -> dict[str, PrivateSyncReceiptRecord | None]:
+        with Session(self.engine) as session:
+            return _AccountingTransaction(session).get_private_sync_status()
 
     def get_kill_switch(self) -> KillSwitchRecord:
         with Session(self.engine) as session:

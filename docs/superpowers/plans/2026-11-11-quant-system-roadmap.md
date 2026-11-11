@@ -20,6 +20,7 @@ Acceptance: explicit draft configuration persists without granting trading permi
 
 - [x] Persist environment/account identity on live account, order, fill, position and reconciliation state through immutable scoped facts stores; keep legacy ambiguous rows audit-only.
 - [x] Deliver exact internal spot accounting and a read-only saved-draft readiness preview (Phase 2b); this prepares accounting without funding or activation.
+- [x] Add durable private-sync attempts/receipts and conservative coverage status (Phase 2c-a); this records partial/failed evidence without certifying completeness.
 - [ ] Define exclusive initial spot ownership, budget consumption/reservations and strategy-local cash/position/PnL queries.
 - [ ] Account-mode, instrument-unit and available-funds preflight. Derivatives require their own account/risk design before activation.
 - [ ] Atomically validate/activate a draft from trusted fresh exchange facts; refuse overlapping/excess allocation and unsafe runtime edits.
@@ -36,7 +37,12 @@ Phase 2b adds a separate Decimal ledger in scoped facts stores and a diagnostic 
 Spec: `docs/superpowers/specs/2026-11-11-spot-allocation-ledger-design.md`.
 Plan/evidence: `docs/superpowers/plans/2026-11-11-spot-allocation-ledger-plan.md` and `2026-11-11-spot-allocation-ledger-progress.md`.
 
-Next slice: trustworthy exact private-state ingestion and synchronization receipts, followed by durable reconciliation/recovery. Funded account-wide allocations and order-manager integration remain pending until these prerequisites have evidence.
+Phase 2c-a adds account-bound attempt/receipt status, same-transaction projection finalization, bounded audit samples and conservative trade-page completeness. Empty results and single-page provider data remain unknown; receipt state does not certify exact holdings, identity, account mode or complete synchronization.
+
+Spec: `docs/superpowers/specs/2026-11-11-private-sync-receipts-design.md`.
+Plan/evidence: `docs/superpowers/plans/2026-11-11-private-sync-receipts-plan.md`.
+
+Next slice: exact raw private-state ingestion with durable provider cursors, account UID/mode and instrument-rule evidence, then reconciliation/recovery. Funded account-wide allocations and order-manager integration remain pending until these prerequisites have evidence.
 
 ## Phase 3 — reconciliation, unknown outcomes and lifecycle recovery
 

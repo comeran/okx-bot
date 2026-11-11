@@ -40,6 +40,8 @@ logger = logging.getLogger(__name__)
 
 
 class RecentTradePage(list[ExchangeTradeSnapshot]):
+    """Trade observations with explicit coverage, never inferred from row count."""
+
     def __init__(
         self,
         trades: list[ExchangeTradeSnapshot],
@@ -48,8 +50,23 @@ class RecentTradePage(list[ExchangeTradeSnapshot]):
         complete: bool,
         mode: str | None = None,
     ) -> None:
+        if not isinstance(complete, bool):
+            raise ValueError("Invalid trade page complete marker")
+        if since is not None and (
+            isinstance(since, bool)
+            or not isinstance(since, int)
+            or not 0 <= since < 2**63
+        ):
+            raise ValueError("Invalid trade page since timestamp")
+        resolved_mode = ("since" if since is not None else "recent") if mode is None else mode
+        if resolved_mode not in ("recent", "since", "cumulative"):
+            raise ValueError("Invalid trade page coverage mode")
+        if (resolved_mode == "since") != (since is not None):
+            raise ValueError("Invalid trade page since coverage boundary")
+        if complete and resolved_mode == "recent":
+            raise ValueError("Invalid trade page complete marker without bounded coverage")
         super().__init__(trades)
-        self.mode = mode or ("since" if since is not None else "recent")
+        self.mode = resolved_mode
         self.since = since
         self.complete = complete
 
@@ -1440,9 +1457,8 @@ class OKXBaseAdapter(ExchangeAdapter):
         limit: int = 100,
     ) -> RecentTradePage:
         if symbols == []:
-            return RecentTradePage([], since=since, complete=True)
+            return RecentTradePage([], since=since, complete=False)
         trades: list[ExchangeTradeSnapshot] = []
-        complete = True
         for symbol in symbols if symbols is not None else [None]:
             ccxt_symbol = self._to_ccxt_symbol(symbol) if symbol is not None else None
             rows = await self._exchange.fetch_my_trades(
@@ -1452,7 +1468,6 @@ class OKXBaseAdapter(ExchangeAdapter):
             )
             if not isinstance(rows, (list, tuple)):
                 raise MalformedProviderData(f"Malformed provider recent-trade response: {rows!r}")
-            complete = complete and since is not None and len(rows) < limit
             for row in rows:
                 snapshot = self._map_trade(row)
                 if snapshot is None:
@@ -1461,7 +1476,9 @@ class OKXBaseAdapter(ExchangeAdapter):
                         f"(missing external identity or invalid fields): {row!r}"
                     )
                 trades.append(snapshot)
-        return RecentTradePage(trades, since=since, complete=complete)
+        # CCXT can filter a server-capped page locally. A short parsed result
+        # therefore proves neither pagination exhaustion nor history coverage.
+        return RecentTradePage(trades, since=since, complete=False)
 
     async def submit(self, order: Order) -> Order:
         order_type, params = self._okx_order_type_and_params(order)

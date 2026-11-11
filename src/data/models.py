@@ -4,7 +4,7 @@ from dataclasses import asdict
 from typing import Any
 
 from pydantic import PrivateAttr, field_validator, model_validator
-from sqlalchemy import JSON, Column
+from sqlalchemy import JSON, CheckConstraint, Column, UniqueConstraint
 from sqlmodel import Field, SQLModel
 
 from src.core.types import (
@@ -93,6 +93,37 @@ def normalize_account_assets(assets: object) -> list[dict[str, Any]]:
             item["upl"] = _finite_or_zero(item["upl"])
         normalized.append(item)
     return normalized
+
+
+class PrivateSyncReceiptRecord(SQLModel, table=True):
+    """Bounded synchronization audit; never exact financial or execution evidence."""
+
+    __tablename__ = "private_sync_receipt"
+    __table_args__ = (
+        UniqueConstraint("attempt_id", name="uq_private_sync_attempt"),
+        UniqueConstraint("generation", name="uq_private_sync_generation"),
+        CheckConstraint(
+            "state IN ('in_progress','committed','partial','failed','abandoned')",
+            name="ck_private_sync_state",
+        ),
+        CheckConstraint("generation > 0", name="ck_private_sync_generation"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    attempt_id: str = Field(index=True)
+    generation: int = Field(index=True)
+    account_scope_id: str = Field(index=True)
+    state: str = Field(default="in_progress", index=True)
+    symbols: list[str] | None = Field(default=None, sa_column=Column(JSON, nullable=True))
+    since: int | None = None
+    limit: int
+    started_at: int
+    completed_at: int | None = None
+    received_at: int | None = None
+    parts: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
+    cursor: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
+    result: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
+    error_code: str | None = None
 
 
 class AccountRecord(SQLModel, table=True):
