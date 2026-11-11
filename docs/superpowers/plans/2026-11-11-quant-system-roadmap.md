@@ -25,7 +25,8 @@ Acceptance: explicit draft configuration persists without granting trading permi
 - [x] Retain exact raw account-balance observations under the existing scoped UID binding, preserving USD equity, per-currency cash strings and missing/null/empty states. Identical payload replay is idempotent; this evidence does not fund allocations or prove available funds.
 - [x] Acquire and atomically retain exact raw public SPOT instrument rules through an injected single-response adapter. Account/environment-scoped append-only response and instrument tables preserve exact strings and optional states, canonical replay identity and observation history without requiring private UID. Rules remain evidence only; freshness certification and trading authorization are deferred.
 - [ ] Define exclusive initial spot ownership, budget consumption/reservations and strategy-local cash/position/PnL queries.
-- [ ] Account-mode, instrument-unit and available-funds preflight. Derivatives require their own account/risk design before activation.
+- [x] Pure read-only exact SPOT order preflight with UID/balance binding, receipt freshness, borrow policy, native live instrument rules, decimal tick/lot/minimum checks and side-specific availBal including caller fee reserve. Unknown liability/fee/reconciliation/sync evidence keeps diagnostics closed; account level alone cannot prove unleveraged safety.
+- [ ] Integrate trusted preflight evidence with atomic funded allocations and runtime order enforcement. Derivatives require their own account/risk design before activation.
 - [ ] Atomically validate/activate a draft from trusted fresh exchange facts; refuse overlapping/excess allocation and unsafe runtime edits.
 
 Acceptance: empty-account first trade and subsequent closes use correct strategy funds; two strategies cannot consume the same position/cash; switching accounts/environments cannot reuse authorization or historical state. Live gate opens only after this and Phase 3 prerequisites pass.
@@ -45,11 +46,13 @@ Phase 2c-a adds account-bound attempt/receipt status, same-transaction projectio
 Spec: `docs/superpowers/specs/2026-11-11-private-sync-receipts-design.md`.
 Plan/evidence: `docs/superpowers/plans/2026-11-11-private-sync-receipts-plan.md`.
 
-Next slices: instrument-rule freshness policy and reconciliation/recovery, building on delivered scoped instrument/config/balance persistence, single-response acquisition, resumable exact fill-page ingestion and explicitly bounded multi-page catch-up. Funded account-wide allocations and order-manager integration remain pending until these prerequisites have evidence.
+Next slices: trusted evidence acquisition and reconciliation/recovery, building on delivered pure receipt-freshness preflight, scoped instrument/config/balance persistence, single-response acquisition, resumable exact fill-page ingestion and explicitly bounded multi-page catch-up. Funded account-wide allocations and order-manager integration remain pending until these prerequisites have evidence.
 
 Balance spec/evidence: `docs/superpowers/specs/2026-11-12-account-balance-facts-design.md` and `docs/superpowers/plans/2026-11-12-account-balance-facts-plan.md`.
 
 Instrument spec/evidence: `docs/superpowers/specs/2026-11-12-spot-instrument-facts-design.md` and `docs/superpowers/plans/2026-11-12-spot-instrument-facts-plan.md`.
+
+Read-only preflight spec/evidence: `docs/superpowers/specs/2026-11-12-spot-preflight-design.md` and `docs/superpowers/plans/2026-11-12-spot-preflight-plan.md`. Diagnostic readiness does not activate strategies or submit orders.
 
 ## Phase 3 — reconciliation, unknown outcomes and lifecycle recovery
 
