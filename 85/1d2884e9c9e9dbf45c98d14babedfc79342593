@@ -1,0 +1,39 @@
+docs/superpowers/specs/2026-11-12-spot-instrument-facts-design.md
+  s_5754a483f5e2c0::t_dc7d7c31bd9917 4-6,35-70
+src/data/models.py
+  s_5754a483f5e2c0::t_8c430b2b24914d 214-250,254-281,295-317
+  s_5754a483f5e2c0::t_3977e535606441 251-253,282-294
+src/data/repository.py
+  s_5754a483f5e2c0::t_8c430b2b24914d 50-51,72-76,823-859,871-895,1687-1691,1698-1703
+  s_5754a483f5e2c0::t_3977e535606441 860-870,1692-1697
+tests/unit/test_spot_instrument_store.py
+  s_5754a483f5e2c0::t_9f890c6e21ed69 1-66,73-141,145-154,157-175,180-208,211-264
+  s_5754a483f5e2c0::t_3977e535606441 67-72,142-144,155-156,176-179,209-210
+  s_5754a483f5e2c0::t_c2dd3a1a93ac07 265-290
+docs/superpowers/plans/2026-11-11-quant-system-roadmap.md
+  s_5754a483f5e2c0::t_dc7d7c31bd9917 26,48
+docs/superpowers/plans/2026-11-12-spot-instrument-facts-plan.md
+  s_5754a483f5e2c0::t_dc7d7c31bd9917 12-19,39-50
+  s_5754a483f5e2c0::t_642dae442eb87d 51-52
+src/ops/exact_private_sync.py
+  s_5754a483f5e2c0::t_8c430b2b24914d 18,30-34,40-45,74-83,85-100
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "851d2884e9c9e9dbf45c98d14babedfc79342593",
+  "prompts": {},
+  "logical_commit_id": "851d2884e9c9e9dbf45c98d14babedfc79342593",
+  "sessions": {
+    "s_5754a483f5e2c0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1be4b-8fcb-7f73-917c-6d11f8ef4f92",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Zane <zane@bigo.sg>",
+      "total_additions": 607,
+      "total_deletions": 28
+    }
+  }
+}
