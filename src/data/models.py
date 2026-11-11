@@ -4,7 +4,7 @@ from dataclasses import asdict
 from typing import Any
 
 from pydantic import PrivateAttr, field_validator, model_validator
-from sqlalchemy import JSON, CheckConstraint, Column, UniqueConstraint
+from sqlalchemy import DDL, JSON, CheckConstraint, Column, Text, UniqueConstraint, event
 from sqlmodel import Field, SQLModel
 
 from src.core.types import (
@@ -93,6 +93,120 @@ def normalize_account_assets(assets: object) -> list[dict[str, Any]]:
             item["upl"] = _finite_or_zero(item["upl"])
         normalized.append(item)
     return normalized
+
+
+class PrivateUIDBindingRecord(SQLModel, table=True):
+    """Provider UID observed for precisely one immutable account scope."""
+
+    __tablename__ = "private_uid_binding"
+    __table_args__ = (
+        CheckConstraint("length(uid) BETWEEN 1 AND 256", name="ck_private_uid_length"),
+        CheckConstraint("first_seen_at >= 0", name="ck_private_uid_first_seen"),
+    )
+
+    account_scope_id: str = Field(primary_key=True)
+    uid: str
+    first_seen_at: int
+    provider: str | None = None
+
+
+# Block direct UPDATE/DELETE and SQLite REPLACE, not merely API rebind attempts.
+for _action in ("UPDATE", "DELETE", "INSERT"):
+    _condition = (
+        " WHEN EXISTS (SELECT 1 FROM private_uid_binding "
+        "WHERE account_scope_id = NEW.account_scope_id)" if _action == "INSERT" else ""
+    )
+    event.listen(
+        PrivateUIDBindingRecord.__table__, "after_create",
+        DDL(
+            f"CREATE TRIGGER private_uid_no_{_action.lower()} BEFORE {_action} "
+            f"ON private_uid_binding{_condition} "
+            "BEGIN SELECT RAISE(ABORT, 'immutable private UID binding'); END"
+        ).execute_if(dialect="sqlite"),
+    )
+
+
+class ExactSpotFillRecord(SQLModel, table=True):
+    """Exact provider text. Optional state distinguishes absent, null and value."""
+
+    __tablename__ = "exact_spot_fill"
+    __table_args__ = (
+        CheckConstraint("side IN ('buy','sell')", name="ck_exact_fill_side"),
+        *(CheckConstraint(
+            f"({name}_state IN ('missing','null') AND {name} IS NULL) OR "
+            f"({name}_state = 'value' AND {name} IS NOT NULL)",
+            name=f"ck_exact_fill_{name}_state",
+        ) for name in ("cl_ord_id", "fee", "fee_ccy")),
+    )
+
+    account_scope_id: str = Field(primary_key=True)
+    uid: str = Field(primary_key=True)
+    bill_id: str = Field(primary_key=True)
+    symbol: str
+    inst_id: str
+    trade_id: str
+    ord_id: str
+    side: str
+    fill_sz: str
+    fill_px: str
+    fill_time: str
+    record_time: str
+    cl_ord_id: str | None = None
+    cl_ord_id_state: str
+    fee: str | None = None
+    fee_state: str
+    fee_ccy: str | None = None
+    fee_ccy_state: str
+
+
+class ExactSpotFillPageRecord(SQLModel, table=True):
+    """One raw response and explicit traversal filters, never a sync receipt."""
+
+    __tablename__ = "exact_spot_fill_page"
+    __table_args__ = (
+        CheckConstraint("inst_type = 'SPOT'", name="ck_exact_page_spot"),
+        CheckConstraint(
+            "coverage IN ('unknown','partial','complete')", name="ck_exact_page_coverage",
+        ),
+        CheckConstraint("received_at >= 0", name="ck_exact_page_received"),
+    )
+
+    page_id: str = Field(primary_key=True)
+    traversal_id: str = Field(index=True)
+    account_scope_id: str = Field(index=True)
+    uid: str
+    endpoint: str
+    inst_type: str = "SPOT"
+    inst_id: str | None = None
+    requested_before: str | None = None
+    requested_after: str | None = None
+    next_after: str | None = None
+    coverage: str
+    received_at: int
+    payload_hash: str
+    raw_json: str = Field(sa_column=Column(Text, nullable=False))
+
+
+class ExactSpotFillCursorRecord(SQLModel, table=True):
+    """CAS version for one explicit traversal; paging proves no completeness."""
+
+    __tablename__ = "exact_spot_fill_cursor"
+    __table_args__ = (
+        CheckConstraint("inst_type = 'SPOT'", name="ck_exact_cursor_spot"),
+        CheckConstraint("version > 0", name="ck_exact_cursor_version"),
+        CheckConstraint("complete = 0", name="ck_exact_cursor_incomplete"),
+    )
+
+    traversal_id: str = Field(primary_key=True)
+    account_scope_id: str = Field(index=True)
+    uid: str
+    endpoint: str
+    inst_type: str = "SPOT"
+    inst_id: str | None = None
+    requested_before: str | None = None
+    version: int
+    next_after: str | None = None
+    complete: bool = False
 
 
 class PrivateSyncReceiptRecord(SQLModel, table=True):
