@@ -1,0 +1,44 @@
+src/exchange/okx_account_facts.py
+  s_5754a483f5e2c0::t_833a8f5860a2d2 3-4,11,94-108
+docs/superpowers/plans/2026-11-12-exact-private-sync-orchestration-plan.md
+  s_5754a483f5e2c0::t_be25dc0f9930de 1-28,31-39
+  s_5754a483f5e2c0::t_3737f255cf4660 29-30
+docs/superpowers/specs/2026-11-11-account-config-facts-design.md
+  s_5754a483f5e2c0::t_85dd2ea1060d3e 32-34
+  s_5754a483f5e2c0::t_be25dc0f9930de 28-31
+docs/superpowers/plans/2026-11-11-quant-system-roadmap.md
+  s_5754a483f5e2c0::t_be25dc0f9930de 46,52-53
+tests/unit/test_okx_account_facts.py
+  s_5754a483f5e2c0::t_479bafd7277a0f 90-130
+src/ops/exact_private_sync.py
+  s_5754a483f5e2c0::t_833a8f5860a2d2 1-100
+docs/superpowers/plans/2026-11-11-account-config-facts-plan.md
+  s_5754a483f5e2c0::t_be25dc0f9930de 21-24
+docs/superpowers/plans/2026-11-11-exact-private-facts-store-plan.md
+  s_5754a483f5e2c0::t_be25dc0f9930de 23-26
+tests/unit/test_exact_private_sync.py
+  s_5754a483f5e2c0::t_a464c993c8eb1d 92-93
+  s_5754a483f5e2c0::t_479bafd7277a0f 1-12,19-80,82-91,94-96,98-118,120-150,152-167,169-187,189-210,212-225,227-241,243-251,253-257
+  s_5754a483f5e2c0::t_be25dc0f9930de 13-14,17-18,81,97,119,151,188,211,226,242,252
+  s_5754a483f5e2c0::t_3737f255cf4660 168
+  s_5754a483f5e2c0::t_7e58528e803079 15-16
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "8303d36302b6974cadc0004fc4d8dc6590c54de5",
+  "prompts": {},
+  "logical_commit_id": "8303d36302b6974cadc0004fc4d8dc6590c54de5",
+  "sessions": {
+    "s_5754a483f5e2c0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1be4b-8fcb-7f73-917c-6d11f8ef4f92",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Zane <zane@bigo.sg>",
+      "total_additions": 512,
+      "total_deletions": 55
+    }
+  }
+}
