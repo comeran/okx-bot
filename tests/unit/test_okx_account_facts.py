@@ -87,3 +87,44 @@ def test_conservative_borrow_and_mode_status(parse, fields, auto, spot, status):
     assert fact.spot_borrow_enabled is spot
     assert fact.borrow_status == status
     assert fact.is_unleveraged is None
+
+
+class RawConfigExchange:
+    def __init__(self, response):
+        self.response = response
+        self.requests = []
+
+    async def private_get_account_config(self, params):
+        self.requests.append(params.copy())
+        if isinstance(self.response, BaseException):
+            raise self.response
+        return self.response
+
+    async def fetch_balance(self, *args, **kwargs):
+        raise AssertionError("Unified balance must not supply exact config facts")
+
+    async def fetch_my_trades(self, *args, **kwargs):
+        raise AssertionError("Unified trades must not supply exact config facts")
+
+
+async def test_raw_config_adapter_fetches_one_empty_parameter_request():
+    from src.exchange.okx_account_facts import OKXAccountConfigFactsAdapter
+
+    exchange = RawConfigExchange(config_payload(autoLoan=None))
+    fact = await OKXAccountConfigFactsAdapter(exchange).fetch()
+    assert exchange.requests == [{}]
+    assert fact.uid == "00123"
+    assert fact.auto_loan is None and fact.main_uid is MISSING
+
+
+@pytest.mark.parametrize("response,error", [
+    ({"code": "0", "data": [{"mainUid": "123"}]}, MalformedProviderData),
+    (OSError("offline"), OSError),
+])
+async def test_raw_config_adapter_propagates_provider_and_parser_failures(response, error):
+    from src.exchange.okx_account_facts import OKXAccountConfigFactsAdapter
+
+    exchange = RawConfigExchange(response)
+    with pytest.raises(error):
+        await OKXAccountConfigFactsAdapter(exchange).fetch()
+    assert exchange.requests == [{}]

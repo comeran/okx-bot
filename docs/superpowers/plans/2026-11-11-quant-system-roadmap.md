@@ -43,13 +43,14 @@ Phase 2c-a adds account-bound attempt/receipt status, same-transaction projectio
 Spec: `docs/superpowers/specs/2026-11-11-private-sync-receipts-design.md`.
 Plan/evidence: `docs/superpowers/plans/2026-11-11-private-sync-receipts-plan.md`.
 
-Next slice: exact raw private-state ingestion with durable provider cursors, account UID/mode and instrument-rule evidence, then reconciliation/recovery. Funded account-wide allocations and order-manager integration remain pending until these prerequisites have evidence.
+Next slice: instrument-rule evidence, bounded catch-up policy and reconciliation/recovery, building on the delivered single-response account-config acquisition and resumable exact fill-page ingestion. Funded account-wide allocations and order-manager integration remain pending until these prerequisites have evidence.
 
 ## Phase 3 — reconciliation, unknown outcomes and lifecycle recovery
 
 - [x] Add an isolated exact raw OKX SPOT fills page parser and single-page adapter. It preserves provider decimal strings, signed fee/rebate values, bill/order identities, `fillTime` versus `ts`, and missing/null/empty optional fields; it never infers completeness or updates the compatibility ledger.
 - [x] Persist exact SPOT page journals, typed fill facts, immutable provider UID binding, and a transactional versioned cursor. Replays are idempotent, stale/cyclic traversal fails closed, and coverage remains non-complete.
-- [ ] Paginated fill catch-up with durable cursors and idempotent replay.
+- [x] Add injected single-response account-config ingestion and exact SPOT fill-page orchestration; each explicit call resumes its durable filter-bound tail/version and returns detached evidence. No automatic catch-up or completeness inference.
+- [ ] Automatic bounded fill catch-up with durable cursors and idempotent replay.
 - [ ] Startup and continuous private-state synchronization, with bounded retries and visible freshness.
 - [ ] Resolve ambiguous submission/cancel outcomes by durable client/exchange identity before another action; never blindly resubmit.
 - [ ] Persist intended/actual runtime state and checkpoints; reconcile before resume, singleton execution lease and graceful shutdown.
