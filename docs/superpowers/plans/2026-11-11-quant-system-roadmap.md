@@ -47,6 +47,7 @@ Next slice: exact raw private-state ingestion with durable provider cursors, acc
 ## Phase 3 — reconciliation, unknown outcomes and lifecycle recovery
 
 - [x] Add an isolated exact raw OKX SPOT fills page parser and single-page adapter. It preserves provider decimal strings, signed fee/rebate values, bill/order identities, `fillTime` versus `ts`, and missing/null/empty optional fields; it never infers completeness or updates the compatibility ledger.
+- [x] Persist exact SPOT page journals, typed fill facts, immutable provider UID binding, and a transactional versioned cursor. Replays are idempotent, stale/cyclic traversal fails closed, and coverage remains non-complete.
 - [ ] Paginated fill catch-up with durable cursors and idempotent replay.
 - [ ] Startup and continuous private-state synchronization, with bounded retries and visible freshness.
 - [ ] Resolve ambiguous submission/cancel outcomes by durable client/exchange identity before another action; never blindly resubmit.
