@@ -20,6 +20,7 @@
 
 ## Deferred
 
-Traversal orchestration and restart/resume, account configuration UID/mode
-acquisition, instrument metadata, bills and balance reconciliation, complete
-algorithmic-order coverage, and activation gates remain future slices.
+Bounded single-page orchestration with restart/resume and raw account-config
+acquisition are delivered in `2026-11-12-exact-private-sync-orchestration-plan.md`.
+Automatic catch-up, instrument metadata, bills and balance reconciliation,
+complete algorithmic-order coverage, and activation gates remain future slices.

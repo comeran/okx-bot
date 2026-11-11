@@ -18,6 +18,7 @@
 
 ## Deferred
 
-Raw account-config provider adapter, account-mode policy, balance/borrow/
-bills reconciliation, instrument rules and activation preflight remain future
-work.
+The raw adapter and single-response ingestion helper are delivered in
+`2026-11-12-exact-private-sync-orchestration-plan.md`. Account-mode policy,
+balance/borrow/bills reconciliation, instrument rules and activation preflight
+remain future work.

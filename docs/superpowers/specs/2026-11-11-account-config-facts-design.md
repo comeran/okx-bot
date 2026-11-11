@@ -25,8 +25,10 @@ permission or a liability-free assertion.
 
 ## Boundary
 
-This is read-only evidence. It does not call a provider, infer liabilities,
-fetch balances or bills, modify legacy snapshots, update SpotLedger, or change
-activation/readiness. A later preflight slice must combine this evidence with
-balance, instrument, order and reconciliation facts before any ownership gate
-can open.
+The injected raw adapter makes one `private_get_account_config({})` request.
+The bounded sync helper commits that same response with its parsed fact and
+returns detached evidence; provider, parser, storage and cancellation failures
+propagate. This evidence does not infer liabilities, fetch balances or bills,
+modify legacy snapshots, update SpotLedger, or change activation/readiness.
+A later preflight slice must combine this evidence with balance, instrument,
+order and reconciliation facts before any ownership gate can open.

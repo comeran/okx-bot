@@ -1,14 +1,14 @@
 """Exact raw OKX account configuration, kept separate from activation policy.
 
-No network access or unified CCXT projections are used. A configuration snapshot
-proves neither absence of liabilities nor that a strategy may safely trade.
+The injected raw client owns network transport; no unified CCXT projections are
+used. A snapshot proves neither absence of liabilities nor safe trading activation.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Protocol
 
 from src.core.private_facts import MISSING, OptionalRawText, validate_raw_text
 from src.exchange.errors import MalformedProviderData
@@ -91,3 +91,18 @@ def parse_okx_account_config(payload: object) -> AccountConfigFact:
         )
     except ValueError as exc:
         raise MalformedProviderData(str(exc)) from exc
+
+
+class RawOKXAccountConfigExchange(Protocol):
+    async def private_get_account_config(self, params: dict[str, str]) -> object: ...
+
+
+class OKXAccountConfigFactsAdapter:
+    """Fetch exactly one raw configuration response with caller-owned transport."""
+
+    def __init__(self, exchange: RawOKXAccountConfigExchange) -> None:
+        self._exchange = exchange
+
+    async def fetch(self) -> AccountConfigFact:
+        payload = await self._exchange.private_get_account_config({})
+        return parse_okx_account_config(payload)
