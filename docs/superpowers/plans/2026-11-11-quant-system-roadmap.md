@@ -45,7 +45,7 @@ Phase 2c-a adds account-bound attempt/receipt status, same-transaction projectio
 Spec: `docs/superpowers/specs/2026-11-11-private-sync-receipts-design.md`.
 Plan/evidence: `docs/superpowers/plans/2026-11-11-private-sync-receipts-plan.md`.
 
-Next slices: instrument-rule freshness policy, bounded catch-up policy and reconciliation/recovery, building on delivered scoped instrument/config/balance persistence, single-response acquisition and resumable exact fill-page ingestion. Funded account-wide allocations and order-manager integration remain pending until these prerequisites have evidence.
+Next slices: instrument-rule freshness policy and reconciliation/recovery, building on delivered scoped instrument/config/balance persistence, single-response acquisition, resumable exact fill-page ingestion and explicitly bounded multi-page catch-up. Funded account-wide allocations and order-manager integration remain pending until these prerequisites have evidence.
 
 Balance spec/evidence: `docs/superpowers/specs/2026-11-12-account-balance-facts-design.md` and `docs/superpowers/plans/2026-11-12-account-balance-facts-plan.md`.
 
@@ -56,7 +56,7 @@ Instrument spec/evidence: `docs/superpowers/specs/2026-11-12-spot-instrument-fac
 - [x] Add an isolated exact raw OKX SPOT fills page parser and single-page adapter. It preserves provider decimal strings, signed fee/rebate values, bill/order identities, `fillTime` versus `ts`, and missing/null/empty optional fields; it never infers completeness or updates the compatibility ledger.
 - [x] Persist exact SPOT page journals, typed fill facts, immutable provider UID binding, and a transactional versioned cursor. Replays are idempotent, stale/cyclic traversal fails closed, and coverage remains non-complete.
 - [x] Add injected single-response account-config ingestion and exact SPOT fill-page orchestration; each explicit call resumes its durable filter-bound tail/version and returns detached evidence. No automatic catch-up or completeness inference.
-- [ ] Automatic bounded fill catch-up with durable cursors and idempotent replay.
+- [x] Add caller-invoked bounded exact SPOT fill catch-up using durable filter-bound cursors. Each page commits independently; short pages continue, empty pages stay unknown and the page bound returns partial coverage. Stale/cyclic cursors fail closed; there are no retries or completeness/ledger/activation writes.
 - [ ] Startup and continuous private-state synchronization, with bounded retries and visible freshness.
 - [ ] Resolve ambiguous submission/cancel outcomes by durable client/exchange identity before another action; never blindly resubmit.
 - [ ] Persist intended/actual runtime state and checkpoints; reconcile before resume, singleton execution lease and graceful shutdown.
