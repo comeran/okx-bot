@@ -1,6 +1,9 @@
 import { defineStore } from 'pinia';
+import { watch } from 'vue';
 
-import { fetchStrategyPerformance } from '@/services/trading';
+import { fetchExchangeSnapshot, fetchStrategyPerformance } from '@/services/trading';
+import { matchesExecutionContext, useAccountContextStore } from './accountContext';
+import type { ExchangeSnapshot } from '@/types/executionContext';
 import type { StrategyPerformance } from '@/types/strategyPerformance';
 import type {
   AccountSummary,
@@ -161,45 +164,39 @@ function isMarketTickerArray(value: unknown): value is MarketTicker[] {
   return Array.isArray(value) && value.every(isMarketTicker);
 }
 
-function isZeroAccountPlaceholder(
-  account: AccountSummary,
-  positions: Position[],
-): boolean {
-  return (
-    positions.length === 0
-    && (account.assets?.length ?? 0) === 0
-    && [
-      account.cash_balance ?? 0,
-      account.available_balance ?? 0,
-      account.equity,
-      account.realized_pnl ?? 0,
-      account.unrealized_pnl ?? 0,
-      account.daily_pnl,
-      account.fees_paid ?? 0,
-    ].every((value) => value === 0)
-  );
-}
-
-function normalizeAccount(
-  account: AccountSummary,
-  positions: Position[],
-): AccountSummary | null {
-  return isZeroAccountPlaceholder(account, positions) ? null : account;
-}
-
 function payloadFor(message: DashboardWebSocketMessage, key: string): unknown {
   const record = message as Record<string, unknown>;
   return record[key] ?? record.data;
 }
 
-function appliesToExchangeState(message: DashboardWebSocketMessage | Record<string, unknown>): boolean {
+function appliesToExchangeState(message: { scope?: unknown; context?: unknown }): boolean {
   // Global state is trusted only from an explicit exchange scope. Legacy
   // strategy/unscoped messages stay in history and cannot overwrite the global view.
-  return message.scope === 'exchange';
+  return message.scope === 'exchange' && matchesExecutionContext(useAccountContextStore().context, message.context);
+}
+
+function isFinancialMessage(message: DashboardWebSocketMessage): boolean {
+  return message.scope === 'exchange' || ['account', 'positions', 'orders', 'trade', 'trades', 'risk_event'].includes(message.type)
+    || (message.type === 'snapshot' && snapshotTouchesTradingState(isRecord(message.data) ? message.data : message));
+}
+
+function isPaperStrategyFinancialMessage(message: DashboardWebSocketMessage): boolean {
+  return message.scope === 'strategy' && typeof message.strategy === 'string'
+    && message.source === 'paper' && message.runtime_mode === 'paper'
+    && ['account', 'positions', 'orders', 'risk_event'].includes(message.type);
+}
+
+function validateSnapshot(snapshot: ExchangeSnapshot): void {
+  if (!appliesToExchangeState(snapshot) || !isRecord(snapshot.data)
+    || !(snapshot.data.account === null || isAccountSummary(snapshot.data.account))
+    || !isPositionArray(snapshot.data.positions) || !isOrderArray(snapshot.data.orders)) {
+    throw new Error('Account snapshot context mismatch or invalid snapshot');
+  }
 }
 
 function snapshotTouchesTradingState(snapshot: DashboardSnapshot | Record<string, unknown>): boolean {
-  return 'account' in snapshot || 'positions' in snapshot || 'orders' in snapshot;
+  return 'account' in snapshot || 'positions' in snapshot || 'orders' in snapshot
+    || 'trade' in snapshot || 'trades' in snapshot;
 }
 
 function errorMessage(error: unknown, fallback: string): string {
@@ -233,13 +230,36 @@ const useDashboardStoreBase = defineStore('dashboard', {
     lastUpdatedAt: null,
   }),
   actions: {
+    resetAccountState() {
+      invalidateDashboardLoads(this);
+      nextDashboardLoadGeneration(this);
+      invalidateAccountOverviewRequests(this);
+      invalidateStrategyPerformanceRequests(this);
+      clearStrategyPerformanceRefreshTimer(this);
+      this.account = null;
+      this.positions = [];
+      this.orders = [];
+      this.strategyPerformance = [];
+      this.websocketMessages = [];
+      this.loading = false;
+      this.accountLoading = false;
+      this.strategyPerformanceLoading = false;
+      this.error = null;
+      this.accountError = null;
+      this.strategyPerformanceError = null;
+      this.lastUpdatedAt = null;
+    },
     async loadInitialData() {
+      const authority = useAccountContextStore();
+      const contextRequest = authority.ensure();
+      const accountEpoch = authority.epoch;
       const loadGeneration = nextDashboardLoadGeneration(this);
       const loadRequestId = nextDashboardLoadRequestId(this);
       const stateVersions = currentWebSocketStateVersions(this);
       const isCurrentLoad = () => (
         dashboardLoadRequestSequences.get(this) === loadRequestId
         && currentDashboardLoadGeneration(this) === loadGeneration
+        && authority.epoch === accountEpoch
       );
       dashboardLoadPendingRequests.set(this, loadRequestId);
 
@@ -254,37 +274,17 @@ const useDashboardStoreBase = defineStore('dashboard', {
       void this.refreshStrategyPerformance();
 
       try {
-        const [accountResult, positionsResult, ordersResult] = await Promise.allSettled([
-          fetchJson<AccountSummary>('/api/trading/account?scope=exchange'),
-          fetchJson<Position[]>('/api/trading/positions?scope=exchange'),
-          fetchJson<Order[]>('/api/trading/orders?scope=exchange'),
-        ]);
-
-        if (accountResult.status !== 'fulfilled') {
-          throw accountResult.reason;
-        }
-
-        if (positionsResult.status !== 'fulfilled') {
-          throw positionsResult.reason;
-        }
-
-        if (ordersResult.status !== 'fulfilled') {
-          throw ordersResult.reason;
-        }
-
-        if (!isCurrentLoad()) {
-          return;
-        }
-
-        const currentVersions = currentWebSocketStateVersions(this);
-        if (currentVersions.positions === stateVersions.positions) {
-          this.positions = positionsResult.value;
-        }
-        if (currentVersions.account === stateVersions.account) {
-          this.account = normalizeAccount(accountResult.value, this.positions);
-        }
-        if (currentVersions.orders === stateVersions.orders) {
-          this.orders = ordersResult.value;
+        const context = await contextRequest;
+        if (authority.epoch !== accountEpoch) return;
+        if (!context) throw new Error(authority.error ?? 'Account context unavailable');
+        if (context.available && context.account_scope_id) {
+          const snapshot = await fetchExchangeSnapshot(context.account_scope_id);
+          if (!isCurrentLoad()) return;
+          validateSnapshot(snapshot);
+          const currentVersions = currentWebSocketStateVersions(this);
+          if (currentVersions.positions === stateVersions.positions) this.positions = snapshot.data.positions ?? [];
+          if (currentVersions.account === stateVersions.account) this.account = snapshot.data.account ?? null;
+          if (currentVersions.orders === stateVersions.orders) this.orders = snapshot.data.orders ?? [];
         }
 
         try {
@@ -317,6 +317,9 @@ const useDashboardStoreBase = defineStore('dashboard', {
       }
     },
     async refreshAccountOverview() {
+      const authority = useAccountContextStore();
+      const contextRequest = authority.ensure();
+      const accountEpoch = authority.epoch;
       const accountRequestGeneration = currentDashboardLoadGeneration(this);
       const accountRequestId = nextAccountOverviewRequestId(this);
       const accountStateVersion = currentWebSocketStateVersions(this).account;
@@ -324,6 +327,7 @@ const useDashboardStoreBase = defineStore('dashboard', {
         accountOverviewRequestSequences.get(this) === accountRequestId
         && (accountOverviewRequestGenerations.get(this) ?? 0) === accountRequestGeneration
         && currentDashboardLoadGeneration(this) === accountRequestGeneration
+        && authority.epoch === accountEpoch
       );
       accountOverviewRequestGenerations.set(this, accountRequestGeneration);
       accountOverviewPendingRequests.set(this, accountRequestId);
@@ -332,13 +336,18 @@ const useDashboardStoreBase = defineStore('dashboard', {
       this.accountError = null;
 
       try {
-        const account = await fetchJson<AccountSummary>('/api/trading/account?scope=exchange');
+        const context = await contextRequest;
+        if (authority.epoch !== accountEpoch) return;
+        if (!context) throw new Error(authority.error ?? 'Account context unavailable');
+        if (!context.available || !context.account_scope_id) return;
+        const snapshot = await fetchExchangeSnapshot(context.account_scope_id);
+        if (isCurrentAccountRequest()) validateSnapshot(snapshot);
         if (!isCurrentAccountRequest()) {
           return;
         }
 
         if (currentWebSocketStateVersions(this).account === accountStateVersion) {
-          this.account = normalizeAccount(account, this.positions);
+          this.account = snapshot.data.account ?? null;
         }
         this.accountError = null;
       } catch (error) {
@@ -358,17 +367,27 @@ const useDashboardStoreBase = defineStore('dashboard', {
       this.websocketConnected = connected;
     },
     addWebSocketMessage(message: DashboardWebSocketMessage) {
+      if (isPaperStrategyFinancialMessage(message)) {
+        this.scheduleStrategyPerformanceRefresh();
+        return;
+      }
+      if (isFinancialMessage(message) && !appliesToExchangeState(message)) return;
       this.websocketMessages.unshift(message);
       this.websocketMessages = this.websocketMessages.slice(0, WEBSOCKET_MESSAGE_HISTORY_LIMIT);
       this.applyWebSocketMessage(message);
     },
     applyWebSocketMessage(message: DashboardWebSocketMessage) {
+      if (isPaperStrategyFinancialMessage(message)) {
+        this.scheduleStrategyPerformanceRefresh();
+        return;
+      }
+      if (isFinancialMessage(message) && !appliesToExchangeState(message)) return;
       switch (message.type) {
         case 'account': {
           const account = payloadFor(message, 'account');
           if (appliesToExchangeState(message) && isAccountSummary(account)) {
             markWebSocketStateUpdated(this, 'account');
-            this.account = normalizeAccount(account, this.positions);
+            this.account = account;
           }
           this.scheduleStrategyPerformanceRefresh();
           break;
@@ -378,9 +397,6 @@ const useDashboardStoreBase = defineStore('dashboard', {
           if (appliesToExchangeState(message) && isPositionArray(positions)) {
             markWebSocketStateUpdated(this, 'positions');
             this.positions = positions;
-            if (this.account !== null) {
-              this.account = normalizeAccount(this.account, this.positions);
-            }
           }
           this.scheduleStrategyPerformanceRefresh();
           break;
@@ -425,7 +441,7 @@ const useDashboardStoreBase = defineStore('dashboard', {
           this.account = null;
         } else if (isAccountSummary(snapshot.account)) {
           markWebSocketStateUpdated(this, 'account');
-          this.account = normalizeAccount(snapshot.account, positions);
+          this.account = snapshot.account;
         }
       }
 
@@ -442,19 +458,25 @@ const useDashboardStoreBase = defineStore('dashboard', {
       strategyPerformanceRefreshTimers.set(this, timer);
     },
     async refreshStrategyPerformance() {
+      const authority = useAccountContextStore();
+      const contextRequest = authority.ensure();
+      const accountEpoch = authority.epoch;
       const requestGeneration = nextStrategyPerformanceRequestGeneration(this);
       const requestId = nextStrategyPerformanceRequestId(this);
       this.strategyPerformanceLoading = true;
 
       try {
-        const performance = await fetchStrategyPerformance();
-        if (!isCurrentStrategyPerformanceRequest(this, requestId, requestGeneration)) {
+        const context = await contextRequest;
+        if (authority.epoch !== accountEpoch) return;
+        if (!context) throw new Error(authority.error ?? 'Account context unavailable');
+        const performance = await fetchStrategyPerformance(context.available ? context.account_scope_id : null);
+        if (authority.epoch !== accountEpoch || !isCurrentStrategyPerformanceRequest(this, requestId, requestGeneration)) {
           return;
         }
         this.strategyPerformance = performance;
         this.strategyPerformanceError = null;
       } catch (error) {
-        if (!isCurrentStrategyPerformanceRequest(this, requestId, requestGeneration)) {
+        if (authority.epoch !== accountEpoch || !isCurrentStrategyPerformanceRequest(this, requestId, requestGeneration)) {
           return;
         }
         this.strategyPerformanceError = errorMessage(
@@ -462,7 +484,7 @@ const useDashboardStoreBase = defineStore('dashboard', {
           'Failed to load strategy performance',
         );
       } finally {
-        if (isCurrentStrategyPerformanceRequest(this, requestId, requestGeneration)) {
+        if (authority.epoch === accountEpoch && isCurrentStrategyPerformanceRequest(this, requestId, requestGeneration)) {
           this.strategyPerformanceLoading = false;
         }
       }
@@ -479,7 +501,10 @@ export const useDashboardStore = (): DashboardStore => {
 
   if (!patchedDashboardStores.has(store)) {
     const originalDispose = store.$dispose.bind(store);
+    const authority = useAccountContextStore();
+    const stopAccountWatch = watch(() => authority.epoch, () => store.resetAccountState(), { flush: 'sync' });
     store.$dispose = () => {
+      stopAccountWatch();
       clearStrategyPerformanceRefreshTimer(store);
       invalidateDashboardLoads(store);
       invalidateAccountOverviewRequests(store);

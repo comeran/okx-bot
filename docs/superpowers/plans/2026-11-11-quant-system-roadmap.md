@@ -4,7 +4,7 @@ Baseline: main `a41ff98`; audit 2026-11-11. User authorized a plan and increment
 
 Confirmed scope: the user selected spot first. Phases 2–6 target unleveraged spot; derivative account, funding and liquidation models require a separate implementation slice.
 
-## Phase 1 — configuration and feasible spot research (current slice)
+## Phase 1 — configuration and feasible spot research (delivered)
 
 - [x] Persistent account-scoped allocation drafts, audit/revision control and stopped-only API.
 - [x] Strategy-page draft configuration with correct local paper / OKX sandbox / live semantics.
@@ -18,12 +18,19 @@ Acceptance: explicit draft configuration persists without granting trading permi
 
 ## Phase 2 — account isolation and active strategy allocation
 
-- [ ] Persist environment/account identity on live account, order, fill, position and reconciliation state; keep legacy ambiguous rows audit-only.
+- [x] Persist environment/account identity on live account, order, fill, position and reconciliation state through immutable scoped facts stores; keep legacy ambiguous rows audit-only.
 - [ ] Define exclusive initial spot ownership, budget consumption/reservations and strategy-local cash/position/PnL queries.
 - [ ] Account-mode, instrument-unit and available-funds preflight. Derivatives require their own account/risk design before activation.
 - [ ] Atomically validate/activate a draft from trusted fresh exchange facts; refuse overlapping/excess allocation and unsafe runtime edits.
 
 Acceptance: empty-account first trade and subsequent closes use correct strategy funds; two strategies cannot consume the same position/cash; switching accounts/environments cannot reuse authorization or historical state. Live gate opens only after this and Phase 3 prerequisites pass.
+
+Phase 2a implements account isolation for cached snapshots and explicit private synchronization. REST/WS bind to the captured credential/environment; clients invalidate financial data, history and pending requests on account changes. It does not grant active allocation or live strategy permission. Credential binding remains unverified exchange identity; different API keys retain separate history.
+
+Spec: `docs/superpowers/specs/2026-11-11-account-isolation-design.md`.
+Plan/evidence: `docs/superpowers/plans/2026-11-11-account-isolation-plan.md` and `2026-11-11-account-isolation-progress.md`.
+
+Next slice: strategy-local cash/spot ownership, reservations and allocation preflight. Connect these to the scoped facts store and effective global/account kill state before considering activation; Phase 3 reconciliation/recovery remains an activation prerequisite.
 
 ## Phase 3 — reconciliation, unknown outcomes and lifecycle recovery
 

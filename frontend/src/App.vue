@@ -2,6 +2,7 @@
 import {
   computed,
   nextTick,
+  onBeforeUnmount,
   onMounted,
   ref,
   watch,
@@ -13,6 +14,8 @@ import AppHeader from '@/components/layout/AppHeader.vue';
 import AppSidebar from '@/components/layout/AppSidebar.vue';
 import StatusBadge from '@/components/ui/StatusBadge.vue';
 import { useWebSocket } from '@/composables/useWebSocket';
+import { useAccountContextStore } from '@/stores/accountContext';
+import type { DashboardWebSocketMessage } from '@/types/dashboard';
 import { useDashboardStore } from '@/stores/dashboard';
 import { useStrategiesStore } from '@/stores/strategies';
 import type { StrategyWebSocketMessage } from '@/types/strategy';
@@ -36,19 +39,69 @@ function isPageRouteName(name: unknown): name is PageRouteName {
 const { locale, t } = useI18n({ useScope: 'global' });
 const route = useRoute();
 const dashboard = useDashboardStore();
+const accountContext = useAccountContextStore();
 const strategies = useStrategiesStore();
 const mobileNavigationOpen = ref(false);
 const appHeaderRef = ref<InstanceType<typeof AppHeader> | null>(null);
-const exchangeWebSocket = useWebSocket('/ws?scope=exchange', {
+let reconnectTimer: ReturnType<typeof globalThis.setTimeout> | null = null;
+let disposed = false;
+function cancelReconnect(): void {
+  if (reconnectTimer !== null) globalThis.clearTimeout(reconnectTimer);
+  reconnectTimer = null;
+}
+
+async function reloadAccount(): Promise<void> {
+  cancelReconnect();
+  const request = accountContext.reload();
+  const epoch = accountContext.epoch;
+  const context = await request;
+  if (!disposed && context && accountContext.epoch === epoch) await dashboard.loadInitialData();
+}
+
+function scheduleAccountReconnect(): void {
+  accountContext.invalidate();
+  const epoch = accountContext.epoch;
+  reconnectTimer = globalThis.setTimeout(() => {
+    reconnectTimer = null;
+    if (!disposed && accountContext.epoch === epoch) void reloadAccount();
+  }, 3000);
+}
+
+function handleControl(message: DashboardWebSocketMessage): boolean {
+  if (message.type !== 'context_changed') return false;
+  void reloadAccount();
+  return true;
+}
+
+const exchangeWebSocket = useWebSocket(() => {
+  const context = accountContext.context;
+  return context?.available && context.account_scope_id
+    ? `/ws?scope=exchange&expected_account_scope_id=${encodeURIComponent(context.account_scope_id)}`
+    : null;
+}, {
+  reconnect: false,
+  onClose: scheduleAccountReconnect,
   onMessage: (message) => {
-    dashboard.addWebSocketMessage(message);
+    if (!handleControl(message)) dashboard.addWebSocketMessage(message);
   },
 });
 const strategyWebSocket = useWebSocket('/ws?scope=strategy&strategy=*', {
   onMessage: (message) => {
+    if (handleControl(message)) return;
     dashboard.addWebSocketMessage(message);
     strategies.applyWebSocketMessage(message as StrategyWebSocketMessage);
   },
+});
+watch(() => accountContext.epoch, () => {
+  cancelReconnect();
+  exchangeWebSocket.disconnect();
+}, { flush: 'sync' });
+watch(() => accountContext.context, (context) => {
+  if (context?.available && context.account_scope_id) exchangeWebSocket.connect();
+}, { immediate: true });
+onBeforeUnmount(() => {
+  disposed = true;
+  cancelReconnect();
 });
 
 const selectedLocale = computed({
@@ -93,7 +146,7 @@ async function restoreMenuFocus(): Promise<void> {
 }
 
 onMounted(() => {
-  exchangeWebSocket.connect();
+  void accountContext.ensure();
   strategyWebSocket.connect();
 });
 </script>

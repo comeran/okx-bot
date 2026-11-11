@@ -185,7 +185,7 @@ def _save_settings(settings: SettingsUpdate) -> None:
     save_runtime_settings(_config_from_settings(settings))
 
 
-def create_router() -> APIRouter:
+def create_router(broadcast=None) -> APIRouter:
     router = APIRouter()
     settings = _load_settings()
 
@@ -219,6 +219,8 @@ def create_router() -> APIRouter:
         settings.notify.telegram_chat_id = update.notify.telegram_chat_id
         settings.web = update.web
         _save_settings(settings)
+        if broadcast is not None:
+            await broadcast({"type": "context_changed"})
         return _serialize_settings(settings)
 
     return router

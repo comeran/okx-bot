@@ -7,7 +7,10 @@ import { defineHostComponent, mount, textContent } from '@/test-utils/mount';
 const storeMocks = vi.hoisted(() => ({
   dashboard: {} as Record<string, unknown>,
   strategies: {} as Record<string, unknown>,
+  accountContext: {} as Record<string, unknown>,
 }));
+
+vi.mock('@/stores/accountContext', () => ({ useAccountContextStore: () => storeMocks.accountContext }));
 
 vi.mock('@/stores/dashboard', () => ({
   useDashboardStore: () => storeMocks.dashboard,
@@ -82,6 +85,7 @@ const DashboardWithLocale = defineComponent({
 });
 
 function createStoreMocks() {
+  storeMocks.accountContext = reactive({ context: null, loading: false, error: null });
   storeMocks.dashboard = reactive({
     account: null,
     positions: [{ symbol: 'BTC-USDT', amount: 1 }],
@@ -172,6 +176,34 @@ describe('Dashboard view', () => {
     expect(activity.props['data-recent-orders']).toBe(20);
     expect(activity.props['data-websocket-messages']).toBe(5);
 
+    wrapper.unmount();
+  });
+
+  it('shows missing snapshot only when account and context are neither loading nor in error', async () => {
+    storeMocks.accountContext.context = {
+      available: true, account_scope_id: 'A', exchange: 'okx', environment: 'sandbox',
+      market_type: 'spot', identity_verified: false, execution_ready: false, reason: null,
+    };
+    const wrapper = await mount(Dashboard, { locale: 'en', components: {
+      ElButton: defineHostComponent('el-button'), ElAlert: defineHostComponent('el-alert'),
+      ElRow: defineHostComponent('el-row'), ElCol: defineHostComponent('el-col'),
+    } });
+    await wrapper.flush();
+    expect(wrapper.text()).toContain('No snapshot');
+    for (const [store, field, value] of [
+      [storeMocks.dashboard, 'error', 'Invalid facts header'],
+      [storeMocks.dashboard, 'accountError', 'Account refresh failed'],
+      [storeMocks.dashboard, 'accountLoading', true],
+      [storeMocks.accountContext, 'loading', true],
+      [storeMocks.accountContext, 'error', 'Context unavailable'],
+    ] as const) {
+      store[field] = value;
+      await wrapper.flush();
+      expect(wrapper.text()).not.toContain('No snapshot');
+      store[field] = typeof value === 'boolean' ? false : null;
+      await wrapper.flush();
+    }
+    expect(wrapper.text()).toContain('No snapshot');
     wrapper.unmount();
   });
 
@@ -339,7 +371,7 @@ describe('Dashboard view', () => {
     await wrapper.flush();
 
     const section = wrapper.find((node) => node.type === 'section' && String(node.props.class).includes('dashboard-view'));
-    const directChildren = section.children;
+    const directChildren = section.children.filter((child) => child.props.class !== 'account-context');
 
     expect(directChildren).toHaveLength(6);
     expect(String(directChildren[0].props.class)).toContain('app-page-header');

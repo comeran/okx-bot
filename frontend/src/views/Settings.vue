@@ -9,6 +9,8 @@ import DataState from '@/components/ui/DataState.vue';
 import SettingsSection from '@/components/settings/SettingsSection.vue';
 import SecretField from '@/components/settings/SecretField.vue';
 import { useDirtyGuard } from '@/composables/useDirtyGuard';
+import { useAccountContextStore } from '@/stores/accountContext';
+import { useDashboardStore } from '@/stores/dashboard';
 import { getSettings, updateSettings } from '@/services/settings';
 import type { AppSettingsUpdate, AppSettingsView } from '@/types/settings';
 
@@ -322,6 +324,11 @@ async function saveSettings(): Promise<void> {
   saving.value = true;
   try {
     applySettings(await updateSettings(buildUpdatePayload()));
+    const authority = useAccountContextStore();
+    const request = authority.reload();
+    const epoch = authority.epoch;
+    const context = await request;
+    if (context && authority.epoch === epoch) void useDashboardStore().loadInitialData();
     loadError.value = null;
     ElMessage.success(t('settings.saveSuccess'));
   } catch {

@@ -21,6 +21,7 @@ from starlette.websockets import WebSocketDisconnect
 from src.analytics.strategy_performance import build_strategy_performance
 from src.core.config import AppConfig, ExchangeConfig, RiskConfig
 from src.core.engine import BotEngine
+from src.core.execution_scope import build_execution_context
 from src.core.types import Bar, Order, OrderSide, OrderStatus, OrderType
 from src.data.models import (
     AccountRecord,
@@ -52,6 +53,37 @@ from src.web.api import strategies as strategy_api
 from src.web.api import trading as trading_api
 from src.web.app import app as exported_app
 from src.web.app import create_app
+from src.web.exchange_context import BoundExchangeStore
+
+
+def private_scope_params(market_type="spot"):
+    context, _ = build_execution_context(private_sync_settings(market_type=market_type).exchange)
+    return {"expected_account_scope_id": context["account_scope_id"]}
+
+
+def trading_scope_id():
+    context, _ = build_execution_context(trading_api.load_runtime_settings().exchange)
+    return context["account_scope_id"]
+
+
+def exchange_test_binding(repository):
+    exchange = ExchangeConfig(api_key="test-key", secret="test-secret", passphrase="test-pass")
+    context, scope = build_execution_context(exchange)
+    master = SqliteRepository()
+    if not hasattr(repository, "get_kill_switch"):
+        repository.get_kill_switch = master.get_kill_switch
+    return BoundExchangeStore(exchange, context, scope, master, repository)
+
+
+def bind_exchange_test_repository(monkeypatch, module, repository):
+    binding = exchange_test_binding(repository)
+
+    def bind(exchange, master, expected_account_scope_id, **kwargs):
+        assert expected_account_scope_id == binding.context["account_scope_id"]
+        return binding
+
+    monkeypatch.setattr(module, "bind_exchange_store", bind)
+    return binding
 
 
 @pytest.fixture
@@ -156,7 +188,7 @@ def test_private_sync_endpoint_rejects_live_mode(monkeypatch):
     app = FastAPI()
     app.include_router(ops_api.create_router(), prefix="/api/ops")
 
-    response = TestClient(app).post("/api/ops/sync/private", json={})
+    response = TestClient(app).post("/api/ops/sync/private", json={}, params=private_scope_params())
 
     assert response.status_code == 403
     assert response.json()["detail"] == "Private sync is only available in OKX demo mode"
@@ -191,7 +223,7 @@ def test_private_sync_endpoint_preserves_none_symbols_for_full_sync(monkeypatch)
     app = FastAPI()
     app.include_router(ops_api.create_router(), prefix="/api/ops")
 
-    response = TestClient(app).post("/api/ops/sync/private", json={})
+    response = TestClient(app).post("/api/ops/sync/private", json={}, params=private_scope_params())
 
     assert response.status_code == 200
     assert captured["symbols"] is None
@@ -227,7 +259,7 @@ def test_private_sync_endpoint_broadcasts_exchange_snapshot_after_success(monkey
     app = FastAPI()
     app.include_router(ops_api.create_router(broadcast=broadcast), prefix="/api/ops")
 
-    response = TestClient(app).post("/api/ops/sync/private", json={})
+    response = TestClient(app).post("/api/ops/sync/private", json={}, params=private_scope_params())
 
     assert response.status_code == 200
     assert len(broadcasts) == 1
@@ -248,13 +280,14 @@ def test_private_sync_endpoint_rejects_invalid_symbol_scope(monkeypatch):
 
     response = TestClient(app).post(
         "/api/ops/sync/private",
+        params=private_scope_params(),
         json={"symbols": ["", "NOT-A-SYMBOL"]},
     )
 
     assert response.status_code == 422
 
 
-@pytest.mark.parametrize("market_type", ["OPTIONS", " option "])
+@pytest.mark.parametrize("market_type", ["SPOT", " spot "])
 def test_private_sync_endpoint_uses_factory_market_type_aliases(monkeypatch, market_type):
     class FakeAdapter:
         async def close(self):
@@ -281,7 +314,7 @@ def test_private_sync_endpoint_uses_factory_market_type_aliases(monkeypatch, mar
     monkeypatch.setattr(
         adapter_factory,
         "OKX_ADAPTERS",
-        {"option": fake_options_adapter, "options": fake_options_adapter},
+        {"spot": fake_options_adapter},
     )
     monkeypatch.setattr(
         ops_api.settings_api,
@@ -292,7 +325,9 @@ def test_private_sync_endpoint_uses_factory_market_type_aliases(monkeypatch, mar
     app = FastAPI()
     app.include_router(ops_api.create_router(), prefix="/api/ops")
 
-    response = TestClient(app).post("/api/ops/sync/private", json={})
+    response = TestClient(app).post(
+        "/api/ops/sync/private", json={}, params=private_scope_params(market_type),
+    )
 
     assert response.status_code == 200
 
@@ -306,12 +341,10 @@ def test_private_sync_endpoint_rejects_unsupported_factory_market_type(monkeypat
     app = FastAPI()
     app.include_router(ops_api.create_router(), prefix="/api/ops")
 
-    response = TestClient(app).post("/api/ops/sync/private", json={})
+    response = TestClient(app).post("/api/ops/sync/private", json={}, params=private_scope_params())
 
-    assert response.status_code == 400
-    assert response.json()["detail"] == (
-        "Unsupported OKX market_type for live trading: unsupported"
-    )
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "account_context_unavailable"
 
 
 @pytest.mark.parametrize("error", [TimeoutError("timed out"), ConnectionError("offline")])
@@ -329,7 +362,7 @@ def test_private_sync_endpoint_maps_provider_network_errors_to_502(monkeypatch, 
     app = FastAPI()
     app.include_router(ops_api.create_router(), prefix="/api/ops")
 
-    response = TestClient(app).post("/api/ops/sync/private", json={})
+    response = TestClient(app).post("/api/ops/sync/private", json={}, params=private_scope_params())
 
     assert response.status_code == 502
     assert response.json()["detail"] == "OKX provider unavailable"
@@ -350,7 +383,7 @@ def test_private_sync_endpoint_maps_malformed_provider_data_to_502(monkeypatch):
     app = FastAPI()
     app.include_router(ops_api.create_router(), prefix="/api/ops")
 
-    response = TestClient(app).post("/api/ops/sync/private", json={})
+    response = TestClient(app).post("/api/ops/sync/private", json={}, params=private_scope_params())
 
     assert response.status_code == 502
     assert response.json()["detail"] == "Malformed OKX provider data"
@@ -372,7 +405,7 @@ def test_private_sync_endpoint_maps_unsupported_provider_capability_to_501_even_
     app = FastAPI()
     app.include_router(ops_api.create_router(), prefix="/api/ops")
 
-    response = TestClient(app).post("/api/ops/sync/private", json={})
+    response = TestClient(app).post("/api/ops/sync/private", json={}, params=private_scope_params())
 
     assert response.status_code == 501
     assert response.json() == {"detail": "OKX provider capability unsupported"}
@@ -392,7 +425,7 @@ def test_private_sync_endpoint_preserves_http_errors(monkeypatch):
     app = FastAPI()
     app.include_router(ops_api.create_router(), prefix="/api/ops")
 
-    response = TestClient(app).post("/api/ops/sync/private", json={})
+    response = TestClient(app).post("/api/ops/sync/private", json={}, params=private_scope_params())
 
     assert response.status_code == 422
     assert response.json()["detail"] == "business validation failed"
@@ -405,7 +438,7 @@ def test_private_sync_endpoint_returns_counts_in_demo_mode(monkeypatch):
         async def close(self):
             self.closed = True
 
-    class FakeRepository:
+    class FakeRepository(SqliteRepository):
         pass
 
     class FakeResult:
@@ -443,12 +476,14 @@ def test_private_sync_endpoint_returns_counts_in_demo_mode(monkeypatch):
 
     response = TestClient(app).post(
         "/api/ops/sync/private",
+        params=private_scope_params(),
         json={"symbols": ["BTC-USDT"], "since": 1700000000000},
     )
 
     assert response.status_code == 200
     assert response.json() == {
         "status": "ok",
+        "context": build_execution_context(private_sync_settings().exchange)[0],
         "account_upserted": 1,
         "orders_upserted": 2,
         "trades_upserted": 3,
@@ -457,7 +492,7 @@ def test_private_sync_endpoint_returns_counts_in_demo_mode(monkeypatch):
         "kill_switch_engaged": True,
         "divergences": [{"type": "risk_event"}],
     }
-    assert isinstance(captured["repository"], FakeRepository)
+    assert isinstance(captured["repository"], SqliteRepository)
     assert captured["adapter"] is adapter
     assert captured["kwargs"]["symbols"] == ["BTC-USDT"]
     assert captured["kwargs"]["since"] == 1700000000000
@@ -491,7 +526,7 @@ def test_private_sync_endpoint_ignores_close_error_after_success(monkeypatch, ca
     app = FastAPI()
     app.include_router(ops_api.create_router(), prefix="/api/ops")
 
-    response = TestClient(app).post("/api/ops/sync/private", json={})
+    response = TestClient(app).post("/api/ops/sync/private", json={}, params=private_scope_params())
 
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
@@ -520,7 +555,7 @@ def test_private_sync_endpoint_preserves_sync_error_when_close_also_fails(monkey
     app = FastAPI()
     app.include_router(ops_api.create_router(), prefix="/api/ops")
 
-    response = TestClient(app).post("/api/ops/sync/private", json={})
+    response = TestClient(app).post("/api/ops/sync/private", json={}, params=private_scope_params())
 
     assert response.status_code == 502
     assert response.json()["detail"] == "OKX provider unavailable"
@@ -3609,7 +3644,10 @@ async def test_refresh_live_state_endpoint_requires_live_mode(monkeypatch, app):
     transport = ASGITransport(app=app)
 
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.post("/api/trading/live-state/refresh", params={"strategy": "ma_cross"})
+        resp = await client.post(
+            "/api/trading/live-state/refresh",
+            params={"expected_account_scope_id": trading_scope_id(), "strategy": "ma_cross"},
+        )
 
     assert resp.status_code == 400
     assert resp.json()["detail"] == "Live state refresh requires live mode"
@@ -3630,7 +3668,7 @@ async def test_refresh_live_state_endpoint_persists_and_returns_state(monkeypatc
     )
     position = PositionRecord(
         strategy="ma_cross",
-        symbol="BTC-USDT-SWAP",
+        symbol="BTC-USDT",
         side="long",
         amount=1.0,
         entry_price=50000.0,
@@ -3653,7 +3691,7 @@ async def test_refresh_live_state_endpoint_persists_and_returns_state(monkeypatc
                 api_key="key",
                 secret="secret",
                 passphrase="pass",
-                market_type="swap",
+                market_type="spot",
                 demo=True,
             ),
         ),
@@ -3664,14 +3702,17 @@ async def test_refresh_live_state_endpoint_persists_and_returns_state(monkeypatc
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.post(
             "/api/trading/live-state/refresh",
-            params={"strategy": "__exchange__", "symbol": "BTC-USDT-SWAP"},
+            params={
+                "expected_account_scope_id": trading_scope_id(),
+                "strategy": "__exchange__", "symbol": "BTC-USDT",
+            },
         )
 
     assert resp.status_code == 200
-    assert calls == [("swap", "__exchange__", ["BTC-USDT-SWAP"])]
+    assert calls == [("spot", "__exchange__", ["BTC-USDT"])]
     payload = resp.json()
     assert payload["account"]["equity"] == 1000.0
-    assert payload["positions"][0]["symbol"] == "BTC-USDT-SWAP"
+    assert payload["positions"][0]["symbol"] == "BTC-USDT"
 
 
 @pytest.mark.asyncio
@@ -3685,7 +3726,7 @@ async def test_refresh_live_state_endpoint_preserves_omitted_symbol_as_full_scop
     monkeypatch.setattr(
         "src.web.api.trading.load_runtime_settings",
         lambda: AppConfig(mode="live", exchange=ExchangeConfig(
-            api_key="key", secret="secret", passphrase="pass", market_type="swap", demo=True,
+            api_key="key", secret="secret", passphrase="pass", market_type="spot", demo=True,
         )),
     )
     monkeypatch.setattr("src.web.api.trading.refresh_okx_live_state", fake_refresh)
@@ -3693,7 +3734,8 @@ async def test_refresh_live_state_endpoint_preserves_omitted_symbol_as_full_scop
 
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
-            "/api/trading/live-state/refresh", params={"strategy": "__exchange__"}
+            "/api/trading/live-state/refresh",
+            params={"expected_account_scope_id": trading_scope_id(), "strategy": "__exchange__"},
         )
 
     assert response.status_code == 200
@@ -3705,7 +3747,7 @@ async def test_refresh_live_state_endpoint_rejects_explicit_empty_symbol(monkeyp
     monkeypatch.setattr(
         "src.web.api.trading.load_runtime_settings",
         lambda: AppConfig(mode="live", exchange=ExchangeConfig(
-            api_key="key", secret="secret", passphrase="pass", market_type="swap", demo=True,
+            api_key="key", secret="secret", passphrase="pass", market_type="spot", demo=True,
         )),
     )
     transport = ASGITransport(app=app)
@@ -3713,7 +3755,10 @@ async def test_refresh_live_state_endpoint_rejects_explicit_empty_symbol(monkeyp
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
             "/api/trading/live-state/refresh",
-            params={"strategy": "__exchange__", "symbol": ""},
+            params={
+                "expected_account_scope_id": trading_scope_id(),
+                "strategy": "__exchange__", "symbol": "",
+            },
         )
 
     assert response.status_code in {400, 422}
@@ -3724,7 +3769,7 @@ async def test_refresh_live_state_endpoint_rejects_invalid_symbol(monkeypatch, a
     monkeypatch.setattr(
         "src.web.api.trading.load_runtime_settings",
         lambda: AppConfig(mode="live", exchange=ExchangeConfig(
-            api_key="key", secret="secret", passphrase="pass", market_type="swap", demo=True,
+            api_key="key", secret="secret", passphrase="pass", market_type="spot", demo=True,
         )),
     )
     transport = ASGITransport(app=app)
@@ -3732,7 +3777,10 @@ async def test_refresh_live_state_endpoint_rejects_invalid_symbol(monkeypatch, a
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
             "/api/trading/live-state/refresh",
-            params={"strategy": "__exchange__", "symbol": "not-a-symbol"},
+            params={
+                "expected_account_scope_id": trading_scope_id(),
+                "strategy": "__exchange__", "symbol": "not-a-symbol",
+            },
         )
 
     assert response.status_code in {400, 422}
@@ -3754,7 +3802,9 @@ async def test_refresh_live_state_endpoint_maps_provider_errors_to_502(
 ):
     monkeypatch.setattr(
         "src.web.api.trading.load_runtime_settings",
-        lambda: AppConfig(mode="live", exchange=ExchangeConfig(demo=True)),
+        lambda: AppConfig(mode="live", exchange=ExchangeConfig(
+            api_key="key", secret="secret", passphrase="pass", demo=True,
+        )),
     )
 
     async def fail_refresh(*args, **kwargs):
@@ -3766,7 +3816,7 @@ async def test_refresh_live_state_endpoint_maps_provider_errors_to_502(
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.post(
             "/api/trading/live-state/refresh",
-            params={"strategy": "__exchange__"},
+            params={"expected_account_scope_id": trading_scope_id(), "strategy": "__exchange__"},
         )
 
     assert resp.status_code == 502
@@ -3779,7 +3829,9 @@ async def test_refresh_live_state_endpoint_maps_unsupported_provider_capability_
 ):
     monkeypatch.setattr(
         "src.web.api.trading.load_runtime_settings",
-        lambda: AppConfig(mode="live", exchange=ExchangeConfig(demo=True)),
+        lambda: AppConfig(mode="live", exchange=ExchangeConfig(
+            api_key="key", secret="secret", passphrase="pass", demo=True,
+        )),
     )
 
     async def fail_refresh(*args, **kwargs):
@@ -3791,7 +3843,7 @@ async def test_refresh_live_state_endpoint_maps_unsupported_provider_capability_
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
             "/api/trading/live-state/refresh",
-            params={"strategy": "__exchange__"},
+            params={"expected_account_scope_id": trading_scope_id(), "strategy": "__exchange__"},
         )
 
     assert response.status_code == 501
@@ -3802,7 +3854,7 @@ async def test_refresh_live_state_endpoint_maps_unsupported_provider_capability_
 @pytest.mark.parametrize(
     "exchange",
     [
-        ExchangeConfig(api_key="", secret="", passphrase="", market_type="swap", demo=True),
+        ExchangeConfig(api_key="", secret="", passphrase="", market_type="spot", demo=True),
         ExchangeConfig(
             api_key="key", secret="secret", passphrase="pass", market_type="unknown", demo=True
         ),
@@ -3820,18 +3872,20 @@ async def test_refresh_live_state_endpoint_maps_invalid_live_configuration_to_42
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.post(
             "/api/trading/live-state/refresh",
-            params={"strategy": "__exchange__"},
+            params={"expected_account_scope_id": trading_scope_id(), "strategy": "__exchange__"},
         )
 
-    assert resp.status_code == 422
-    assert resp.json()["detail"].startswith("Invalid live OKX configuration:")
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["code"] == "account_context_unavailable"
 
 
 @pytest.mark.asyncio
 async def test_refresh_live_state_endpoint_rejects_strategy_owned_live_state(monkeypatch, app):
     monkeypatch.setattr(
         "src.web.api.trading.load_runtime_settings",
-        lambda: AppConfig(mode="live", exchange=ExchangeConfig(demo=True)),
+        lambda: AppConfig(mode="live", exchange=ExchangeConfig(
+            api_key="key", secret="secret", passphrase="pass", demo=True,
+        )),
     )
     called = False
 
@@ -3846,7 +3900,10 @@ async def test_refresh_live_state_endpoint_rejects_strategy_owned_live_state(mon
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.post(
             "/api/trading/live-state/refresh",
-            params={"strategy": "ma_cross", "symbol": "BTC-USDT-SWAP"},
+            params={
+                "expected_account_scope_id": trading_scope_id(),
+                "strategy": "ma_cross", "symbol": "BTC-USDT",
+            },
         )
 
     assert resp.status_code == 400
@@ -4671,6 +4728,8 @@ async def test_runtime_risk_rejection_broadcasts_risk_event_before_trading_updat
     assert start_resp.status_code == 200
     assert [message["type"] for message in messages] == ["risk_event", "orders", "positions"]
     assert messages[0] == {
+        "source": "backtest",
+        "runtime_mode": "backtest",
         "type": "risk_event",
         "strategy": "oversized_buyer_btc",
         "order_id": FakeRepository.orders[0].order_id,
@@ -4688,12 +4747,16 @@ async def test_runtime_risk_rejection_broadcasts_risk_event_before_trading_updat
     assert FakeRepository.risk_events == [messages[0]]
     assert risk_event_notifier.payloads == [messages[0]]
     assert messages[1] == {
+        "source": "backtest",
+        "runtime_mode": "backtest",
         "type": "orders",
         "scope": "strategy",
         "strategy": "oversized_buyer_btc",
         "orders": [trading_api.serialize_order_record(order) for order in FakeRepository.orders],
     }
     assert messages[2] == {
+        "source": "backtest",
+        "runtime_mode": "backtest",
         "type": "positions",
         "scope": "strategy",
         "strategy": "oversized_buyer_btc",
@@ -4878,12 +4941,16 @@ async def test_runtime_bar_marks_open_position_and_broadcasts_positions_then_acc
             "type": "positions",
             "scope": "strategy",
             "strategy": "passive_btc",
+            "source": "paper",
+            "runtime_mode": "paper",
             "positions": [position.model_dump()],
         },
         {
             "type": "account",
             "scope": "strategy",
             "strategy": "passive_btc",
+            "source": "paper",
+            "runtime_mode": "paper",
             "account": {
                 "cash_balance": 95000.0,
                 "available_balance": 0.0,
@@ -6000,6 +6067,8 @@ async def test_start_strategy_wires_repository_backed_order_manager(monkeypatch)
         if message.get("type") == "orders" and message.get("scope") == "strategy"
     )
     assert strategy_orders == {
+        "source": "backtest",
+        "runtime_mode": "backtest",
         "type": "orders",
         "scope": "strategy",
         "strategy": "buyer",
@@ -6012,6 +6081,8 @@ async def test_start_strategy_wires_repository_backed_order_manager(monkeypatch)
         if message.get("type") == "positions" and message.get("scope") == "strategy"
     )
     assert strategy_positions == {
+        "source": "backtest",
+        "runtime_mode": "backtest",
         "type": "positions",
         "scope": "strategy",
         "strategy": "buyer",
@@ -7009,11 +7080,17 @@ def test_websocket_accepts_connection_and_sends_snapshot(monkeypatch):
 
     monkeypatch.setattr(web_app, "Repository", FakeRepository, raising=False)
 
+    binding = bind_exchange_test_repository(monkeypatch, web_app, FakeRepository())
+
     with TestClient(create_app()) as client:
-        with client.websocket_connect("/ws?scope=exchange") as websocket:
+        with client.websocket_connect(
+            f"/ws?scope=exchange&expected_account_scope_id={binding.context['account_scope_id']}"
+        ) as websocket:
             snapshot = websocket.receive_json()
 
+    assert snapshot["data"].pop("kill_switch")["effective"]["engaged"] is False
     assert snapshot == {
+        "context": binding.context,
         "type": "snapshot",
         "scope": "exchange",
         "strategy": "__exchange__",
@@ -7085,8 +7162,12 @@ def test_websocket_scope_is_explicit_and_strategy_scope_requires_strategy(monkey
 
     monkeypatch.setattr(web_app, "Repository", FakeRepository, raising=False)
 
+    binding = bind_exchange_test_repository(monkeypatch, web_app, FakeRepository())
+
     with TestClient(create_app()) as client:
-        with client.websocket_connect("/ws?scope=exchange") as exchange_ws:
+        with client.websocket_connect(
+            f"/ws?scope=exchange&expected_account_scope_id={binding.context['account_scope_id']}"
+        ) as exchange_ws:
             assert exchange_ws.receive_json()["scope"] == "exchange"
         with pytest.raises(WebSocketDisconnect) as missing_scope:
             with client.websocket_connect("/ws"):
@@ -7177,7 +7258,10 @@ def test_exchange_snapshot_uses_only_live_exchange_provenance(monkeypatch):
             })
             return accounts[1] if kwargs["source"] == "live_exchange" else None
 
-    snapshot = ops_api.exchange_snapshot(FakeRepository())
+    binding = exchange_test_binding(FakeRepository())
+    snapshot = ops_api.exchange_snapshot(
+        binding.repository, context=binding.context, master=binding.master,
+    )
 
     assert snapshot["data"]["account"]["equity"] == 1000.0
     assert [row["order_id"] for row in snapshot["data"]["orders"]] == ["live-order"]
@@ -7213,9 +7297,12 @@ def test_exchange_snapshot_does_not_fallback_to_unknown_legacy_rows():
                 else None
             )
 
-    snapshot = ops_api.exchange_snapshot(LegacyOnlyRepository())
+    binding = exchange_test_binding(LegacyOnlyRepository())
+    snapshot = ops_api.exchange_snapshot(
+        binding.repository, context=binding.context, master=binding.master,
+    )
 
-    assert snapshot["data"]["account"]["equity"] == 0.0
+    assert snapshot["data"]["account"] is None
     assert snapshot["data"]["orders"] == []
 
 
@@ -7229,19 +7316,23 @@ def test_websocket_snapshot_orders_use_public_rest_allowlist(monkeypatch):
     )
 
     class FakeRepository:
-        def get_account(self, strategy=None):
+        def get_account(self, strategy=None, **kwargs):
             return None
 
-        def get_open_positions(self, strategy=None):
+        def get_open_positions(self, strategy=None, **kwargs):
             return []
 
-        def get_orders(self):
+        def get_orders(self, **kwargs):
             return [order]
 
     monkeypatch.setattr(web_app, "Repository", FakeRepository, raising=False)
 
+    binding = bind_exchange_test_repository(monkeypatch, web_app, FakeRepository())
+
     with TestClient(create_app()) as client:
-        with client.websocket_connect("/ws?scope=exchange") as websocket:
+        with client.websocket_connect(
+            f"/ws?scope=exchange&expected_account_scope_id={binding.context['account_scope_id']}"
+        ) as websocket:
             snapshot = websocket.receive_json()
 
     assert snapshot["data"]["orders"] == [
@@ -7599,8 +7690,8 @@ async def test_get_positions_returns_persisted_position_records(monkeypatch, app
                 "entry_price": 65000.0,
                 "leverage": 3,
                 "timestamp": 1700000000000,
-                "source": "live_exchange",
-                "runtime_mode": "live",
+                "source": "paper",
+                "runtime_mode": "paper",
             }
 
     class FakeRepository:
@@ -7612,7 +7703,7 @@ async def test_get_positions_returns_persisted_position_records(monkeypatch, app
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.get("/api/trading/positions?runtime_mode=live")
+        resp = await client.get("/api/trading/positions?runtime_mode=paper")
 
     assert resp.status_code == 200
     assert resp.json() == [
@@ -7635,17 +7726,17 @@ async def test_get_positions_excludes_exchange_scope_and_keeps_strategy_filter(m
         PositionRecord(
             strategy="__exchange__", symbol="BTC-USDT-SWAP", side="long", amount=1.0,
             entry_price=100.0, leverage=1, timestamp=2,
-            source="live_exchange", runtime_mode="live",
+            source="paper", runtime_mode="paper",
         ),
         PositionRecord(
             strategy="alpha", symbol="BTC-USDT-SWAP", side="long", amount=2.0,
             entry_price=100.0, leverage=1, timestamp=1,
-            source="live_exchange", runtime_mode="live",
+            source="paper", runtime_mode="paper",
         ),
         PositionRecord(
             strategy="beta", symbol="ETH-USDT-SWAP", side="long", amount=3.0,
             entry_price=100.0, leverage=1, timestamp=1,
-            source="live_exchange", runtime_mode="live",
+            source="paper", runtime_mode="paper",
         ),
     ]
 
@@ -7660,9 +7751,9 @@ async def test_get_positions_excludes_exchange_scope_and_keeps_strategy_filter(m
     monkeypatch.setattr(trading_api, "Repository", FakeRepository, raising=False)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        all_positions = await client.get("/api/trading/positions?runtime_mode=live")
+        all_positions = await client.get("/api/trading/positions?runtime_mode=paper")
         alpha_positions = await client.get(
-            "/api/trading/positions?strategy=alpha&runtime_mode=live"
+            "/api/trading/positions?strategy=alpha&runtime_mode=paper"
         )
 
     assert [row["strategy"] for row in all_positions.json()] == ["alpha", "beta"]
@@ -7692,9 +7783,14 @@ async def test_get_positions_exchange_scope_returns_only_exchange_positions(monk
             ]
 
     monkeypatch.setattr(trading_api, "Repository", FakeRepository, raising=False)
+    binding = bind_exchange_test_repository(monkeypatch, trading_api, FakeRepository())
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.get("/api/trading/positions?scope=exchange")
+        response = await client.get(
+            "/api/trading/positions",
+            params={"scope": "exchange",
+                    "expected_account_scope_id": binding.context["account_scope_id"]},
+        )
 
     assert response.status_code == 200
     assert [row["strategy"] for row in response.json()] == ["__exchange__"]
@@ -7798,15 +7894,16 @@ async def test_get_account_requires_explicit_exchange_scope_for_global_account(m
             return exchange if name == "__exchange__" else strategy if name == "alpha" else None
 
     monkeypatch.setattr(trading_api, "Repository", FakeRepository, raising=False)
+    binding = bind_exchange_test_repository(monkeypatch, trading_api, FakeRepository())
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         aggregate = await client.get("/api/trading/account?runtime_mode=live")
         global_account = await client.get(
-            "/api/trading/account?scope=exchange&runtime_mode=live"
+            f"/api/trading/account?scope=exchange&runtime_mode=live&expected_account_scope_id={binding.context['account_scope_id']}"
         )
 
     assert aggregate.json()["scope"] == "aggregate"
-    assert aggregate.json()["equity"] == 110.0
+    assert aggregate.json()["equity"] == 0.0
     assert global_account.json()["scope"] == "exchange"
     assert global_account.json()["strategy"] == "__exchange__"
     assert global_account.json()["equity"] == 1000.0
@@ -7830,8 +7927,8 @@ async def test_get_orders_returns_persisted_order_records(monkeypatch, app):
                 "timestamp": 1700000000000,
                 "filled_amount": 0.0,
                 "remaining_amount": 0.2,
-                "source": "live_exchange",
-                "runtime_mode": "live",
+                "source": "paper",
+                "runtime_mode": "paper",
             }
 
     class FakeRepository:
@@ -7842,7 +7939,7 @@ async def test_get_orders_returns_persisted_order_records(monkeypatch, app):
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.get("/api/trading/orders?runtime_mode=live")
+        resp = await client.get("/api/trading/orders?runtime_mode=paper")
 
     assert resp.status_code == 200
     assert resp.json() == [
@@ -7883,8 +7980,8 @@ async def test_get_orders_serializes_real_order_record_with_legacy_public_shape(
         updated_at=1700000000100,
         filled_amount=0.2,
         remaining_amount=0.1,
-        source="live_exchange",
-        runtime_mode="live",
+        source="paper",
+        runtime_mode="paper",
     )
 
     class FakeRepository:
@@ -7895,7 +7992,7 @@ async def test_get_orders_serializes_real_order_record_with_legacy_public_shape(
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.get("/api/trading/orders?runtime_mode=live")
+        resp = await client.get("/api/trading/orders?runtime_mode=paper")
 
     assert resp.status_code == 200
     body = resp.json()[0]
@@ -8414,8 +8511,8 @@ async def test_get_positions_filters_flat_rows_without_open_position_method(monk
                 "symbol": self.symbol,
                 "amount": self.amount,
                 "timestamp": self.timestamp,
-                "source": "live_exchange",
-                "runtime_mode": "live",
+                "source": "paper",
+                "runtime_mode": "paper",
             }
 
     class FakeRepository:
@@ -8426,7 +8523,7 @@ async def test_get_positions_filters_flat_rows_without_open_position_method(monk
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.get("/api/trading/positions?runtime_mode=live")
+        resp = await client.get("/api/trading/positions?runtime_mode=paper")
 
     assert resp.status_code == 200
     assert resp.json() == [
@@ -8478,8 +8575,8 @@ async def test_get_trades_returns_persisted_trade_records(monkeypatch, app):
                     price=68000.0,
                     fee=1.2,
                     timestamp=1700000000000,
-                    source="live_exchange",
-                    runtime_mode="live",
+                    source="paper",
+                    runtime_mode="paper",
                 )
             ]
 
@@ -8487,7 +8584,7 @@ async def test_get_trades_returns_persisted_trade_records(monkeypatch, app):
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.get("/api/trading/trades?runtime_mode=live")
+        resp = await client.get("/api/trading/trades?runtime_mode=paper")
 
     assert resp.status_code == 200
     assert resp.json() == [
@@ -8521,8 +8618,8 @@ async def test_get_trades_serializes_real_trade_record_with_legacy_public_allowl
         price=68000.0,
         fee=1.2,
         timestamp=1700000000000,
-        source="live_exchange",
-        runtime_mode="live",
+        source="paper",
+        runtime_mode="paper",
         blank_trade_fingerprint="internal-fingerprint",
     )
 
@@ -8534,7 +8631,7 @@ async def test_get_trades_serializes_real_trade_record_with_legacy_public_allowl
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.get("/api/trading/trades?runtime_mode=live")
+        resp = await client.get("/api/trading/trades?runtime_mode=paper")
 
     assert resp.status_code == 200
     assert resp.json() == [{
@@ -8586,8 +8683,8 @@ async def test_get_trades_returns_newest_first(monkeypatch, app):
                 "price": 68000.0,
                 "fee": 1.2,
                 "timestamp": self.timestamp,
-                "source": "live_exchange",
-                "runtime_mode": "live",
+                "source": "paper",
+                "runtime_mode": "paper",
             }
 
     class FakeRepository:
@@ -8598,7 +8695,7 @@ async def test_get_trades_returns_newest_first(monkeypatch, app):
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.get("/api/trading/trades?runtime_mode=live")
+        resp = await client.get("/api/trading/trades?runtime_mode=paper")
 
     assert resp.status_code == 200
     assert [trade["timestamp"] for trade in resp.json()] == [1700100000000, 1700000000000]
@@ -9212,20 +9309,20 @@ def test_runtime_snapshot_exchange_scope_excludes_strategy_orders(monkeypatch):
     ]
 
     class FakeRepository:
-        def get_open_positions(self, strategy):
+        def get_open_positions(self, strategy, **kwargs):
             return []
 
-        def get_orders(self):
+        def get_orders(self, **kwargs):
             return orders
 
-        def get_account(self, strategy):
+        def get_account(self, strategy, **kwargs):
             return None
 
         def get_strategy_configs(self):
             return []
 
     monkeypatch.setattr(web_app, "Repository", FakeRepository)
-    snapshot = web_app.runtime_snapshot(strategies.StrategyRuntimeState())
+    snapshot = web_app.runtime_snapshot(exchange_test_binding(FakeRepository()))
 
     assert [order["strategy"] for order in snapshot["data"]["orders"]] == ["__exchange__"]
     assert snapshot["scope"] == "exchange"
@@ -9331,7 +9428,7 @@ async def test_trading_aggregate_fallback_filters_to_explicit_runtime_rows(
         fees_paid=0.0,
         updated_at=1,
     )
-    live_account = AccountRecord(
+    paper_account = AccountRecord(
         strategy="alpha",
         initial_equity=100.0,
         cash_balance=90.0,
@@ -9341,63 +9438,63 @@ async def test_trading_aggregate_fallback_filters_to_explicit_runtime_rows(
         daily_pnl=0.0,
         fees_paid=0.0,
         updated_at=2,
-        source="live_exchange",
-        runtime_mode="live",
+        source="paper",
+        runtime_mode="paper",
     )
     legacy_position = PositionRecord(
         strategy="alpha", symbol="LEGACY", side="long", amount=1.0,
         entry_price=1.0, leverage=1, timestamp=1,
     )
-    live_position = PositionRecord(
-        strategy="alpha", symbol="LIVE", side="long", amount=1.0,
+    paper_position = PositionRecord(
+        strategy="alpha", symbol="PAPER", side="long", amount=1.0,
         entry_price=1.0, leverage=1, timestamp=2,
-        source="live_exchange", runtime_mode="live",
+        source="paper", runtime_mode="paper",
     )
     legacy_order = OrderRecord(
         order_id="legacy-order", strategy="alpha", symbol="BTC-USDT", side="buy",
         type="market", amount=1.0, price=1.0, status="open", fill_price=0.0,
         timestamp=1, updated_at=1,
     )
-    live_order = OrderRecord(
-        order_id="live-order", strategy="alpha", symbol="BTC-USDT", side="buy",
+    paper_order = OrderRecord(
+        order_id="paper-order", strategy="alpha", symbol="BTC-USDT", side="buy",
         type="market", amount=1.0, price=1.0, status="open", fill_price=0.0,
-        timestamp=2, updated_at=2, source="live_exchange", runtime_mode="live",
+        timestamp=2, updated_at=2, source="paper", runtime_mode="paper",
     )
     legacy_trade = TradeRecord(
         exchange_trade_id="legacy-trade", order_id="legacy-order", strategy="alpha",
         symbol="BTC-USDT", side="buy", amount=1.0, price=1.0, fee=0.0, timestamp=1,
     )
-    live_trade = TradeRecord(
-        exchange_trade_id="live-trade", order_id="live-order", strategy="alpha",
+    paper_trade = TradeRecord(
+        exchange_trade_id="paper-trade", order_id="paper-order", strategy="alpha",
         symbol="BTC-USDT", side="buy", amount=1.0, price=1.0, fee=0.0, timestamp=2,
-        source="live_exchange", runtime_mode="live",
+        source="paper", runtime_mode="paper",
     )
 
     class FakeRepository:
         def get_accounts(self):
-            return [legacy_account, live_account]
+            return [legacy_account, paper_account]
 
         def get_open_positions(self, strategy=None):
-            return [legacy_position, live_position]
+            return [legacy_position, paper_position]
 
         def get_orders(self):
-            return [legacy_order, live_order]
+            return [legacy_order, paper_order]
 
         def get_trades(self, strategy=None):
-            return [legacy_trade, live_trade]
+            return [legacy_trade, paper_trade]
 
     monkeypatch.setattr(trading_api, "Repository", FakeRepository, raising=False)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         responses = await asyncio.gather(*(
-            client.get(f"/api/trading/{endpoint}?runtime_mode=live")
+            client.get(f"/api/trading/{endpoint}?runtime_mode=paper")
             for endpoint in ("account", "positions", "orders", "trades")
         ))
 
     assert responses[0].json()["equity"] == 100.0
-    assert [row["symbol"] for row in responses[1].json()] == ["LIVE"]
-    assert [row["order_id"] for row in responses[2].json()] == ["live-order"]
-    assert [row["order_id"] for row in responses[3].json()] == ["live-order"]
+    assert [row["symbol"] for row in responses[1].json()] == ["PAPER"]
+    assert [row["order_id"] for row in responses[2].json()] == ["paper-order"]
+    assert [row["order_id"] for row in responses[3].json()] == ["paper-order"]
 
 
 @pytest.mark.asyncio
@@ -9452,10 +9549,11 @@ async def test_get_orders_supports_exchange_and_strategy_scopes(monkeypatch, app
             return orders
 
     monkeypatch.setattr(trading_api, "Repository", FakeRepository, raising=False)
+    binding = bind_exchange_test_repository(monkeypatch, trading_api, FakeRepository())
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         exchange = await client.get(
-            "/api/trading/orders?scope=exchange&runtime_mode=live"
+            f"/api/trading/orders?scope=exchange&runtime_mode=live&expected_account_scope_id={binding.context['account_scope_id']}"
         )
         alpha = await client.get(
             "/api/trading/orders?scope=strategy&strategy=alpha&runtime_mode=live"
@@ -9463,8 +9561,8 @@ async def test_get_orders_supports_exchange_and_strategy_scopes(monkeypatch, app
         default = await client.get("/api/trading/orders?runtime_mode=live")
 
     assert [row["strategy"] for row in exchange.json()] == ["__exchange__"]
-    assert [row["strategy"] for row in alpha.json()] == ["alpha"]
-    assert [row["strategy"] for row in default.json()] == ["alpha", "beta"]
+    assert alpha.json() == []
+    assert default.json() == []
 
 
 @pytest.mark.asyncio
@@ -9490,7 +9588,7 @@ async def test_trading_aggregate_defaults_to_configured_runtime_and_strategy_run
     monkeypatch.setattr(
         trading_api,
         "load_runtime_settings",
-        lambda: SimpleNamespace(mode="live"),
+        lambda: SimpleNamespace(mode="paper"),
         raising=False,
     )
     rows = [
@@ -9523,9 +9621,9 @@ async def test_trading_aggregate_defaults_to_configured_runtime_and_strategy_run
             "/api/trading/orders?scope=strategy&strategy=alpha"
         )
 
-    assert [row["order_id"] for row in aggregate.json()] == ["live-order"]
-    assert [row["order_id"] for row in strategy.json()] == ["live-order"]
-    assert calls == [{"source": "live_exchange", "runtime_mode": "live"}] * 2
+    assert [row["order_id"] for row in aggregate.json()] == ["paper-order"]
+    assert [row["order_id"] for row in strategy.json()] == ["paper-order"]
+    assert calls == [{"source": "paper", "runtime_mode": "paper"}] * 2
 
 
 @pytest.mark.asyncio
@@ -9535,7 +9633,7 @@ async def test_trading_aggregate_runtime_isolates_same_strategy_across_all_recor
     monkeypatch.setattr(
         trading_api,
         "load_runtime_settings",
-        lambda: SimpleNamespace(mode="live"),
+        lambda: SimpleNamespace(mode="paper"),
         raising=False,
     )
     accounts = [
@@ -9609,11 +9707,21 @@ async def test_trading_aggregate_runtime_isolates_same_strategy_across_all_recor
         positions_response = await client.get("/api/trading/positions")
         orders_response = await client.get("/api/trading/orders")
         trades_response = await client.get("/api/trading/trades")
+        live_responses = [
+            await client.get(f"/api/trading/{endpoint}?runtime_mode=live")
+            for endpoint in ("account", "positions", "orders", "trades")
+        ]
 
-    assert account.json()["equity"] == 100.0
-    assert [row["amount"] for row in positions_response.json()] == [1.0]
-    assert [row["order_id"] for row in orders_response.json()] == ["live-order"]
-    assert [row["order_id"] for row in trades_response.json()] == ["live-order"]
+    assert account.json()["equity"] == 900.0
+    assert [row["amount"] for row in positions_response.json()] == [9.0]
+    assert [row["order_id"] for row in orders_response.json()] == ["paper-order"]
+    assert [row["order_id"] for row in trades_response.json()] == ["paper-order"]
+
+
+    # Ambiguous historical live facts stay audit-only until ownership exists.
+    assert all(response.status_code == 200 for response in live_responses)
+    assert live_responses[0].json()["equity"] == 0.0
+    assert [response.json() for response in live_responses[1:]] == [[], [], []]
 
 
 def test_serialize_trade_record_includes_derivative_notional():
@@ -9663,11 +9771,12 @@ async def test_get_trades_applies_exchange_and_strategy_scope_without_leaking_ex
             return [row for row in rows if strategy is None or row.strategy == strategy]
 
     monkeypatch.setattr(trading_api, "Repository", FakeRepository, raising=False)
+    binding = bind_exchange_test_repository(monkeypatch, trading_api, FakeRepository())
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         aggregate = await client.get("/api/trading/trades?runtime_mode=live")
         exchange = await client.get(
-            "/api/trading/trades?scope=exchange&runtime_mode=live"
+            f"/api/trading/trades?scope=exchange&runtime_mode=live&expected_account_scope_id={binding.context['account_scope_id']}"
         )
         alpha = await client.get(
             "/api/trading/trades?scope=strategy&strategy=alpha&runtime_mode=live"
@@ -9675,9 +9784,9 @@ async def test_get_trades_applies_exchange_and_strategy_scope_without_leaking_ex
         invalid = await client.get("/api/trading/trades?scope=exchange&strategy=alpha")
         missing = await client.get("/api/trading/trades?scope=strategy")
 
-    assert [row["strategy"] for row in aggregate.json()] == ["alpha", "beta"]
+    assert aggregate.json() == []
     assert [row["strategy"] for row in exchange.json()] == ["__exchange__"]
-    assert [row["strategy"] for row in alpha.json()] == ["alpha"]
+    assert alpha.json() == []
     assert invalid.status_code == 422
     assert missing.status_code == 422
 

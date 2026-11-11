@@ -1,4 +1,14 @@
 export default {
+  accountContext: {
+    loading: '正在加载配置的交易所账户…',
+    loadError: '无法确认配置的交易所账户，请重试加载账户信息。',
+    sandbox: 'OKX 模拟盘',
+    live: 'OKX 实盘',
+    unverified: '当前仅绑定配置凭据，尚未验证交易所账户身份，暂未开放交易激活。',
+    unavailable: '交易所账户不可用，请配置 OKX 凭据。本地模拟和回测历史仍可查看。',
+    unsupported: '交易所账户不可用，此视图目前仅支持现货市场。',
+    missingSnapshot: '当前配置账户暂无快照，系统不会自动运行私有数据同步。',
+  },
   nav: {
     dashboard: '仪表盘',
     strategies: '策略',

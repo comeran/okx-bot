@@ -1,5 +1,5 @@
 import { onBeforeUnmount, reactive, ref } from 'vue';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { defineHostComponent, mount } from '@/test-utils/mount';
 import App from './App.vue';
@@ -8,12 +8,26 @@ const mocks = vi.hoisted(() => ({
   useWebSocket: vi.fn(),
   connect: vi.fn(),
   disconnect: vi.fn(),
-  websocketOptions: [] as Array<{ onMessage?: (message: object) => void }>,
+  websocketOptions: [] as Array<{ onMessage?: (message: object) => void; onClose?: () => void }>,
   websocketPaths: [] as string[],
   addWebSocketMessage: vi.fn(),
   applyWebSocketMessage: vi.fn(),
   setWebSocketConnected: vi.fn(),
+  ensureContext: vi.fn(),
+  reloadContext: vi.fn(),
+  loadData: vi.fn(),
+  invalidateContext: vi.fn(),
 }));
+
+const authority = reactive({
+  epoch: 1,
+  context: { available: true, account_scope_id: 'scope-A', environment: 'sandbox' },
+  loading: false,
+  ensure: mocks.ensureContext,
+  reload: mocks.reloadContext,
+  invalidate: mocks.invalidateContext,
+});
+vi.mock('@/stores/accountContext', () => ({ useAccountContextStore: () => authority }));
 
 const route = reactive({ path: '/', fullPath: '/', name: 'dashboard' as string | symbol | null | undefined });
 
@@ -24,6 +38,7 @@ vi.mock('@/composables/useWebSocket', () => ({
 vi.mock('@/stores/dashboard', () => ({
   useDashboardStore: () => ({
     websocketConnected: false,
+    loadInitialData: mocks.loadData,
     addWebSocketMessage: mocks.addWebSocketMessage,
     setWebSocketConnected: mocks.setWebSocketConnected,
   }),
@@ -62,6 +77,18 @@ function findAppShellMain(wrapper: Awaited<ReturnType<typeof mountApp>>) {
 
 describe('App shell', () => {
   beforeEach(() => {
+    authority.epoch = 1;
+    authority.context = { available: true, account_scope_id: 'scope-A', environment: 'sandbox' };
+    mocks.ensureContext.mockResolvedValue(authority.context);
+    mocks.reloadContext.mockReset();
+    mocks.reloadContext.mockResolvedValue(authority.context);
+    mocks.loadData.mockReset();
+    mocks.loadData.mockResolvedValue(undefined);
+    mocks.invalidateContext.mockReset();
+    mocks.invalidateContext.mockImplementation(() => {
+      authority.context = null as never;
+      authority.epoch += 1;
+    });
     route.path = '/';
     route.fullPath = '/';
     route.name = 'dashboard';
@@ -73,8 +100,11 @@ describe('App shell', () => {
     mocks.setWebSocketConnected.mockReset();
     mocks.websocketOptions = [];
     mocks.websocketPaths = [];
-    mocks.useWebSocket.mockImplementation((path: string, options: { onMessage?: (message: object) => void }) => {
-      mocks.websocketPaths.push(path);
+    mocks.useWebSocket.mockImplementation((
+      path: string | (() => string),
+      options: { onMessage?: (message: object) => void },
+    ) => {
+      mocks.websocketPaths.push(typeof path === 'function' ? path() : path);
       mocks.websocketOptions.push(options);
       const socket = {
         connected: ref(false),
@@ -107,7 +137,7 @@ describe('App shell', () => {
 
     expect(mocks.useWebSocket).toHaveBeenCalledTimes(2);
     expect(mocks.websocketPaths).toEqual([
-      '/ws?scope=exchange',
+      '/ws?scope=exchange&expected_account_scope_id=scope-A',
       '/ws?scope=strategy&strategy=*',
     ]);
     expect(mocks.connect).toHaveBeenCalledTimes(2);
@@ -137,6 +167,33 @@ describe('App shell', () => {
     wrapper.unmount();
     expect(mocks.disconnect).toHaveBeenCalledTimes(2);
   });
+
+  it('reloads authoritative context on a control event without using its claimed account', async () => {
+    const wrapper = await mountApp();
+    mocks.websocketOptions[0]?.onMessage?.({ type: 'context_changed', context: { account_scope_id: 'forged' } });
+    await wrapper.flush();
+    expect(mocks.reloadContext).toHaveBeenCalledTimes(1);
+    expect(mocks.addWebSocketMessage).not.toHaveBeenCalled();
+    expect(authority.context.account_scope_id).toBe('scope-A');
+    expect(mocks.loadData).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+  });
+
+  it('delays close retries, invalidates immediately, and cancels stale timers on reload and unmount', async () => {
+    vi.useFakeTimers();
+    const wrapper = await mountApp();
+    mocks.websocketOptions[0]?.onClose?.();
+    expect(mocks.invalidateContext).toHaveBeenCalledTimes(1);
+    expect(mocks.reloadContext).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(2999); expect(mocks.reloadContext).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1); expect(mocks.reloadContext).toHaveBeenCalledTimes(1);
+    mocks.websocketOptions[0]?.onClose?.();
+    authority.epoch += 1;
+    await vi.advanceTimersByTimeAsync(3000); expect(mocks.reloadContext).toHaveBeenCalledTimes(1);
+    mocks.websocketOptions[0]?.onClose?.(); wrapper.unmount();
+    await vi.advanceTimersByTimeAsync(3000); expect(mocks.reloadContext).toHaveBeenCalledTimes(1);
+  });
+  afterEach(() => { vi.useRealTimers(); });
 
   it('switches locale without changing the current route', async () => {
     route.path = '/market';

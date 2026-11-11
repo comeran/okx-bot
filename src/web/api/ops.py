@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Awaitable, Callable
+from copy import deepcopy
+from types import SimpleNamespace
 
 from ccxt.base.errors import (
     AuthenticationError,
@@ -26,6 +28,7 @@ from src.notify.telegram import RiskEventTelegramNotifier, TelegramNotifier
 from src.ops.private_sync import sync_private_state
 from src.web.api import settings as settings_api
 from src.web.api import trading
+from src.web.exchange_context import bind_exchange_store
 
 logger = logging.getLogger(__name__)
 
@@ -81,52 +84,58 @@ def _is_live_exchange_record(record: object, *, allow_legacy: bool = False) -> b
 
 
 def _exchange_rows(repository: Repository, method_name: str, strategy: str | None = None):
+    if repository is None:
+        return []
     method = getattr(repository, method_name)
-    try:
-        rows = method(
-            strategy,
-            source="live_exchange",
-            runtime_mode="live",
-        ) if strategy is not None else method(
-            source="live_exchange",
-            runtime_mode="live",
-        )
-    except TypeError:
-        rows = method(strategy) if strategy is not None else method()
+    rows = method(
+        strategy, source="live_exchange", runtime_mode="live",
+    ) if strategy is not None else method(source="live_exchange", runtime_mode="live")
     return [row for row in rows if _is_live_exchange_record(row, allow_legacy=False)]
 
 
-def _exchange_account(repository: Repository):
-    method = repository.get_account
-    try:
-        account = method(
-            EXCHANGE_STRATEGY,
-            source="live_exchange",
-            runtime_mode="live",
-        )
-    except TypeError:
-        account = method(EXCHANGE_STRATEGY)
+def _exchange_account(repository: Repository | None):
+    if repository is None:
+        return None
+    account = repository.get_account(
+        EXCHANGE_STRATEGY, source="live_exchange", runtime_mode="live",
+    )
     return account if account is not None and _is_live_exchange_record(
         account, allow_legacy=False
     ) else None
 
 
-def exchange_snapshot(repository: Repository) -> dict[str, object]:
+def exchange_snapshot(
+    repository: Repository | None,
+    *,
+    context: dict[str, object],
+    master: Repository,
+) -> dict[str, object]:
     positions = _exchange_rows(repository, "get_open_positions", EXCHANGE_STRATEGY)
     orders = _exchange_rows(repository, "get_orders")
     account = _exchange_account(repository)
+    global_kill = serialize_kill_switch(master.get_kill_switch())
+    account_kill = (
+        serialize_kill_switch(repository.get_kill_switch()) if repository is not None else None
+    )
+    states = [state for state in (global_kill, account_kill) if state is not None]
+    effective = {
+        "engaged": any(state["engaged"] for state in states),
+        "reason": "; ".join(str(state["reason"]) for state in states
+                            if state["engaged"] and state["reason"]),
+        "updated_at": max(int(state["updated_at"]) for state in states),
+    }
     return {
-        "type": "snapshot",
-        "scope": "exchange",
-        "strategy": EXCHANGE_STRATEGY,
+        "type": "snapshot", "scope": "exchange", "strategy": EXCHANGE_STRATEGY,
+        "context": context,
         "data": {
-            "scope": "exchange",
-            "strategy": EXCHANGE_STRATEGY,
+            "scope": "exchange", "strategy": EXCHANGE_STRATEGY,
             "account": trading.serialize_account(
-                account, scope="exchange", strategy=EXCHANGE_STRATEGY
-            ),
+                account, scope="exchange", strategy=EXCHANGE_STRATEGY,
+            ) if account is not None else None,
             "positions": trading.serialize_records(positions),
             "orders": [trading.serialize_order_record(order) for order in orders],
+            "kill_switch": {"global": global_kill, "account": account_kill,
+                            "effective": effective},
         },
     }
 
@@ -167,8 +176,10 @@ def create_router(broadcast: RuntimeBroadcaster | None = None) -> APIRouter:
         return serialize_kill_switch(state)
 
     @router.post("/sync/private")
-    async def sync_private(request: PrivateSyncRequest) -> dict[str, object]:
-        settings = settings_api._load_settings()
+    async def sync_private(
+        request: PrivateSyncRequest, expected_account_scope_id: str | None = None,
+    ) -> dict[str, object]:
+        settings = deepcopy(settings_api._load_settings())
         if not settings.exchange.demo:
             raise HTTPException(
                 status_code=403,
@@ -182,9 +193,13 @@ def create_router(broadcast: RuntimeBroadcaster | None = None) -> APIRouter:
             for symbol in request.symbols
         ):
             raise HTTPException(status_code=422, detail="Invalid symbol scope")
+        binding = bind_exchange_store(
+            settings.exchange, Repository(), expected_account_scope_id, require_available=True,
+        )
         notifier = create_risk_event_notifier(settings)
 
         async def publish_high_risk_event(payload: dict[str, object]) -> None:
+            payload = {**payload, "scope": "exchange", "context": binding.context}
             if broadcast is not None:
                 await broadcast(payload)
             if notifier is None:
@@ -196,9 +211,9 @@ def create_router(broadcast: RuntimeBroadcaster | None = None) -> APIRouter:
 
         adapter = None
         try:
-            adapter = _create_adapter(settings)
+            adapter = _create_adapter(SimpleNamespace(exchange=binding.exchange))
             result = await sync_private_state(
-                Repository(),
+                binding.repository,
                 adapter,
                 symbols=request.symbols,
                 since=request.since,
@@ -234,7 +249,9 @@ def create_router(broadcast: RuntimeBroadcaster | None = None) -> APIRouter:
                 except Exception:
                     logger.warning("Failed to close private sync adapter", exc_info=True)
         if broadcast is not None:
-            await broadcast(exchange_snapshot(Repository()))
-        return {"status": "ok", **result.as_response()}
+            await broadcast(exchange_snapshot(
+                binding.repository, context=binding.context, master=binding.master,
+            ))
+        return {"status": "ok", "context": binding.context, **result.as_response()}
 
     return router

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 
 import TradeFilters from '@/components/trades/TradeFilters.vue';
@@ -8,6 +8,8 @@ import TradesTable from '@/components/trades/TradesTable.vue';
 import AppPageHeader from '@/components/ui/AppPageHeader.vue';
 import DataState from '@/components/ui/DataState.vue';
 import SectionCard from '@/components/ui/SectionCard.vue';
+import { useAccountContextStore } from '@/stores/accountContext';
+import AccountContextNotice from '@/components/dashboard/AccountContextNotice.vue';
 import { fetchTrades } from '@/services/trades';
 import type { TradeRecord } from '@/types/trades';
 import {
@@ -19,6 +21,7 @@ import {
 } from '@/utils/trades';
 
 const { t } = useI18n();
+const authority = useAccountContextStore();
 
 const trades = ref<TradeRecord[]>([]);
 const filters = ref<TradeFiltersState>(createTradeFilters());
@@ -32,32 +35,52 @@ const filteredTrades = computed(() => filterTrades(trades.value, filters.value))
 const tradeSummary = computed(() => summarizeTrades(filteredTrades.value));
 const hasLoadedRecords = computed(() => trades.value.length > 0);
 const hasSuccessfulLoad = computed(() => loadedOnce.value);
-const blockingLoading = computed(() => loading.value && !hasSuccessfulLoad.value);
+const blockingLoading = computed(() => (loading.value || authority.loading) && !hasSuccessfulLoad.value);
 const errorMessage = computed(() => (errorKey.value ? t(errorKey.value) : null));
 const stale = computed(() => Boolean(errorMessage.value && hasSuccessfulLoad.value));
 const empty = computed(() => hasSuccessfulLoad.value && !hasLoadedRecords.value);
 
 async function loadTrades(): Promise<void> {
+  const contextRequest = authority.context ? null : authority.ensure();
+  const epoch = authority.epoch;
   const requestSequence = ++loadSequence;
   loading.value = true;
 
   try {
-    const nextTrades = await fetchTrades();
-    if (requestSequence !== loadSequence) return;
+    const context = authority.context ?? await contextRequest;
+    if (epoch !== authority.epoch || requestSequence !== loadSequence) return;
+    if (!context) throw new Error('Account context unavailable');
+    const nextTrades = await fetchTrades(undefined, context.available ? context.account_scope_id : null);
+    if (requestSequence !== loadSequence || epoch !== authority.epoch) return;
     trades.value = nextTrades;
     loadedOnce.value = true;
     errorKey.value = null;
   } catch {
-    if (requestSequence !== loadSequence) return;
+    if (requestSequence !== loadSequence || epoch !== authority.epoch) return;
     errorKey.value = 'trades.loadError';
   } finally {
-    if (requestSequence !== loadSequence) return;
+    if (requestSequence !== loadSequence || epoch !== authority.epoch) return;
     loading.value = false;
   }
 }
 
+watch(() => authority.epoch, () => {
+  loadSequence += 1;
+  trades.value = [];
+  filters.value = createTradeFilters();
+  loadedOnce.value = false;
+  loading.value = false;
+  errorKey.value = null;
+}, { flush: 'sync' });
+watch(() => authority.context, (context) => {
+  if (context) void loadTrades();
+});
 onMounted(() => {
-  void loadTrades();
+  if (authority.context) void loadTrades();
+  else void authority.ensure();
+});
+onBeforeUnmount(() => {
+  loadSequence += 1;
 });
 </script>
 
@@ -70,6 +93,8 @@ onMounted(() => {
         </el-button>
       </template>
     </AppPageHeader>
+
+    <AccountContextNotice :context="authority.context" :loading="authority.loading" :error="authority.error" />
 
     <DataState
       :loading="blockingLoading"

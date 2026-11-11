@@ -1,4 +1,14 @@
 export default {
+  accountContext: {
+    loading: 'Loading configured exchange account…',
+    loadError: 'Could not confirm the configured exchange account. Retry to reload its context.',
+    sandbox: 'OKX sandbox',
+    live: 'OKX live',
+    unverified: 'Credential binding only; exchange account identity is not verified. Trading activation remains unavailable.',
+    unavailable: 'Exchange account unavailable: configure OKX credentials. Local paper and backtest history remain available.',
+    unsupported: 'Exchange account unavailable: this view currently supports spot markets only.',
+    missingSnapshot: 'No snapshot for this configured account yet. No private sync runs automatically.',
+  },
   nav: {
     dashboard: 'Dashboard',
     strategies: 'Strategies',

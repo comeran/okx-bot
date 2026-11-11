@@ -14,6 +14,8 @@ const mocks = vi.hoisted(() => ({
   error: vi.fn(),
   getSettings: vi.fn(),
   updateSettings: vi.fn(),
+  reloadContext: vi.fn(),
+  loadData: vi.fn(),
   routeGuard: null as null | (() => Promise<boolean>),
 }));
 
@@ -137,6 +139,9 @@ const tokensSource = readFileSync(fileURLToPath(new URL('../styles/tokens.css', 
 const enLocaleSource = readFileSync(fileURLToPath(new URL('../locales/en.ts', import.meta.url)), 'utf8');
 const zhLocaleSource = readFileSync(fileURLToPath(new URL('../locales/zh-CN.ts', import.meta.url)), 'utf8');
 
+vi.mock('@/stores/accountContext', () => ({ useAccountContextStore: () => ({ reload: mocks.reloadContext, epoch: 1 }) }));
+vi.mock('@/stores/dashboard', () => ({ useDashboardStore: () => ({ loadInitialData: mocks.loadData }) }));
+
 vi.mock('@/services/settings', () => ({
   getSettings: mocks.getSettings,
   updateSettings: mocks.updateSettings,
@@ -185,6 +190,9 @@ describe('Settings view', () => {
   });
 
   beforeEach(() => {
+    mocks.reloadContext.mockReset(); mocks.loadData.mockReset();
+    mocks.reloadContext.mockResolvedValue({ available: true });
+    mocks.loadData.mockResolvedValue(undefined);
     mocks.confirm.mockReset();
     mocks.confirm.mockResolvedValue(undefined);
     mocks.success.mockReset();
@@ -248,6 +256,16 @@ describe('Settings view', () => {
     expect(control(wrapper, 'el-input', 0).props.modelValue ?? control(wrapper, 'el-input', 0).props.value ?? '').toBe('');
     expect(control(wrapper, 'el-input', 1).props.modelValue ?? control(wrapper, 'el-input', 1).props.value ?? '').toBe('');
     expect(control(wrapper, 'el-input', 2).props.modelValue ?? control(wrapper, 'el-input', 2).props.value ?? '').toBe('');
+  });
+
+  it('reloads authoritative account context and financial data after a successful settings save', async () => {
+    const wrapper = await mount(Settings, { components }); await wrapper.flush();
+    await wrapper.invoke(control(wrapper, 'el-select', 0), 'onUpdate:modelValue', 'paper');
+    await wrapper.trigger(control(wrapper, 'el-button', 1), 'click'); await wrapper.flush();
+    expect(mocks.updateSettings).toHaveBeenCalledTimes(1);
+    expect(mocks.reloadContext).toHaveBeenCalledTimes(1);
+    expect(mocks.loadData).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
   });
 
   it('keeps dirty edits when a reload confirmation is canceled', async () => {

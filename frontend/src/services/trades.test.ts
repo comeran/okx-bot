@@ -41,13 +41,13 @@ describe('trades service', () => {
       .mockResolvedValueOnce({ data: strategyTrades })
       .mockResolvedValueOnce({ data: exchangeTrades });
 
-    const result = await fetchTrades();
+    const result = await fetchTrades(undefined, 'scope-A');
 
     expect(mockedAxios.get).toHaveBeenCalledWith('/api/trading/trades', {
-      params: undefined,
+      params: { expected_account_scope_id: 'scope-A' },
     });
     expect(mockedAxios.get).toHaveBeenCalledWith('/api/trading/trades', {
-      params: { scope: 'exchange' },
+      params: { scope: 'exchange', expected_account_scope_id: 'scope-A' },
     });
     expect(result).toEqual([...exchangeTrades, ...strategyTrades]);
   });
@@ -61,5 +61,11 @@ describe('trades service', () => {
     expect(mockedAxios.get).toHaveBeenCalledWith('/api/trading/trades', {
       params: { strategy: 'ma_cross' },
     });
+  });
+  it('keeps paper history available without configured exchange credentials', async () => {
+    mockedAxios.get.mockResolvedValueOnce({ data: [{ strategy: 'paper', timestamp: 1 }] });
+    await expect(fetchTrades(undefined, null)).resolves.toEqual([{ strategy: 'paper', timestamp: 1 }]);
+    expect(mockedAxios.get).toHaveBeenCalledTimes(1);
+    expect(mockedAxios.get).toHaveBeenCalledWith('/api/trading/trades', { params: undefined });
   });
 });
