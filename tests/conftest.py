@@ -1,6 +1,20 @@
 import socket
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import pytest
+
+
+def pytest_configure(config):
+    # App imports initialize repositories during collection, before fixtures run.
+    bootstrap = TemporaryDirectory(prefix="okx-bot-pytest-")
+    monkeypatch = pytest.MonkeyPatch()
+    config.add_cleanup(bootstrap.cleanup)
+    config.add_cleanup(monkeypatch.undo)
+    monkeypatch.setenv("OKX_BOT_DB_PATH", str(Path(bootstrap.name) / "bot.db"))
+    monkeypatch.setenv(
+        "OKX_BOT_SETTINGS_PATH", str(Path(bootstrap.name) / "settings.local.yaml")
+    )
 
 
 @pytest.fixture(autouse=True)

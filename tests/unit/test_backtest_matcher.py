@@ -87,3 +87,40 @@ def test_stop_order_gapped_fill_uses_worse_open_price():
 
     assert result.status == OrderStatus.FILLED
     assert result.fill_price == 48000
+
+
+@pytest.mark.parametrize(
+    ("side", "opening", "high", "low", "expected_price"),
+    [
+        (OrderSide.BUY, 90, 95, 85, 90),
+        (OrderSide.SELL, 110, 115, 105, 110),
+        (OrderSide.BUY, 95, 110, 90, 95),
+        (OrderSide.SELL, 105, 110, 90, 105),
+        (OrderSide.BUY, 110, 115, 95, 100),
+        (OrderSide.SELL, 90, 105, 85, 100),
+        (OrderSide.BUY, 110, 115, 105, None),
+        (OrderSide.SELL, 90, 95, 85, None),
+        (OrderSide.BUY, 100, 105, 95, 100),
+        (OrderSide.SELL, 100, 105, 95, 100),
+    ],
+)
+def test_limit_order_uses_better_open_or_intrabar_limit(
+    side, opening, high, low, expected_price,
+):
+    matcher = OrderMatcher(slippage=0.01, fee_rate=0.001)
+    order = Order(
+        id="limit", symbol="BTC-USDT", side=side,
+        type=OrderType.LIMIT, amount=2, price=100,
+    )
+    candle = Bar(timestamp=1, open=opening, high=high, low=low, close=opening, volume=10)
+
+    result = matcher.match(order, candle)
+
+    if expected_price is None:
+        assert result.status == OrderStatus.PENDING
+        assert result.fill_price is None
+        assert result.fee == 0
+    else:
+        assert result.status == OrderStatus.FILLED
+        assert result.fill_price == expected_price
+        assert result.fee == pytest.approx(expected_price * 0.002)

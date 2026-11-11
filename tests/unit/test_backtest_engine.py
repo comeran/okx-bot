@@ -2,10 +2,11 @@ from typing import Any
 
 import pytest
 
-from src.backtest.engine import BacktestEngine
+from src.backtest.engine import BacktestEngine, BacktestOrderManager
 from src.backtest.matcher import OrderMatcher
 from src.backtest.report import BacktestReport
-from src.core.types import Bar, Order, OrderSide, OrderType
+from src.core.types import Bar, Order, OrderSide, OrderStatus, OrderType
+from src.strategy.base import BaseStrategy
 
 
 class SimpleStrategy:
@@ -190,3 +191,132 @@ async def test_sell_trade_marker_fields() -> None:
             "timestamp": 1700000060000,
         }
     ]
+
+
+async def test_backtest_cancel_unknown_order_returns_false() -> None:
+    manager = BacktestOrderManager()
+
+    assert await manager.cancel("missing", "BTC-USDT") is False
+
+
+async def test_cancel_submitted_order_prevents_fill_even_when_returned_by_strategy() -> None:
+    class CancelImmediately(BaseStrategy):
+        name = "cancel_immediately"
+
+        async def on_bar(self, bar):
+            if bar.timestamp == 0:
+                self.order = await self.buy("BTC-USDT", 1)
+                self.cancelled = await self.cancel(self.order.id)
+                self.cancelled_again = await self.cancel(self.order.id)
+                return self.order
+
+    strategy = CancelImmediately()
+    report = await BacktestEngine(1000, OrderMatcher()).run(
+        strategy, [flat_bar(0, 100), flat_bar(1, 100)]
+    )
+
+    assert strategy.cancelled is True
+    assert strategy.cancelled_again is False
+    assert strategy.order.status == OrderStatus.CANCELLED
+    assert report.trades == []
+
+
+async def test_cancel_resting_order_checks_symbol_and_prevents_later_fill() -> None:
+    class CancelResting(BaseStrategy):
+        name = "cancel_resting"
+
+        async def on_bar(self, bar):
+            if bar.timestamp == 0:
+                self.order = await self.buy("BTC-USDT", 1, price=90)
+            elif bar.timestamp == 1:
+                self.wrong_symbol = await self.cancel(self.order.id, "ETH-USDT")
+                self.status_after_wrong_symbol = self.order.status
+                self.cancelled = await self.cancel(self.order.id, "BTC-USDT")
+
+    strategy = CancelResting()
+    report = await BacktestEngine(1000, OrderMatcher()).run(
+        strategy, [flat_bar(0, 100), flat_bar(1, 100), flat_bar(2, 90)]
+    )
+
+    assert strategy.wrong_symbol is False
+    assert strategy.status_after_wrong_symbol == OrderStatus.PENDING
+    assert strategy.cancelled is True
+    assert strategy.order.status == OrderStatus.CANCELLED
+    assert report.trades == []
+
+
+async def test_backtest_cannot_cancel_filled_order_from_fill_callback() -> None:
+    class CancelFilled(BaseStrategy):
+        name = "cancel_filled"
+
+        async def on_bar(self, bar):
+            if bar.timestamp == 0:
+                return await self.buy("BTC-USDT", 1)
+
+        async def on_order(self, order):
+            self.order = order
+            self.cancelled = await self.cancel(order.id)
+
+    strategy = CancelFilled()
+    report = await BacktestEngine(1000, OrderMatcher()).run(
+        strategy, [flat_bar(0, 100), flat_bar(1, 100)]
+    )
+
+    assert strategy.cancelled is False
+    assert strategy.order.status == OrderStatus.FILLED
+    assert len(report.trades) == 1
+
+
+@pytest.mark.parametrize("cancel_earlier_resting_order", [False, True])
+async def test_fill_callback_cancellation_does_not_fill_or_requeue_other_order(
+    cancel_earlier_resting_order,
+) -> None:
+    class CancelOther(BaseStrategy):
+        name = "cancel_other"
+
+        async def on_bar(self, bar):
+            if bar.timestamp == 0:
+                if cancel_earlier_resting_order:
+                    self.other_order = await self.buy("BTC-USDT", 1, price=90)
+                    self.filling_order = await self.buy("BTC-USDT", 1)
+                else:
+                    self.filling_order = await self.buy("BTC-USDT", 1)
+                    self.other_order = await self.buy("BTC-USDT", 1)
+
+        async def on_order(self, order):
+            if order is self.filling_order:
+                self.cancelled = await self.cancel(self.other_order.id)
+
+    strategy = CancelOther()
+    report = await BacktestEngine(1000, OrderMatcher(slippage=0, fee_rate=0)).run(
+        strategy, [flat_bar(0, 100), flat_bar(1, 100), flat_bar(2, 90)]
+    )
+
+    assert strategy.cancelled is True
+    assert strategy.other_order.status == OrderStatus.CANCELLED
+    assert len(report.trades) == 1
+    assert report.trades[0]["price"] == 100
+
+
+async def test_returned_legacy_order_can_be_cancelled_while_resting() -> None:
+    class CancelReturned(BaseStrategy):
+        name = "cancel_returned"
+
+        async def on_bar(self, bar):
+            if bar.timestamp == 0:
+                self.order = Order(
+                    id="legacy", symbol="BTC-USDT", side=OrderSide.BUY,
+                    type=OrderType.LIMIT, amount=1, price=90,
+                )
+                return self.order
+            if bar.timestamp == 1:
+                self.cancelled = await self.cancel(self.order.id)
+
+    strategy = CancelReturned()
+    report = await BacktestEngine(1000, OrderMatcher()).run(
+        strategy, [flat_bar(0, 100), flat_bar(1, 100), flat_bar(2, 90)]
+    )
+
+    assert strategy.cancelled is True
+    assert strategy.order.status == OrderStatus.CANCELLED
+    assert report.trades == []

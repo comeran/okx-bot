@@ -10,6 +10,12 @@ from src.core.config import AppConfig, load_config
 SETTINGS_PATH_ENV = "OKX_BOT_SETTINGS_PATH"
 DEFAULT_SETTINGS_PATH = Path("data/settings.local.yaml")
 DEFAULT_CONFIG_PATH = Path("config/settings.yaml")
+ENV_CREDENTIALS = (
+    ("exchange", "api_key", "OKX_API_KEY"),
+    ("exchange", "secret", "OKX_SECRET"),
+    ("exchange", "passphrase", "OKX_PASSPHRASE"),
+    ("notify", "telegram_bot_token", "TG_BOT_TOKEN"),
+)
 
 
 def runtime_settings_path() -> Path:
@@ -25,7 +31,13 @@ def default_runtime_settings() -> AppConfig:
 def load_runtime_settings() -> AppConfig:
     settings_path = runtime_settings_path()
     if settings_path.exists():
-        return load_config(str(settings_path))
+        settings = load_config(str(settings_path))
+        # Older versions saved environment credentials as empty strings.
+        for section, field, env_name in ENV_CREDENTIALS:
+            credentials = getattr(settings, section)
+            if not getattr(credentials, field):
+                setattr(credentials, field, os.environ.get(env_name, ""))
+        return settings
     return default_runtime_settings()
 
 
@@ -33,7 +45,7 @@ def _persisted_secret(value: str, env_name: str) -> str:
     """Do not copy a value that already comes from the environment into the file."""
     env_value = os.environ.get(env_name)
     if env_value and value == env_value:
-        return ""
+        return "${" + env_name + "}"
     return value
 
 

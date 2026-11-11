@@ -33,8 +33,11 @@ class OrderMatcher:
         if order.price is None:
             return None
 
-        if order.type == OrderType.LIMIT and bar.low <= order.price <= bar.high:
-            return order.price
+        if order.type == OrderType.LIMIT:
+            if order.side == OrderSide.BUY and bar.low <= order.price:
+                return min(bar.open, order.price)
+            if order.side == OrderSide.SELL and bar.high >= order.price:
+                return max(bar.open, order.price)
 
         if order.type == OrderType.STOP:
             if order.side == OrderSide.SELL and bar.low <= order.price:

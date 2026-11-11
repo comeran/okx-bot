@@ -212,6 +212,153 @@ describe('dashboard store', () => {
     expect(dashboard.error).toBeNull();
   });
 
+  describe.each(['event', 'snapshot'] as const)('REST ordering with a websocket %s', (format) => {
+    it.each(['account', 'positions', 'orders'] as const)(
+      'preserves newer %s while loading unaffected REST fields',
+      async (field) => {
+        const pendingResponses = deferred<void>();
+        const responses: Record<string, unknown> = {
+          '/api/trading/account?scope=exchange': { equity: 100, daily_pnl: 0 },
+          '/api/trading/positions?scope=exchange': [{ symbol: 'BTC-USDT', amount: 1 }],
+          '/api/trading/orders?scope=exchange': [{ order_id: 'rest-order' }],
+          '/api/market/tickers': [{ symbol: 'BTC-USDT', last: 68000 }],
+        };
+        vi.stubGlobal('fetch', vi.fn((url: string) => (
+          pendingResponses.promise.then(() => jsonResponse(responses[url]))
+        )));
+
+        const dashboard = useDashboardStore();
+        const load = dashboard.loadInitialData();
+        const updates = {
+          account: { equity: 200, daily_pnl: 5 },
+          positions: [],
+          orders: [],
+        };
+        dashboard.applyWebSocketMessage({
+          type: format === 'event' ? field : 'snapshot',
+          scope: 'exchange',
+          ...(format === 'event' ? { [field]: updates[field] } : { data: { [field]: updates[field] } }),
+        } as never);
+
+        pendingResponses.resolve();
+        await load;
+
+        expect(dashboard.account).toEqual(field === 'account'
+          ? { equity: 200, daily_pnl: 5 }
+          : { equity: 100, daily_pnl: 0 });
+        expect(dashboard.positions).toEqual(field === 'positions'
+          ? []
+          : [{ symbol: 'BTC-USDT', amount: 1 }]);
+        expect(dashboard.orders).toEqual(field === 'orders' ? [] : [{ order_id: 'rest-order' }]);
+        expect(dashboard.tickers).toEqual([{ symbol: 'BTC-USDT', last: 68000 }]);
+        expect(dashboard.loading).toBe(false);
+        expect(dashboard.accountLoading).toBe(false);
+        expect(dashboard.error).toBeNull();
+        expect(dashboard.lastUpdatedAt).toEqual(expect.any(Number));
+      },
+    );
+  });
+
+  it('preserves every field of a newer websocket snapshot including a cleared account', async () => {
+    const pendingAccount = deferred<unknown>();
+    vi.stubGlobal('fetch', vi.fn((url: string) => {
+      if (url === '/api/trading/account?scope=exchange') {
+        return pendingAccount.promise.then(jsonResponse);
+      }
+      const responses: Record<string, unknown> = {
+        '/api/trading/positions?scope=exchange': [{ symbol: 'BTC-USDT', amount: 1 }],
+        '/api/trading/orders?scope=exchange': [{ order_id: 'rest-order' }],
+        '/api/market/tickers': [],
+      };
+      return jsonResponse(responses[url]);
+    }));
+
+    const dashboard = useDashboardStore();
+    const load = dashboard.loadInitialData();
+    dashboard.applyWebSocketMessage({
+      type: 'snapshot',
+      scope: 'exchange',
+      data: { account: null, positions: [], orders: [] },
+    } as never);
+    pendingAccount.resolve({ equity: 100, daily_pnl: 0 });
+    await load;
+
+    expect(dashboard.account).toBeNull();
+    expect(dashboard.positions).toEqual([]);
+    expect(dashboard.orders).toEqual([]);
+    expect(dashboard.loading).toBe(false);
+    expect(dashboard.accountLoading).toBe(false);
+  });
+
+  it('normalizes a REST account using newer websocket positions instead of stale REST positions', async () => {
+    const pendingAccount = deferred<unknown>();
+    vi.stubGlobal('fetch', vi.fn((url: string) => {
+      if (url === '/api/trading/account?scope=exchange') {
+        return pendingAccount.promise.then(jsonResponse);
+      }
+      return jsonResponse(url === '/api/trading/positions?scope=exchange'
+        ? [{ symbol: 'BTC-USDT', amount: 1 }]
+        : []);
+    }));
+
+    const dashboard = useDashboardStore();
+    const load = dashboard.loadInitialData();
+    dashboard.applyWebSocketMessage({ type: 'positions', scope: 'exchange', positions: [] } as never);
+    pendingAccount.resolve({ equity: 0, daily_pnl: 0 });
+    await load;
+
+    expect(dashboard.positions).toEqual([]);
+    expect(dashboard.account).toBeNull();
+  });
+
+  it('accepts REST data requested after websocket updates', async () => {
+    const responses: Record<string, unknown> = {
+      '/api/trading/account?scope=exchange': { equity: 300, daily_pnl: 10 },
+      '/api/trading/positions?scope=exchange': [{ symbol: 'ETH-USDT', amount: 3 }],
+      '/api/trading/orders?scope=exchange': [{ order_id: 'fresh-rest-order' }],
+      '/api/market/tickers': [],
+    };
+    vi.stubGlobal('fetch', vi.fn((url: string) => jsonResponse(responses[url])));
+
+    const dashboard = useDashboardStore();
+    dashboard.applyWebSocketMessage({
+      type: 'snapshot',
+      scope: 'exchange',
+      data: { account: { equity: 200, daily_pnl: 5 }, positions: [], orders: [] },
+    } as never);
+    await dashboard.loadInitialData();
+
+    expect(dashboard.account).toEqual({ equity: 300, daily_pnl: 10 });
+    expect(dashboard.positions).toEqual([{ symbol: 'ETH-USDT', amount: 3 }]);
+    expect(dashboard.orders).toEqual([{ order_id: 'fresh-rest-order' }]);
+  });
+
+  it.each(['event', 'snapshot'] as const)(
+    'preserves a newer websocket account %s during an account-only refresh',
+    async (format) => {
+      const pendingAccount = deferred<unknown>();
+      vi.stubGlobal('fetch', vi.fn(() => pendingAccount.promise.then(jsonResponse)));
+
+      const dashboard = useDashboardStore();
+      dashboard.error = 'Existing dashboard error';
+      const refresh = dashboard.refreshAccountOverview();
+      dashboard.applyWebSocketMessage({
+        type: format === 'event' ? 'account' : 'snapshot',
+        scope: 'exchange',
+        ...(format === 'event'
+          ? { account: { equity: 200, daily_pnl: 5 } }
+          : { data: { account: null } }),
+      } as never);
+      pendingAccount.resolve({ equity: 100, daily_pnl: 0 });
+      await refresh;
+
+      expect(dashboard.account).toEqual(format === 'event' ? { equity: 200, daily_pnl: 5 } : null);
+      expect(dashboard.accountLoading).toBe(false);
+      expect(dashboard.accountError).toBeNull();
+      expect(dashboard.error).toBe('Existing dashboard error');
+    },
+  );
+
   it('refreshes only the account snapshot when the account overview retries', async () => {
     const fetchMock = vi.fn((url: string) => {
       if (url !== '/api/trading/account?scope=exchange') {

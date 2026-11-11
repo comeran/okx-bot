@@ -11,6 +11,7 @@ class BacktestOrderManager:
     def __init__(self) -> None:
         self._next_id = 0
         self._submitted: list[Order] = []
+        self._orders: dict[str, Order] = {}
 
     async def submit(
         self,
@@ -34,11 +35,24 @@ class BacktestOrderManager:
             stop_loss=stop_loss,
             take_profit=take_profit,
         )
+        self.track_order(order)
         self._submitted.append(order)
         return order
 
     async def cancel(self, order_id: str, symbol: str | None = None) -> bool:
+        order = self._orders.get(order_id)
+        if (
+            order is None
+            or order.status != OrderStatus.PENDING
+            or (symbol is not None and order.symbol != symbol)
+        ):
+            return False
+        order.status = OrderStatus.CANCELLED
+        self._submitted = [item for item in self._submitted if item is not order]
         return True
+
+    def track_order(self, order: Order) -> None:
+        self._orders[order.id] = order
 
     def take_submitted(self) -> list[Order]:
         submitted = self._submitted
@@ -128,6 +142,8 @@ class BacktestEngine:
                 await asyncio.sleep(0)
             resting: list[Order] = []
             for order in pending:
+                if order.status != OrderStatus.PENDING:
+                    continue
                 match = self.matcher.match(order, bar)
                 order.status = match.status
                 if match.status == OrderStatus.FILLED and match.fill_price is not None:
@@ -150,7 +166,7 @@ class BacktestEngine:
                     await strategy.on_order(order)
                 else:
                     resting.append(order)
-            pending = resting
+            pending = [order for order in resting if order.status == OrderStatus.PENDING]
 
             equity_curve.append(portfolio.equity(bar.close))
 
@@ -160,7 +176,10 @@ class BacktestEngine:
                 returned_order is not item for item in submitted
             ):
                 submitted.append(returned_order)
-            pending.extend(submitted)
+            for order in submitted:
+                if order.status == OrderStatus.PENDING:
+                    order_manager.track_order(order)
+                    pending.append(order)
 
         return generate_report(
             initial_capital=self.initial_capital,
