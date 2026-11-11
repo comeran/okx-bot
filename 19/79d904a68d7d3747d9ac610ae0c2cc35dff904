@@ -1,0 +1,81 @@
+src/data/repository.py
+  s_5754a483f5e2c0::t_de40da13cb7014 6,8,37,287-340,678-716,718-721,724-726,728-733,737-762,772-806,1214-1220,1224-1236
+  s_5754a483f5e2c0::t_0cb5a1f0f2b495 717,722-723,727,734-736
+  s_5754a483f5e2c0::t_cf8e459628ef26 763-771
+  s_5754a483f5e2c0::t_0fde502e657117 18,1221-1223
+tests/unit/test_exchange_base.py
+  s_5754a483f5e2c0::t_92440d88c3530a 16,3074-3142,4391-4396
+tests/unit/test_private_sync_receipts.py
+  s_5754a483f5e2c0::t_57f57f761eb754 89-90,94-96,100-105,165-195
+  s_5754a483f5e2c0::t_0fde502e657117 11,20-29,33-44,48,51,53,56,61-62,65-66,70,74-76,78,80,82-86,91,98-99,109,111-117,119-121,123-124,128-140,144,150,152,154-164,199-201,203,205-210,212,214,216,220,222-242,244,247-260,262,266,270,272,275,279,291,295
+  s_5754a483f5e2c0::t_93e8fb3d99289c 322,326,330-334
+  s_5754a483f5e2c0::t_83240a66b3dd9e 300-301,323-325,327-329
+  s_5754a483f5e2c0::t_844070f97188b3 312-313
+  s_5754a483f5e2c0::t_8d74b5db4017b6 302-311,314-321
+  s_5754a483f5e2c0::t_de40da13cb7014 298-299
+  s_5754a483f5e2c0::t_1f841d5eeae8d6 1-10,12-19,30-32,45-47,49-50,52,54-55,57-60,63-64,67-69,71-73,77,79,81,87-88,92-93,97,106-108,110,118,122,125-127,141-143,145-149,151,153,196-198,202,204,211,213,215,217-219,221,243,245-246,261,263-265,267-269,271,273-274,276-278,280-290,292-294,296-297
+src/ops/private_sync.py
+  s_5754a483f5e2c0::t_61b3704a6f787c 17,40,156,159-230,233,235,265-286,288,297-303,305-306,308-314,316-317,319-321,329-330,335-338,380-384,412,426-428
+  s_5754a483f5e2c0::t_dbf5a238b1c113 241,249-250,252-264
+  s_5754a483f5e2c0::t_58228ce5469e3e 231-232
+  s_5754a483f5e2c0::t_cbdf58fc32dc64 234,236-240,242-248,251
+docs/superpowers/plans/2026-11-11-private-sync-receipts-plan.md
+  s_5754a483f5e2c0::t_6878a4d6ebc23f 1-6,8-9,11,13-14,16-17,19,21-26
+  s_5754a483f5e2c0::t_d409165adff50f 7,10,12,15,18,20
+tests/integration/test_private_sync_receipt_api.py
+  s_5754a483f5e2c0::t_16bd1c61a4e61c 1-6,8-52,56-209
+  s_5754a483f5e2c0::t_9b4b43ce9c55d4 53-55
+  s_5754a483f5e2c0::t_bd05dda34c9a38 245-247
+  s_5754a483f5e2c0::t_85706b47eab27b 7,210-244,248-291
+docs/superpowers/plans/2026-11-11-quant-system-roadmap.md
+  s_5754a483f5e2c0::t_d409165adff50f 23,40-45
+tests/unit/test_private_sync_receipt_integration.py
+  s_5754a483f5e2c0::t_cbdf58fc32dc64 78-82
+  s_5754a483f5e2c0::t_7ebfb868a581ee 9-16,162-184
+  s_5754a483f5e2c0::t_d8c9ba4f330b36 1-2,4-8,17-77,83-139,240-256,260-291,293-310
+  s_5754a483f5e2c0::t_58228ce5469e3e 257-259
+  s_5754a483f5e2c0::t_5cbfce6d7f7b38 292
+  s_5754a483f5e2c0::t_e011b098c3a6e0 3,140-161,185-186,209-239
+  s_5754a483f5e2c0::t_011fb04ab60c72 187-208
+docs/superpowers/plans/2026-11-11-private-sync-receipts-progress.md
+  s_5754a483f5e2c0::t_7c5a5099c45218 1-40
+src/web/api/ops.py
+  s_5754a483f5e2c0::t_5df7fa13c5d36e 7,22,173-185,201-222,267
+  s_5754a483f5e2c0::t_c322b40441ac93 49-57,291-302
+  s_015028c6396f1a::t_71ceed5d7f1600 171
+src/exchange/base.py
+  s_5754a483f5e2c0::t_8f7d795923bb52 43-44,53-67,69,1460,1479-1481
+docs/superpowers/specs/2026-11-11-private-sync-receipts-design.md
+  s_5754a483f5e2c0::t_6878a4d6ebc23f 1-65
+  s_5754a483f5e2c0::t_d409165adff50f 66-74
+src/data/models.py
+  s_5754a483f5e2c0::t_93e8fb3d99289c 7,105-109
+  s_5754a483f5e2c0::t_de40da13cb7014 96-104,110-126
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "1979d904a68d7d3747d9ac610ae0c2cc35dff904",
+  "prompts": {},
+  "logical_commit_id": "1979d904a68d7d3747d9ac610ae0c2cc35dff904",
+  "sessions": {
+    "s_015028c6396f1a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1ca99-b3c7-7aa0-8d8f-2d7646203fd1",
+        "model": "unknown"
+      },
+      "human_author": "Zane <zane@bigo.sg>"
+    },
+    "s_5754a483f5e2c0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1be4b-8fcb-7f73-917c-6d11f8ef4f92",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Zane <zane@bigo.sg>",
+      "total_additions": 1786,
+      "total_deletions": 151
+    }
+  }
+}
