@@ -1,0 +1,33 @@
+src/data/models.py
+  s_5754a483f5e2c0::t_3c03a26ee852da 7,96-209
+tests/unit/test_exact_facts_store.py
+  s_5754a483f5e2c0::t_066f6df886a54f 143-145
+  s_5754a483f5e2c0::t_f2a8ab355e25c4 1-142,146-149,151-233
+  s_5754a483f5e2c0::t_b471632c0435d3 150
+  s_5754a483f5e2c0::t_3c03a26ee852da 234-245,247-252
+  s_5754a483f5e2c0::t_ef2b8f3183d68a 246
+src/data/repository.py
+  s_5754a483f5e2c0::t_3e81706fdcf7b1 19-26,41-43,49,58,352-375,378-410,413-457
+  s_5754a483f5e2c0::t_1c0e4f6f4f3257 798-937,1473-1507
+  s_5754a483f5e2c0::t_3c03a26ee852da 411-412
+  s_5754a483f5e2c0::t_c9678f36cfff08 376-377,458-459,797
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "5b63dc36a8289435ad4b3426c4855299992d1c0c",
+  "prompts": {},
+  "logical_commit_id": "5b63dc36a8289435ad4b3426c4855299992d1c0c",
+  "sessions": {
+    "s_5754a483f5e2c0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1be4b-8fcb-7f73-917c-6d11f8ef4f92",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Zane <zane@bigo.sg>",
+      "total_additions": 660,
+      "total_deletions": 7
+    }
+  }
+}
