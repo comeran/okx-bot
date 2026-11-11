@@ -1,0 +1,25 @@
+docs/superpowers/plans/2026-11-11-quant-system-roadmap.md
+  s_5754a483f5e2c0::t_69fe2587a5a922 50
+docs/superpowers/plans/2026-11-11-exact-private-facts-store-plan.md
+  s_5754a483f5e2c0::t_ad67ea70650733 1-25
+docs/superpowers/specs/2026-11-11-exact-private-facts-store-design.md
+  s_5754a483f5e2c0::t_ad67ea70650733 1-33
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "2e29cbb4e381a85abaf71f2e18dcfcf5bd8cb897",
+  "prompts": {},
+  "logical_commit_id": "2e29cbb4e381a85abaf71f2e18dcfcf5bd8cb897",
+  "sessions": {
+    "s_5754a483f5e2c0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1be4b-8fcb-7f73-917c-6d11f8ef4f92",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Zane <zane@bigo.sg>",
+      "total_additions": 59
+    }
+  }
+}
