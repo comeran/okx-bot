@@ -1,0 +1,38 @@
+src/exchange/okx_order_facts.py
+  s_5754a483f5e2c0::t_a47fab1289f0ca 10
+  s_5754a483f5e2c0::t_23a234970717cd 52-54,66,71-73,76,105,107,139-140,142-144,149,202,204-207
+  s_5754a483f5e2c0::t_de5ec52960f5d6 1-9,11-23,26-51,55-56,58-65,67-70,74-75,77-81,83-104,106,108-121,123-130,132,138,141,145-148,150-201,203,208-252
+  s_5754a483f5e2c0::t_145b2964ab28c0 131,133-137
+  s_5754a483f5e2c0::t_aba00c3a036f13 24-25,57,82,122
+tests/unit/test_okx_order_facts.py
+  s_5754a483f5e2c0::t_85559db993a4b4 217
+  s_5754a483f5e2c0::t_ae6a9f78ccf4d9 156-158,160
+  s_5754a483f5e2c0::t_1aa5eb461e3055 112-113
+  s_5754a483f5e2c0::t_cf49c38d98c14b 1-111,114-155,159,161-216,218-232
+docs/superpowers/plans/2026-11-12-spot-order-facts-plan.md
+  s_5754a483f5e2c0::t_799e1182c4df47 1-14
+docs/superpowers/plans/2026-11-12-spot-order-facts-progress.md
+  s_5754a483f5e2c0::t_1d64ea717c137d 5
+  s_5754a483f5e2c0::t_72ceea9b2bc8d3 1-4
+docs/superpowers/specs/2026-11-12-spot-order-facts-design.md
+  s_5754a483f5e2c0::t_799e1182c4df47 1-35
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "b272455ba5e97536d4d2e3b3684f5a4e5be49f12",
+  "prompts": {},
+  "logical_commit_id": "b272455ba5e97536d4d2e3b3684f5a4e5be49f12",
+  "sessions": {
+    "s_5754a483f5e2c0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1be4b-8fcb-7f73-917c-6d11f8ef4f92",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Zane <zane@bigo.sg>",
+      "total_additions": 3187,
+      "total_deletions": 144
+    }
+  }
+}
