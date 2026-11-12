@@ -263,6 +263,96 @@ class PrivateSpotTradeFeeRecord(SQLModel, table=True):
     fee_group_state: str
 
 
+class PrivateSpotOrderRecord(SQLModel, table=True):
+    """Append-only exact SPOT order-detail observations."""
+
+    __tablename__ = "private_spot_order"
+    __table_args__ = (
+        CheckConstraint("inst_type = 'SPOT'", name="ck_spot_order_type"),
+        CheckConstraint("received_at >= 0", name="ck_spot_order_received"),
+        CheckConstraint("length(payload_hash) = 64", name="ck_spot_order_hash"),
+        CheckConstraint("length(CAST(raw_json AS BLOB)) <= 4194304",
+                        name="ck_spot_order_raw_size"),
+        CheckConstraint("lookup_kind IN ('ordId','clOrdId')", name="ck_spot_order_lookup_kind"),
+        CheckConstraint("length(lookup_value) BETWEEN 1 AND 256",
+                        name="ck_spot_order_lookup_value"),
+        CheckConstraint("length(requested_inst_id) BETWEEN 1 AND 256",
+                        name="ck_spot_order_request"),
+        *(CheckConstraint(
+            f"({name}_state IN ('missing','null') AND {name} IS NULL) OR "
+            f"({name}_state = 'value' AND {name} IS NOT NULL)",
+            name=f"ck_spot_order_{name}_state",
+        ) for name in (
+            "cl_ord_id", "tag", "px", "acc_fill_sz", "avg_px", "fill_time",
+            "trade_id", "fee", "fee_ccy", "cancel_source", "cancel_source_reason",
+            "rebate", "rebate_ccy",
+        )),
+    )
+
+    account_scope_id: str = Field(primary_key=True)
+    uid: str = Field(primary_key=True)
+    requested_inst_id: str = Field(primary_key=True)
+    lookup_kind: str = Field(primary_key=True)
+    lookup_value: str = Field(primary_key=True)
+    payload_hash: str = Field(primary_key=True)
+    inst_type: str
+    received_at: int
+    raw_json: str = Field(sa_column=Column(Text, nullable=False))
+    inst_id: str
+    ord_id: str
+    ord_id_state: str = "value"
+    cl_ord_id: str | None = None
+    cl_ord_id_state: str
+    tag: str | None = None
+    tag_state: str
+    side: str
+    ord_type: str
+    px: str | None = None
+    px_state: str
+    sz: str
+    acc_fill_sz: str | None = None
+    acc_fill_sz_state: str
+    avg_px: str | None = None
+    avg_px_state: str
+    state: str
+    c_time: str
+    u_time: str
+    fill_time: str | None = None
+    fill_time_state: str
+    trade_id: str | None = None
+    trade_id_state: str
+    fee: str | None = None
+    fee_state: str
+    fee_ccy: str | None = None
+    fee_ccy_state: str
+    cancel_source: str | None = None
+    cancel_source_state: str
+    cancel_source_reason: str | None = None
+    cancel_source_reason_state: str
+    rebate: str | None = None
+    rebate_state: str
+    rebate_ccy: str | None = None
+    rebate_ccy_state: str
+
+
+for _action in ("UPDATE", "DELETE", "INSERT"):
+    _condition = (
+        " WHEN EXISTS (SELECT 1 FROM private_spot_order "
+        "WHERE account_scope_id = NEW.account_scope_id AND uid = NEW.uid "
+        "AND requested_inst_id = NEW.requested_inst_id AND lookup_kind = NEW.lookup_kind "
+        "AND lookup_value = NEW.lookup_value AND payload_hash = NEW.payload_hash)"
+        if _action == "INSERT" else ""
+    )
+    event.listen(
+        PrivateSpotOrderRecord.__table__, "after_create",
+        DDL(
+            f"CREATE TRIGGER private_spot_order_no_{_action.lower()} BEFORE {_action} "
+            f"ON private_spot_order{_condition} "
+            "BEGIN SELECT RAISE(ABORT, 'append-only spot order observation'); END"
+        ).execute_if(dialect="sqlite"),
+    )
+
+
 for _action in ("UPDATE", "DELETE", "INSERT"):
     _condition = (
         " WHEN EXISTS (SELECT 1 FROM private_spot_trade_fee "
