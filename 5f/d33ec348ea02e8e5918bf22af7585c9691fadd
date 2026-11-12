@@ -1,0 +1,44 @@
+docs/superpowers/specs/2026-11-12-spot-trade-fee-facts-design.md
+  s_5754a483f5e2c0::t_b9c7c81a432201 1-26
+src/exchange/okx_trade_fee_facts.py
+  s_5754a483f5e2c0::t_dd024fb7b2a041 17,63
+  s_5754a483f5e2c0::t_94c980aeb6ae94 1-16,18-62,64-123
+tests/unit/test_exact_trade_fee_sync.py
+  s_5754a483f5e2c0::t_8a5fbcb3bd1d4b 88-90
+  s_5754a483f5e2c0::t_8676d1b4def9e2 1-87,91-151
+src/ops/exact_private_sync.py
+  s_5754a483f5e2c0::t_5fa6709aadd7c0 21,39-43,48-53,133-142,144-171
+tests/unit/test_spot_trade_fee_store.py
+  s_5754a483f5e2c0::t_f5df8dd2f47105 1-216
+src/data/models.py
+  s_5754a483f5e2c0::t_09b883821bac61 214-282
+docs/superpowers/plans/2026-11-12-spot-trade-fee-facts-plan.md
+  s_5754a483f5e2c0::t_14f737345a8ddb 34-37,45-49,54-60
+  s_5754a483f5e2c0::t_b9c7c81a432201 1-33,38-44,50-53
+docs/superpowers/plans/2026-11-11-quant-system-roadmap.md
+  s_5754a483f5e2c0::t_dd024fb7b2a041 30,60-61
+tests/unit/test_okx_trade_fee_facts.py
+  s_5754a483f5e2c0::t_dd024fb7b2a041 59-63,96
+  s_5754a483f5e2c0::t_8b376231f186eb 1-58,64-95,97-174
+src/data/repository.py
+  s_5754a483f5e2c0::t_09b883821bac61 52,80-84,467-486,1138-1198,1934-1947
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "5fd33ec348ea02e8e5918bf22af7585c9691fadd",
+  "prompts": {},
+  "logical_commit_id": "5fd33ec348ea02e8e5918bf22af7585c9691fadd",
+  "sessions": {
+    "s_5754a483f5e2c0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1be4b-8fcb-7f73-917c-6d11f8ef4f92",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Zane <zane@bigo.sg>",
+      "total_additions": 986,
+      "total_deletions": 17
+    }
+  }
+}
