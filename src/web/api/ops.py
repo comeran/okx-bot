@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from inspect import Parameter, signature
 from types import SimpleNamespace
+from typing import Annotated, Literal
 
 from ccxt.base.errors import (
     AuthenticationError,
@@ -18,9 +19,10 @@ from ccxt.base.errors import (
     RequestTimeout,
 )
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, ConfigDict, StringConstraints, field_validator
 from sqlalchemy.exc import SQLAlchemyError
 
+from src.core.private_facts import MAX_NUMERIC_TEXT_LENGTH, canonical_spot_symbol
 from src.data.models import EXCHANGE_STRATEGY
 from src.data.repository import Repository
 from src.exchange.base import canonical_symbol, is_supported_canonical_symbol
@@ -28,6 +30,7 @@ from src.exchange.errors import MalformedProviderData
 from src.exchange.factory import create_okx_adapter
 from src.notify.telegram import RiskEventTelegramNotifier, TelegramNotifier
 from src.ops.private_sync import sync_private_state
+from src.ops.spot_preflight_evidence import build_stored_spot_preflight
 from src.web.api import settings as settings_api
 from src.web.api import trading
 from src.web.exchange_context import bind_exchange_store
@@ -40,6 +43,21 @@ RuntimeBroadcaster = Callable[[dict[str, object]], Awaitable[None]]
 class KillSwitchRequest(BaseModel):
     engaged: bool
     reason: str = ""
+
+
+class SpotPreflightRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    symbol: Annotated[str, StringConstraints(min_length=1, max_length=256)]
+    side: Literal["buy", "sell"]
+    amount: Annotated[str, StringConstraints(min_length=1, max_length=MAX_NUMERIC_TEXT_LENGTH)]
+    price: Annotated[str, StringConstraints(min_length=1, max_length=MAX_NUMERIC_TEXT_LENGTH)]
+
+    @field_validator("symbol")
+    @classmethod
+    def validate_symbol(cls, value: str) -> str:
+        canonical_spot_symbol(value)
+        return value
 
 
 class PrivateSyncRequest(BaseModel):
@@ -185,6 +203,29 @@ def _sync_scope_arguments(account_scope_id: str) -> dict[str, str]:
 
 def create_router(broadcast: RuntimeBroadcaster | None = None) -> APIRouter:
     router = APIRouter()
+
+    @router.post("/spot/preflight")
+    async def spot_preflight(
+        request: SpotPreflightRequest, expected_account_scope_id: str | None = None,
+    ) -> dict[str, object]:
+        settings = deepcopy(settings_api._load_settings())
+        binding = bind_exchange_store(
+            settings.exchange, Repository(), expected_account_scope_id, require_available=True,
+        )
+        try:
+            evidence = binding.repository.get_spot_preflight_evidence(
+                request.symbol, expected_account_scope_id=binding.context["account_scope_id"],
+            )
+            result = build_stored_spot_preflight(
+                evidence, symbol=request.symbol, side=request.side, amount=request.amount,
+                price=request.price, now_ms=current_timestamp_ms(),
+            )
+        except (ValueError, SQLAlchemyError) as exc:
+            raise HTTPException(status_code=503, detail={
+                "code": "spot_preflight_evidence_unavailable",
+                "message": "Stored spot preflight evidence is unavailable",
+            }) from exc
+        return {"context": binding.context, **result}
 
     @router.get("/kill-switch")
     async def get_kill_switch() -> dict[str, object]:

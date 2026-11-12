@@ -1,0 +1,46 @@
+"""Read-only diagnostics from verified persisted observations, never authority."""
+
+from dataclasses import asdict
+
+from src.data.spot_preflight_evidence import SpotPreflightEvidence
+from src.ops.spot_preflight import evaluate_spot_order_preflight
+
+PREFLIGHT_MAX_AGE_MS = 30_000
+
+
+def build_stored_spot_preflight(
+    evidence: SpotPreflightEvidence, *, symbol: str, side: str, amount: str,
+    price: str, now_ms: int,
+) -> dict[str, object]:
+    """Use source receipt times and leave unproved operational gates unknown."""
+    config, balance, instrument = evidence.config, evidence.balance, evidence.instrument
+    result = evaluate_spot_order_preflight(
+        config=config.fact if config is not None else None,
+        balance=balance.fact if balance is not None else None,
+        instrument=instrument.fact if instrument is not None else None,
+        symbol=symbol, side=side, amount=amount, price=price, now_ms=now_ms,
+        config_received_at=config.received_at if config is not None else None,
+        balance_received_at=balance.received_at if balance is not None else None,
+        instrument_received_at=instrument.received_at if instrument is not None else None,
+        max_age_ms=PREFLIGHT_MAX_AGE_MS,
+        expected_uid=evidence.uid,
+        balance_uid=evidence.uid if balance is not None else None,
+    )
+
+    def provenance(observation):
+        return None if observation is None else {
+            "payload_hash": observation.payload_hash,
+            "received_at": observation.received_at,
+            "fact_present": observation.fact is not None,
+        }
+
+    return {
+        "diagnostic_only": True, "evaluated_at": now_ms, "max_age_ms": PREFLIGHT_MAX_AGE_MS,
+        "evidence": {
+            "account_scope_id": evidence.account_scope_id, "uid": evidence.uid,
+            "config": provenance(config), "balance": provenance(balance),
+            "instrument": provenance(instrument),
+        },
+        "checks": [asdict(check) for check in result.checks],
+        "can_submit": result.can_submit, "can_activate": result.can_activate,
+    }

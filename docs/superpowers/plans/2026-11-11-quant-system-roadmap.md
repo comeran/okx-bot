@@ -26,6 +26,7 @@ Acceptance: explicit draft configuration persists without granting trading permi
 - [x] Acquire and atomically retain exact raw public SPOT instrument rules through an injected single-response adapter. Account/environment-scoped append-only response and instrument tables preserve exact strings and optional states, canonical replay identity and observation history without requiring private UID. Rules remain evidence only; freshness certification and trading authorization are deferred.
 - [ ] Define exclusive initial spot ownership, budget consumption/reservations and strategy-local cash/position/PnL queries.
 - [x] Pure read-only exact SPOT order preflight with UID/balance binding, receipt freshness, borrow policy, native live instrument rules, decimal tick/lot/minimum checks and side-specific availBal including caller fee reserve. Unknown liability/fee/reconciliation/sync evidence keeps diagnostics closed; account level alone cannot prove unleveraged safety.
+- [x] Bind persisted exact config/balance/instrument evidence to a read-only SPOT preflight API. One transaction validates store/UID binding, raw hashes and typed projections; latest missing or unsafe evidence never falls back. Responses expose bounded source provenance and checks. Fee/liability/reconciliation/sync proofs remain unknown and execution stays closed.
 - [ ] Integrate trusted preflight evidence with atomic funded allocations and runtime order enforcement. Derivatives require their own account/risk design before activation.
 - [ ] Atomically validate/activate a draft from trusted fresh exchange facts; refuse overlapping/excess allocation and unsafe runtime edits.
 
@@ -53,6 +54,8 @@ Balance spec/evidence: `docs/superpowers/specs/2026-11-12-account-balance-facts-
 Instrument spec/evidence: `docs/superpowers/specs/2026-11-12-spot-instrument-facts-design.md` and `docs/superpowers/plans/2026-11-12-spot-instrument-facts-plan.md`.
 
 Read-only preflight spec/evidence: `docs/superpowers/specs/2026-11-12-spot-preflight-design.md` and `docs/superpowers/plans/2026-11-12-spot-preflight-plan.md`. Diagnostic readiness does not activate strategies or submit orders.
+
+Persisted diagnostic bridge: `docs/superpowers/specs/2026-11-12-persisted-spot-preflight-design.md` and `docs/superpowers/plans/2026-11-12-persisted-spot-preflight-plan.md`. `POST /api/ops/spot/preflight` consumes only server-stored exact evidence and requires the current account-scope handshake; client readiness attestations are rejected.
 
 ## Phase 3 — reconciliation, unknown outcomes and lifecycle recovery
 

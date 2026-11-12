@@ -58,6 +58,7 @@ from src.data.models import (
     has_placeholder_trade_identity,
     normalize_account_assets,
 )
+from src.data.spot_preflight_evidence import PreflightObservation, SpotPreflightEvidence
 from src.exchange.base import canonical_symbol
 from src.exchange.okx_account_facts import (
     ACCOUNT_CONFIG_FIELDS,
@@ -433,6 +434,30 @@ def _exact_payload(raw: object) -> tuple[dict, str, str]:
         return decoded, raw_json, hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     except (TypeError, ValueError, OverflowError, RecursionError, UnicodeError):
         raise ValueError("Invalid, oversize, or credential-bearing exact raw payload") from None
+
+
+def _verified_observation(record, parser, optional_fields, required_fields=()):
+    """Reparse the journal and reject drift in its hash or exact projection."""
+    decoded, _, payload_hash = _exact_payload(record.raw_json)
+    if record.payload_hash != payload_hash:
+        raise ValueError("Stored preflight payload hash mismatch")
+    fact = parser(decoded)
+    _verify_projection(record, fact, optional_fields, required_fields)
+    return PreflightObservation(
+        fact, payload_hash, _receipt_integer(record.received_at, "preflight receipt time"),
+    )
+
+
+def _verify_projection(record, fact, optional_fields, required_fields=()):
+    for name in required_fields:
+        if getattr(record, name) != getattr(fact, name):
+            raise ValueError("Stored preflight fact mismatch")
+    for name in optional_fields:
+        value = getattr(fact, name)
+        state = "missing" if value is MISSING else "null" if value is None else "value"
+        if (getattr(record, name) != (None if value is MISSING else value)
+                or getattr(record, f"{name}_state") != state):
+            raise ValueError("Stored preflight optional state mismatch")
 
 
 def _exact_traversal(scope_id: str, uid: str, endpoint: str,
@@ -820,6 +845,71 @@ class _AccountingTransaction:
         if any(binding.account_scope_id != scope_id for binding in bindings):
             raise ValueError("Private UID account scope mismatch")
         return bindings[0].uid if bindings else None
+
+    def get_spot_preflight_evidence(
+        self, symbol: str, *, expected_account_scope_id: str,
+    ) -> SpotPreflightEvidence:
+        canonical_spot_symbol(symbol)
+        validate_raw_text(expected_account_scope_id, "expected account scope")
+        scope_id = _receipt_scope(self.session, expected_account_scope_id)
+        uid = self.get_private_uid()
+        if uid is not None:
+            validate_raw_text(uid, "UID")
+        # Reject foreign records rather than hiding them through a WHERE scope filter.
+        models = (PrivateAccountConfigRecord, PrivateAccountBalanceRecord,
+                  PrivateSpotInstrumentResponseRecord, PrivateSpotInstrumentRecord)
+        for model in models:
+            invalid = model.account_scope_id != scope_id
+            if model in (PrivateAccountConfigRecord, PrivateAccountBalanceRecord):
+                invalid = or_(invalid, model.uid != uid) if uid is not None else True
+            if self.session.exec(select(model).where(invalid).limit(1)).first() is not None:
+                raise ValueError("Stored preflight scope or UID mismatch")
+
+        def latest(model):
+            return self.session.exec(select(model).order_by(
+                model.received_at.desc(), text(f"{model.__tablename__}.rowid DESC"),
+            ).limit(1)).first()
+
+        config_record = latest(PrivateAccountConfigRecord)
+        config = None if config_record is None else _verified_observation(
+            config_record, parse_okx_account_config, ACCOUNT_CONFIG_FIELDS, ("uid",),
+        )
+        balance_record = latest(PrivateAccountBalanceRecord)
+        balance = None if balance_record is None else _verified_observation(
+            balance_record, parse_okx_account_balance, ACCOUNT_BALANCE_FIELDS,
+        )
+        if balance is not None:
+            # details_json is a retained exact projection, not a second source.
+            decoded, _, _ = _exact_payload(balance_record.raw_json)
+            canonical_details = json.dumps(decoded["data"][0]["details"], allow_nan=False,
+                                          sort_keys=True, separators=(",", ":"))
+            if balance_record.details_json != canonical_details:
+                raise ValueError("Stored preflight balance details mismatch")
+
+        response = latest(PrivateSpotInstrumentResponseRecord)
+        instrument = None
+        if response is not None:
+            decoded, _, payload_hash = _exact_payload(response.raw_json)
+            received_at = _receipt_integer(response.received_at, "instrument receipt time")
+            if payload_hash != response.payload_hash:
+                raise ValueError("Stored preflight instrument hash mismatch")
+            facts = parse_okx_spot_instruments(decoded)
+            records = self.session.exec(select(PrivateSpotInstrumentRecord).where(
+                PrivateSpotInstrumentRecord.payload_hash == payload_hash,
+            )).all()
+            by_id = {record.inst_id: record for record in records}
+            if set(by_id) != {fact.inst_id for fact in facts}:
+                raise ValueError("Stored preflight instrument row set mismatch")
+            for fact in facts:
+                record = by_id[fact.inst_id]
+                if record.received_at != received_at:
+                    raise ValueError("Stored preflight instrument receipt mismatch")
+                _verify_projection(record, fact, INSTRUMENT_OPTIONAL_FIELDS, (
+                    "inst_id", "base_ccy", "quote_ccy", "tick_sz", "lot_sz", "min_sz",
+                ))
+            selected = next((fact for fact in facts if fact.inst_id == symbol), None)
+            instrument = PreflightObservation(selected, payload_hash, received_at)
+        return SpotPreflightEvidence(scope_id, uid, config, balance, instrument)
 
     def commit_private_spot_instruments(
         self, facts: tuple[SpotInstrumentFact, ...], *, raw_payload: object,
@@ -1701,6 +1791,19 @@ class Repository:
     ) -> list[PrivateSpotInstrumentRecord]:
         with Session(self.engine) as session:
             return _AccountingTransaction(session).get_private_spot_instruments(inst_id)
+
+    def get_spot_preflight_evidence(
+        self, symbol: str, *, expected_account_scope_id: str,
+    ) -> SpotPreflightEvidence:
+        """Select and validate diagnostics in one transaction, with no row writes."""
+        with self.engine.connect() as connection:
+            if self.engine.dialect.name == "sqlite" and self.engine.url.database == ":memory:":
+                connection.exec_driver_sql("BEGIN")
+            # File-backed SQLite uses the engine's existing BEGIN listener.
+            with Session(bind=connection) as session:
+                return _AccountingTransaction(session).get_spot_preflight_evidence(
+                    symbol, expected_account_scope_id=expected_account_scope_id,
+                )
 
     def bind_private_uid(self, uid: str, first_seen_at: int) -> PrivateUIDBindingRecord:
         return self.atomic_accounting(lambda transaction: transaction.bind_private_uid(
