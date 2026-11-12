@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 
+from src.data.private_sync_snapshot import PrivateSyncReceiptSnapshot
 from src.exchange.okx_account_facts import AccountConfigFact
 from src.exchange.okx_balance_facts import AccountBalanceFact
 from src.exchange.okx_instrument_facts import SpotInstrumentFact
@@ -24,3 +25,5 @@ class SpotPreflightEvidence:
     # A retained response can exist without a rule for the requested symbol.
     instrument: PreflightObservation[SpotInstrumentFact | None] | None
     trade_fee: PreflightObservation[SpotTradeFeeFact] | None = None
+    sync_latest_attempt: PrivateSyncReceiptSnapshot | None = None
+    sync_last_committed: PrivateSyncReceiptSnapshot | None = None
