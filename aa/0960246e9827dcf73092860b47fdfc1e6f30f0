@@ -1,0 +1,33 @@
+docs/superpowers/specs/2026-11-12-persisted-spot-preflight-design.md
+  s_5754a483f5e2c0::t_59109dcaa891ab 1-22
+src/data/spot_preflight_evidence.py
+  s_5754a483f5e2c0::t_822a4620d16992 1-24
+tests/unit/test_spot_preflight_evidence.py
+  s_5754a483f5e2c0::t_822a4620d16992 53-55,192,203
+  s_5754a483f5e2c0::t_0de1a2b6859a60 1-52,56-191,193-202,204-223
+docs/superpowers/plans/2026-11-12-persisted-spot-preflight-plan.md
+  s_5754a483f5e2c0::t_1867efe9ca3a20 34-38,46-49,54-60
+  s_5754a483f5e2c0::t_59109dcaa891ab 1-33,39-45,50-53
+src/data/repository.py
+  s_5754a483f5e2c0::t_f6af6e878133c7 853
+  s_5754a483f5e2c0::t_822a4620d16992 61,439-462,848-852,854-913,1794-1806
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "aa0960246e9827dcf73092860b47fdfc1e6f30f0",
+  "prompts": {},
+  "logical_commit_id": "aa0960246e9827dcf73092860b47fdfc1e6f30f0",
+  "sessions": {
+    "s_5754a483f5e2c0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1be4b-8fcb-7f73-917c-6d11f8ef4f92",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Zane <zane@bigo.sg>",
+      "total_additions": 716,
+      "total_deletions": 14
+    }
+  }
+}
