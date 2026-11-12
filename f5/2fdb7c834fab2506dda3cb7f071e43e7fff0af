@@ -1,0 +1,43 @@
+src/ops/spot_liability_diagnostic.py
+  s_5754a483f5e2c0::t_d07420380c6d96 100
+  s_5754a483f5e2c0::t_57c8a0bcaa90aa 1-99,101-114
+docs/superpowers/plans/2026-11-12-spot-liability-diagnostics-plan.md
+  s_5754a483f5e2c0::t_d07420380c6d96 3-4,10-19,25-27,35-36,43-44
+  s_5754a483f5e2c0::t_f7b0031b189c4c 1-2,5-9,20-24,28-34,38-42
+  s_5754a483f5e2c0::t_251c4be277c11e 37
+  s_5754a483f5e2c0::t_c8b31a02a112a3 45-47
+tests/integration/test_spot_liability_diagnostic_api.py
+  s_5754a483f5e2c0::t_fd8edab3ebd082 1-110
+docs/superpowers/specs/2026-11-12-spot-liability-diagnostics-design.md
+  s_5754a483f5e2c0::t_f7b0031b189c4c 1-23
+tests/unit/test_balance_liability_projection.py
+  s_5754a483f5e2c0::t_eb103ad6e38197 125-126
+  s_5754a483f5e2c0::t_c9596e2a6a9451 1-124,127-133
+src/exchange/okx_balance_facts.py
+  s_5754a483f5e2c0::t_57c8a0bcaa90aa 26,52-54
+src/ops/spot_preflight_evidence.py
+  s_5754a483f5e2c0::t_57c8a0bcaa90aa 7,20-28,40,54-56,83-89
+docs/superpowers/plans/2026-11-11-quant-system-roadmap.md
+  s_5754a483f5e2c0::t_84279db2e3ded1 32,66-67
+tests/unit/test_spot_liability_diagnostic.py
+  s_5754a483f5e2c0::t_fd8edab3ebd082 1-150
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "f52fdb7c834fab2506dda3cb7f071e43e7fff0af",
+  "prompts": {},
+  "logical_commit_id": "f52fdb7c834fab2506dda3cb7f071e43e7fff0af",
+  "sessions": {
+    "s_5754a483f5e2c0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1be4b-8fcb-7f73-917c-6d11f8ef4f92",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Zane <zane@bigo.sg>",
+      "total_additions": 1395,
+      "total_deletions": 40
+    }
+  }
+}
