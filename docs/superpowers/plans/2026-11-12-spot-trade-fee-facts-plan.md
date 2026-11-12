@@ -47,7 +47,7 @@
 - [x] Write failing collection tests for one request/commit, validation-before-transport, provider/parse failures and cancellation with unchanged operational rows.
 - [x] Implement single-call capture/commit helper; no retry or policy integration.
 - [x] Run focused and full backend tests, Ruff and diff check; update roadmap and evidence.
-- [ ] Independent actual-code review; fix material findings, commit/push/create PR/attach/merge/read back under existing authorization.
+- [x] Independent actual-code review; commit/push/create PR/attach under existing authorization. PR #31 is prepared for merge and state readback after this final documentation update.
 
 ## Execution evidence
 
@@ -57,4 +57,5 @@
 - Tests use the shared existing project venv via `UV_PROJECT_ENVIRONMENT`; pytest isolates database/settings before collection and blocks network.
 - Execution switched to inline when the delegated parser produced no files; no overlapping writes or agent-generated implementation was retained. An earlier sync collection attempt was blocked by the pending parser and was not counted as TDD evidence.
 - Ruling: this slice records exact request-bound fee inputs and leaves coverage unknown. A future reserve model must address fee-group mapping, fee currency, rounding, promotions and freshness before opening that check.
-- Independent actual-code review and remote delivery pending. No actual exchange request or trading acceptance was performed.
+- Independent actual-code review found no Critical or Important issue. It inspected parser/model/repository/sync patches; test commands were verified by the implementer rather than rerun by the reviewer. Empty fee history on an unbound store (even with an explicit UID query) matches existing getter semantics and does not prove identity; collection and persistence still require the binding.
+- Remote delivery: `https://github.com/comeran/okx-bot/pull/31`, targeting `main`; source commit `5fd33ec`. Created, pushed and attached; merge/readback follows final documentation push. Remote CI is not configured. No actual exchange request or trading acceptance was performed.
