@@ -380,6 +380,10 @@ def _receipt_scope(session: Session, expected: str | None = None) -> str:
 _EXACT_PAGE_MAX_BYTES = 4 * 1024 * 1024
 _EXACT_ENDPOINT = "private_get_trade_fills_history"
 _EXACT_OPTIONALS = ("cl_ord_id", "fee", "fee_ccy")
+_EXACT_FINANCIAL_FIELDS = (
+    "inst_id", "symbol", "trade_id", "ord_id", "side", "fill_sz", "fill_px",
+    "fill_time", "fee", "fee_state", "fee_ccy", "fee_ccy_state",
+)
 
 
 def _exact_hash(value: object) -> str:
@@ -510,17 +514,6 @@ def _exact_record_values(fact: SpotFillFact) -> dict:
             "null" if value is None else "value"
         )
     return values
-
-
-def _exact_fact(record: ExactSpotFillRecord) -> SpotFillFact:
-    values = {name: getattr(record, name) for name in (
-        "bill_id", "inst_id", "trade_id", "ord_id", "side", "fill_sz", "fill_px",
-        "fill_time", "record_time",
-    )}
-    for name in _EXACT_OPTIONALS:
-        state = getattr(record, f"{name}_state")
-        values[name] = MISSING if state == "missing" else getattr(record, name)
-    return SpotFillFact(**values)
 
 
 def _exact_copy(record):
@@ -1142,11 +1135,8 @@ class _AccountingTransaction:
         return [_exact_copy(record) for record in records]
 
     def get_exact_spot_fills(self, *, uid: str) -> list[SpotFillFact]:
-        scope_id = self._exact_uid_scope(uid)
-        records = self.session.exec(select(ExactSpotFillRecord).where(
-            ExactSpotFillRecord.account_scope_id == scope_id, ExactSpotFillRecord.uid == uid,
-        ).order_by(ExactSpotFillRecord.bill_id.desc())).all()
-        return [_exact_fact(record) for record in records]
+        _, _, facts, _ = self._verified_exact_fill_history(uid)
+        return [facts[bill_id] for bill_id in sorted(facts, reverse=True)]
 
     def commit_private_spot_trade_fee(
         self, fact: SpotTradeFeeFact, *, raw_payload: object, received_at: int,
@@ -1208,13 +1198,79 @@ class _AccountingTransaction:
                 result.append(_exact_copy(record))
         return result
 
-    def get_exact_spot_fill_pages(self, *, uid: str) -> list[ExactSpotFillPageRecord]:
+    def _verified_exact_fill_history(self, uid: str):
+        """Reconstruct all local exact evidence before returning a resumable state.
+
+        Insertion order defines first-observed metadata, independently of receipt
+        time. This validates local integrity only, never provider completeness.
+        """
         scope_id = self._exact_uid_scope(uid)
-        records = self.session.exec(select(ExactSpotFillPageRecord).where(
-            ExactSpotFillPageRecord.account_scope_id == scope_id,
-            ExactSpotFillPageRecord.uid == uid,
-        ).order_by(ExactSpotFillPageRecord.received_at, text("exact_spot_fill_page.rowid"))).all()
-        return [_exact_copy(record) for record in records]
+        pages = self.session.exec(select(ExactSpotFillPageRecord).order_by(
+            text("exact_spot_fill_page.rowid"),
+        )).all()
+        cursors = self.session.exec(select(ExactSpotFillCursorRecord)).all()
+        records = self.session.exec(select(ExactSpotFillRecord)).all()
+        if any(r.account_scope_id != scope_id or r.uid != uid
+               for group in (pages, cursors, records) for r in group):
+            raise ValueError("Exact recovery account scope or UID mismatch")
+        if (pages or cursors or records) and self.get_private_uid() != uid:
+            raise ValueError("Exact recovery requires an existing UID binding")
+
+        histories: dict[str, list[SpotFillPage]] = {}
+        first_facts: dict[str, SpotFillFact] = {}
+        for record in pages:
+            traversal = _exact_traversal(
+                scope_id, uid, record.endpoint, record.inst_id, record.requested_before,
+            )
+            if (record.inst_type != "SPOT" or record.traversal_id != traversal
+                    or record.page_id != _exact_hash([traversal, record.requested_after])):
+                raise ValueError("Exact recovery page identity conflict")
+            _receipt_integer(record.received_at, "exact recovery receipt time")
+            decoded, _, payload_hash = _exact_payload(record.raw_json)
+            if record.payload_hash != payload_hash:
+                raise ValueError("Exact recovery raw payload hash mismatch")
+            prior = histories.setdefault(traversal, [])
+            expected_after = prior[-1].next_after if prior else None
+            if ((prior and expected_after is None) or record.requested_after != expected_after):
+                raise ValueError("Exact recovery page cursor chain conflict")
+            page = parse_okx_spot_fill_page(
+                decoded, inst_id=record.inst_id, after=record.requested_after,
+                before=record.requested_before, previous_pages=prior,
+            )
+            if (page.next_after != record.next_after or page.coverage.value != record.coverage):
+                raise ValueError("Exact recovery page projection conflict")
+            prior.append(page)
+            for fact in page.fills:
+                first = first_facts.setdefault(fact.bill_id, fact)
+                first_values, values = _exact_record_values(first), _exact_record_values(fact)
+                if any(first_values[name] != values[name] for name in _EXACT_FINANCIAL_FIELDS):
+                    raise ValueError("Exact recovery bill financial conflict")
+
+        by_traversal = {}
+        for cursor in cursors:
+            traversal = _exact_traversal(
+                scope_id, uid, cursor.endpoint, cursor.inst_id, cursor.requested_before,
+            )
+            prior = histories.get(traversal)
+            if (cursor.traversal_id != traversal or cursor.inst_type != "SPOT"
+                    or cursor.complete is not False or not prior
+                    or _receipt_integer(cursor.version, "recovery cursor version", positive=True)
+                    != len(prior) or cursor.next_after != prior[-1].next_after):
+                raise ValueError("Exact recovery cursor projection conflict")
+            by_traversal[traversal] = cursor
+        if set(by_traversal) != set(histories):
+            raise ValueError("Exact recovery page cursor set conflict")
+        if {record.bill_id for record in records} != set(first_facts):
+            raise ValueError("Exact recovery fill projection set conflict")
+        for record in records:
+            values = _exact_record_values(first_facts[record.bill_id])
+            if any(getattr(record, name) != value for name, value in values.items()):
+                raise ValueError("Exact recovery fill projection conflict")
+        return pages, by_traversal, first_facts, histories
+
+    def get_exact_spot_fill_pages(self, *, uid: str) -> list[ExactSpotFillPageRecord]:
+        pages, _, _, _ = self._verified_exact_fill_history(uid)
+        return [_exact_copy(record) for record in sorted(pages, key=lambda r: r.received_at)]
 
     def get_exact_spot_fill_cursor(
         self, *, uid: str, endpoint: str = _EXACT_ENDPOINT,
@@ -1222,9 +1278,8 @@ class _AccountingTransaction:
     ) -> ExactSpotFillCursorRecord | None:
         scope_id = self._exact_uid_scope(uid)
         traversal = _exact_traversal(scope_id, uid, endpoint, inst_id, before)
-        record = self.session.get(ExactSpotFillCursorRecord, traversal)
-        if record is not None and (record.account_scope_id != scope_id or record.uid != uid):
-            raise ValueError("Exact cursor account scope mismatch")
+        _, cursors, _, _ = self._verified_exact_fill_history(uid)
+        record = cursors.get(traversal)
         return _exact_copy(record) if record is not None else None
 
     def commit_exact_spot_fill_page(
@@ -1240,6 +1295,7 @@ class _AccountingTransaction:
         scope_id = self._exact_uid_scope(uid)
         received_at = _receipt_integer(received_at, "exact page received time")
         expected_cursor_version = _receipt_integer(expected_cursor_version, "cursor version")
+        _, verified_cursors, _, histories = self._verified_exact_fill_history(uid)
         if not isinstance(page, SpotFillPage) or not isinstance(page.coverage, FactCoverage):
             raise ValueError("Invalid exact SPOT fill page")
         traversal = _exact_traversal(
@@ -1248,7 +1304,7 @@ class _AccountingTransaction:
         decoded, raw_json, payload_hash = _exact_payload(raw_payload)
         page_id = _exact_hash([traversal, page.requested_after])
         existing = self.session.get(ExactSpotFillPageRecord, page_id)
-        cursor = self.session.get(ExactSpotFillCursorRecord, traversal)
+        cursor = verified_cursors.get(traversal)
         for record in (existing, cursor):
             if record is not None and (record.account_scope_id != scope_id or record.uid != uid):
                 raise ValueError("Exact page/cursor account scope mismatch")
@@ -1258,21 +1314,7 @@ class _AccountingTransaction:
         # A legal replay already has an identity and must bypass repeated-page
         # detection while still validating the typed/raw response below.
         if existing is None:
-            prior_records = self.session.exec(select(ExactSpotFillPageRecord).where(
-                ExactSpotFillPageRecord.traversal_id == traversal,
-            ).order_by(text("exact_spot_fill_page.rowid"))).all()
-            for prior in prior_records:
-                if prior.account_scope_id != scope_id or prior.uid != uid:
-                    raise ValueError("Exact page account scope mismatch")
-                observed = parse_okx_spot_fill_page(
-                    json.loads(prior.raw_json), inst_id=prior.inst_id,
-                    after=prior.requested_after, before=prior.requested_before,
-                    previous_pages=previous_pages,
-                )
-                if (observed.next_after != prior.next_after
-                        or observed.coverage.value != prior.coverage):
-                    raise ValueError("Persisted exact page evidence conflict")
-                previous_pages.append(observed)
+            previous_pages = histories.get(traversal, [])
         parsed = parse_okx_spot_fill_page(
             decoded, inst_id=page.inst_id, after=page.requested_after,
             before=page.requested_before, previous_pages=previous_pages,
@@ -1289,6 +1331,8 @@ class _AccountingTransaction:
             return _exact_copy(cursor)
         if (cursor.version if cursor is not None else 0) != expected_cursor_version:
             raise ValueError("Exact page cursor version conflict")
+        if cursor is None and page.requested_after is not None:
+            raise ValueError("Exact initial page must use the root cursor")
         if cursor is not None and (
             cursor.next_after is None or cursor.next_after != page.requested_after
         ):
@@ -1302,11 +1346,8 @@ class _AccountingTransaction:
                 ExactSpotFillRecord, (scope_id, uid, fact.bill_id),
             )
             if existing_fact is not None:
-                immutable = (
-                    "inst_id", "symbol", "trade_id", "ord_id", "side", "fill_sz", "fill_px",
-                    "fill_time", "fee", "fee_state", "fee_ccy", "fee_ccy_state",
-                )
-                if any(getattr(existing_fact, name) != values[name] for name in immutable):
+                if any(getattr(existing_fact, name) != values[name]
+                       for name in _EXACT_FINANCIAL_FIELDS):
                     raise ValueError("Exact billId financial conflict")
             else:
                 self.session.add(ExactSpotFillRecord(account_scope_id=scope_id, uid=uid, **values))
@@ -1958,22 +1999,29 @@ class Repository:
         with Session(self.engine) as session:
             return _AccountingTransaction(session).get_private_spot_trade_fees(inst_id, uid=uid)
 
+    def _read_exact_fill_history(self, read: Callable):
+        """All journal/projection SELECTs share one SQLite read transaction."""
+        with self.engine.connect() as connection:
+            if self.engine.dialect.name == "sqlite" and self.engine.url.database == ":memory:":
+                connection.exec_driver_sql("BEGIN")
+            with Session(bind=connection) as session:
+                return read(_AccountingTransaction(session))
+
     def get_exact_spot_fills(self, *, uid: str) -> list[SpotFillFact]:
-        with Session(self.engine) as session:
-            return _AccountingTransaction(session).get_exact_spot_fills(uid=uid)
+        return self._read_exact_fill_history(lambda tx: tx.get_exact_spot_fills(uid=uid))
 
     def get_exact_spot_fill_pages(self, *, uid: str) -> list[ExactSpotFillPageRecord]:
-        with Session(self.engine) as session:
-            return _AccountingTransaction(session).get_exact_spot_fill_pages(uid=uid)
+        return self._read_exact_fill_history(lambda tx: tx.get_exact_spot_fill_pages(uid=uid))
 
     def get_exact_spot_fill_cursor(
         self, *, uid: str, endpoint: str = _EXACT_ENDPOINT,
         inst_id: str | None = None, before: str | None = None,
     ) -> ExactSpotFillCursorRecord | None:
-        with Session(self.engine) as session:
-            return _AccountingTransaction(session).get_exact_spot_fill_cursor(
+        return self._read_exact_fill_history(
+            lambda tx: tx.get_exact_spot_fill_cursor(
                 uid=uid, endpoint=endpoint, inst_id=inst_id, before=before,
-            )
+            ),
+        )
 
     def start_private_sync_receipt(self, **values) -> PrivateSyncReceiptRecord:
         return self.atomic_private_sync(lambda transaction: transaction.start_private_sync_receipt(
