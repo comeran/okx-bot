@@ -47,7 +47,7 @@
 - [x] Run focused tests; expect missing-route failures.
 - [x] Implement helper/route; supply no fee or operational attestations.
 - [x] Run focused tests then full `uv run --no-sync pytest -q`, Ruff and diff check; expect pass (existing aiohttp warning permitted).
-- [ ] Independent review, fix material findings, update roadmap/evidence, commit/push/open PR/attach/merge and read back status under existing user authorization.
+- [x] Independent code review, update roadmap/evidence, commit/push/open PR and attach under existing user authorization. PR #30 is prepared for merge and state readback after final verification.
 
 ## Execution evidence
 
@@ -57,4 +57,6 @@
 - `uv run --no-sync ruff check --no-cache .` and `git diff --check`: passed.
 - Test commands use the existing shared project venv via `UV_PROJECT_ENVIRONMENT`; pytest isolates all databases/settings before collection and denies network access.
 - Ruling: latest instrument response wins even if it contains another symbol; absent persisted request scope prevents certifying an older rule. This deliberately reduces diagnostic availability until a later matching observation.
-- Independent review and remote delivery pending.
+- Independent code-based patch review found no blocking issues or actionable minors. It inspected the actual repository/DTO/helper/request/route and SQLite begin-listener code; command execution was verified by the implementer, not rerun by the reviewer.
+- The initial summary-only reviewer response was rejected as insufficient; the replacement review inspected the actual patches. No production fix pass was needed.
+- Remote delivery: `https://github.com/comeran/okx-bot/pull/30`, targeting `main`. Source and diagnostics commits: `aa09602`, `4b805cf`. Created, pushed and attached; merge/state readback follows the final documentation update. No remote CI checks are configured.
