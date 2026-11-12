@@ -75,6 +75,11 @@ class ExactPrivateFactsRepository(Protocol):
     ) -> ExactSpotFillCursorRecord: ...
 
 
+def _validate_received_at(received_at: object) -> None:
+    if type(received_at) is not int or not 0 <= received_at <= 2**63 - 1:
+        raise ValueError("received timestamp must be an integer from 0 to 2**63 - 1")
+
+
 class _CapturedConfigExchange:
     """Retain the adapter's response for the same atomic raw/typed commit."""
 
@@ -104,6 +109,7 @@ async def sync_exact_spot_instruments(
     *, inst_id: str | None = None,
 ) -> list[PrivateSpotInstrumentRecord]:
     """Retain exactly one public SPOT response, without requiring a private UID."""
+    _validate_received_at(received_at)
     captured = _CapturedInstrumentExchange(exchange)
     facts = await OKXSpotInstrumentFactsAdapter(captured).fetch(inst_id)
     await asyncio.sleep(0)
@@ -154,8 +160,7 @@ async def sync_exact_spot_trade_fee(
     permission is derived from these signed raw observations.
     """
     canonical_spot_symbol(inst_id)
-    if type(received_at) is not int or not 0 <= received_at <= 2**63 - 1:
-        raise ValueError("received timestamp must be an integer from 0 to 2**63 - 1")
+    _validate_received_at(received_at)
     bound_uid = repository.get_private_uid()
     if bound_uid is None:
         raise ValueError("Spot trade fee requires an existing private UID binding")
@@ -177,6 +182,7 @@ async def sync_exact_account_config(
     received_at: int,
 ) -> PrivateAccountConfigRecord:
     """Fetch one raw config, bind its UID and return detached stored evidence."""
+    _validate_received_at(received_at)
     captured = _CapturedConfigExchange(exchange)
     fact = await OKXAccountConfigFactsAdapter(captured).fetch()
     # Honor cancellation already requested by transport before durable writes.
@@ -198,6 +204,7 @@ async def sync_exact_account_balance(
     The endpoint does not supply identity. The caller must provide the transport
     for the already bound account; this helper cannot verify credential ownership.
     """
+    _validate_received_at(received_at)
     bound_uid = repository.get_private_uid()
     if bound_uid is None:
         raise ValueError("Account balance requires an existing private UID binding")
@@ -228,6 +235,7 @@ async def sync_exact_spot_fill_page(
     An empty tail stays unknown. A concurrent writer can invalidate the captured
     version; repository conflicts propagate without retry or cursor substitution.
     """
+    _validate_received_at(received_at)
     cursor = repository.get_exact_spot_fill_cursor(uid=uid, inst_id=inst_id, before=before)
     captured = _CapturedFillExchange(exchange)
     page = await OKXSpotFillFactsAdapter(captured).fetch_page(
@@ -309,8 +317,7 @@ async def catch_up_exact_spot_fills(
         received_at = (
             received_at_factory() if callable(received_at_factory) else received_at_factory
         )
-        if type(received_at) is not int or not 0 <= received_at <= 2**63 - 1:
-            raise ValueError("received timestamp must be an integer from 0 to 2**63 - 1")
+        _validate_received_at(received_at)
         committed = await sync_exact_spot_fill_page(
             repository, exchange, uid=uid, inst_id=inst_id, before=before,
             limit=limit, received_at=received_at,
