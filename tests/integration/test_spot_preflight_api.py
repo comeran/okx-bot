@@ -80,7 +80,8 @@ def test_empty_scoped_store_returns_unknown_without_fetching_or_binding_uid(conf
     assert response.status_code == 200
     payload = response.json()
     assert payload["evidence"] == {"account_scope_id": current_scope(client), "uid": None,
-                                    "config": None, "balance": None, "instrument": None}
+                                    "config": None, "balance": None, "instrument": None,
+                                    "trade_fee": None}
     assert checks(payload)["identity"] == "unknown"
     assert payload["can_submit"] is payload["can_activate"] is False
     assert database_state(repo) == before

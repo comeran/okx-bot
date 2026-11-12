@@ -22,6 +22,8 @@ from src.core.private_facts import (
 )
 from src.exchange.errors import MalformedProviderData
 
+# Optional ORM columns. group_id is retained only in the complete immutable raw
+# journal and parsed fact, so historical observations need no projection rewrite.
 INSTRUMENT_OPTIONAL_FIELDS = {
     "state": "state",
     "rule_type": "ruleType",
@@ -64,6 +66,7 @@ class SpotInstrumentFact:
     max_lmt_sz: OptionalRawText = MISSING
     max_mkt_sz: OptionalRawText = MISSING
     lever: OptionalRawText = MISSING
+    group_id: OptionalRawText = MISSING
 
     def __post_init__(self) -> None:
         canonical_spot_symbol(self.inst_id)
@@ -77,6 +80,8 @@ class SpotInstrumentFact:
             value = getattr(self, name)
             if value is not MISSING and value is not None:
                 validate_raw_text(value, name, allow_empty=True)
+        if self.group_id is not MISSING and self.group_id is not None:
+            validate_raw_text(self.group_id, "groupId", allow_empty=True)
 
 
 def parse_okx_spot_instruments(
@@ -108,6 +113,7 @@ def parse_okx_spot_instruments(
                 tick_sz=row.get("tickSz"),
                 lot_sz=row.get("lotSz"),
                 min_sz=row.get("minSz"),
+                group_id=row.get("groupId", MISSING),
                 **{name: row.get(raw_name, MISSING)
                    for name, raw_name in INSTRUMENT_OPTIONAL_FIELDS.items()},
             )

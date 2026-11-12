@@ -221,3 +221,48 @@ def test_duplicate_raw_keys_are_rejected_even_if_projection_looks_safe(stores):
         connection.execute(text("UPDATE private_account_config SET raw_json=:raw"), {"raw": raw})
     with pytest.raises(ValueError):
         read(repo)
+
+
+def test_snapshot_fee_is_latest_for_requested_symbol_and_replay_keeps_first_time(stores):
+    from tests.unit.test_spot_trade_fee_store import commit as commit_fee
+    from tests.unit.test_spot_trade_fee_store import payload as fee_payload
+
+    _, (repo, _) = stores
+    config(repo)
+    commit_fee(repo)
+    newest = commit_fee(repo, fee_payload(taker="-0.003"), at=200)
+    commit_fee(repo, at=300, inst_id="ETH-USDT")
+    commit_fee(repo, at=400)
+    before = database_state(repo)
+    observation = read(repo).trade_fee
+    assert observation.fact.requested_inst_id == "BTC-USDT"
+    assert observation.fact.taker == "-0.003"
+    assert (observation.received_at, observation.payload_hash) == (200, newest.payload_hash)
+    assert database_state(repo) == before
+
+
+def test_snapshot_cannot_substitute_another_symbols_fee(stores):
+    from tests.unit.test_spot_trade_fee_store import commit as commit_fee
+
+    _, (repo, _) = stores
+    config(repo)
+    commit_fee(repo, inst_id="ETH-USDT")
+    assert read(repo).trade_fee is None
+
+
+@pytest.mark.parametrize("assignment", ["raw_json='{bad'", "payload_hash='" + "a" * 64 + "'",
+                                        "fee_group_json='[]'", "uid='other'",
+                                        "account_scope_id='other'"])
+def test_snapshot_never_falls_back_from_a_corrupt_latest_fee(stores, assignment):
+    from tests.unit.test_spot_trade_fee_store import commit as commit_fee
+    from tests.unit.test_spot_trade_fee_store import payload as fee_payload
+
+    _, (repo, _) = stores
+    config(repo)
+    commit_fee(repo)
+    commit_fee(repo, fee_payload(taker="-0.003"), at=200)
+    tamper(repo, "private_spot_trade_fee", assignment + " WHERE received_at=200")
+    before = database_state(repo)
+    with pytest.raises(ValueError):
+        read(repo)
+    assert database_state(repo) == before

@@ -3,7 +3,8 @@
 from dataclasses import asdict
 
 from src.data.spot_preflight_evidence import SpotPreflightEvidence
-from src.ops.spot_preflight import evaluate_spot_order_preflight
+from src.ops.spot_fee_diagnostic import evaluate_spot_fee_diagnostic
+from src.ops.spot_preflight import SpotPreflightResult, evaluate_spot_order_preflight
 
 PREFLIGHT_MAX_AGE_MS = 30_000
 
@@ -14,6 +15,7 @@ def build_stored_spot_preflight(
 ) -> dict[str, object]:
     """Use source receipt times and leave unproved operational gates unknown."""
     config, balance, instrument = evidence.config, evidence.balance, evidence.instrument
+    trade_fee = evidence.trade_fee
     result = evaluate_spot_order_preflight(
         config=config.fact if config is not None else None,
         balance=balance.fact if balance is not None else None,
@@ -26,6 +28,19 @@ def build_stored_spot_preflight(
         expected_uid=evidence.uid,
         balance_uid=evidence.uid if balance is not None else None,
     )
+    fee_diagnostic = evaluate_spot_fee_diagnostic(
+        config=config.fact if config is not None else None,
+        instrument=instrument.fact if instrument is not None else None,
+        fee=trade_fee.fact if trade_fee is not None else None,
+        symbol=symbol, side=side, amount=amount, price=price, now_ms=now_ms,
+        config_received_at=config.received_at if config is not None else None,
+        instrument_received_at=instrument.received_at if instrument is not None else None,
+        fee_received_at=trade_fee.received_at if trade_fee is not None else None,
+        max_age_ms=PREFLIGHT_MAX_AGE_MS, expected_uid=evidence.uid,
+        fee_uid=evidence.uid if trade_fee is not None else None,
+    )
+    # Unrounded scenarios cannot supply the preflight's fee_reserve evidence.
+    result = SpotPreflightResult(result.checks + fee_diagnostic.checks)
 
     def provenance(observation):
         return None if observation is None else {
@@ -40,6 +55,16 @@ def build_stored_spot_preflight(
             "account_scope_id": evidence.account_scope_id, "uid": evidence.uid,
             "config": provenance(config), "balance": provenance(balance),
             "instrument": provenance(instrument),
+            "trade_fee": provenance(trade_fee),
+        },
+        "fee_diagnostic": {
+            field: getattr(fee_diagnostic, field) for field in (
+                "group_id", "currency", "maker_rate", "taker_rate", "maker_signed_amount",
+                "taker_signed_amount", "worst_commission_unrounded",
+            )
+        } | {
+            "amounts_unrounded": True, "coverage": "unknown",
+            "sign_convention": "positive_rebate_negative_commission",
         },
         "checks": [asdict(check) for check in result.checks],
         "can_submit": result.can_submit, "can_activate": result.can_activate,

@@ -473,15 +473,18 @@ def _fee_group_projection(decoded: dict) -> tuple[str | None, str]:
     return json.dumps(groups, allow_nan=False, sort_keys=True, separators=(",", ":")), "value"
 
 
-def _verify_trade_fee_record(record: PrivateSpotTradeFeeRecord) -> None:
+def _verify_trade_fee_record(
+    record: PrivateSpotTradeFeeRecord,
+) -> PreflightObservation[SpotTradeFeeFact]:
     canonical_spot_symbol(record.requested_inst_id)
-    _verified_observation(
+    observation = _verified_observation(
         record, lambda raw: parse_okx_spot_trade_fee(raw, inst_id=record.requested_inst_id),
         SPOT_TRADE_FEE_FIELDS, ("requested_inst_id", "inst_type"),
     )
     decoded, _, _ = _exact_payload(record.raw_json)
     if (record.fee_group_json, record.fee_group_state) != _fee_group_projection(decoded):
         raise ValueError("Stored trade fee group projection mismatch")
+    return observation
 
 
 def _exact_traversal(scope_id: str, uid: str, endpoint: str,
@@ -881,10 +884,12 @@ class _AccountingTransaction:
             validate_raw_text(uid, "UID")
         # Reject foreign records rather than hiding them through a WHERE scope filter.
         models = (PrivateAccountConfigRecord, PrivateAccountBalanceRecord,
-                  PrivateSpotInstrumentResponseRecord, PrivateSpotInstrumentRecord)
+                  PrivateSpotInstrumentResponseRecord, PrivateSpotInstrumentRecord,
+                  PrivateSpotTradeFeeRecord)
         for model in models:
             invalid = model.account_scope_id != scope_id
-            if model in (PrivateAccountConfigRecord, PrivateAccountBalanceRecord):
+            if model in (PrivateAccountConfigRecord, PrivateAccountBalanceRecord,
+                         PrivateSpotTradeFeeRecord):
                 invalid = or_(invalid, model.uid != uid) if uid is not None else True
             if self.session.exec(select(model).where(invalid).limit(1)).first() is not None:
                 raise ValueError("Stored preflight scope or UID mismatch")
@@ -933,7 +938,14 @@ class _AccountingTransaction:
                 ))
             selected = next((fact for fact in facts if fact.inst_id == symbol), None)
             instrument = PreflightObservation(selected, payload_hash, received_at)
-        return SpotPreflightEvidence(scope_id, uid, config, balance, instrument)
+        fee_record = self.session.exec(select(PrivateSpotTradeFeeRecord).where(
+            PrivateSpotTradeFeeRecord.requested_inst_id == symbol,
+        ).order_by(
+            PrivateSpotTradeFeeRecord.received_at.desc(),
+            text("private_spot_trade_fee.rowid DESC"),
+        ).limit(1)).first()
+        trade_fee = None if fee_record is None else _verify_trade_fee_record(fee_record)
+        return SpotPreflightEvidence(scope_id, uid, config, balance, instrument, trade_fee)
 
     def commit_private_spot_instruments(
         self, facts: tuple[SpotInstrumentFact, ...], *, raw_payload: object,
