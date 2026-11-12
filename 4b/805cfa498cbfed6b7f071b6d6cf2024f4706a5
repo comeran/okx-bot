@@ -1,0 +1,29 @@
+src/web/api/ops.py
+  s_5754a483f5e2c0::t_f6af6e878133c7 9,22,33,48-62,206-228
+  s_5754a483f5e2c0::t_be23f2076cc714 25
+tests/integration/test_spot_preflight_api.py
+  s_5754a483f5e2c0::t_8b8f0b883a0a2e 1-180
+docs/superpowers/plans/2026-11-11-quant-system-roadmap.md
+  s_5754a483f5e2c0::t_8c99f351583cf1 29,57-58
+src/ops/spot_preflight_evidence.py
+  s_5754a483f5e2c0::t_f6af6e878133c7 1-46
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "4b805cfa498cbfed6b7f071b6d6cf2024f4706a5",
+  "prompts": {},
+  "logical_commit_id": "4b805cfa498cbfed6b7f071b6d6cf2024f4706a5",
+  "sessions": {
+    "s_5754a483f5e2c0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1be4b-8fcb-7f73-917c-6d11f8ef4f92",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Zane <zane@bigo.sg>",
+      "total_additions": 716,
+      "total_deletions": 14
+    }
+  }
+}
