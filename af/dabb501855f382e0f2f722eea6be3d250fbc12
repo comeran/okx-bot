@@ -1,0 +1,32 @@
+docs/superpowers/specs/2026-11-12-exact-sync-input-validation-design.md
+  s_5754a483f5e2c0::t_c2d19ae64edaf1 1-17
+src/ops/exact_private_sync.py
+  s_5754a483f5e2c0::t_853058f1206c86 78-82,112,163,185,207,238,320
+docs/superpowers/plans/2026-11-12-exact-sync-input-validation-progress.md
+  s_5754a483f5e2c0::t_c2d19ae64edaf1 1-2
+  s_5754a483f5e2c0::t_a60cfebcf50ad8 3
+  s_5754a483f5e2c0::t_1ef549918f4ed8 4
+tests/unit/test_exact_sync_input_validation.py
+  s_5754a483f5e2c0::t_77b3c29ce394db 1-88
+docs/superpowers/plans/2026-11-12-exact-sync-input-validation-plan.md
+  s_5754a483f5e2c0::t_c2d19ae64edaf1 1-13
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "afdabb501855f382e0f2f722eea6be3d250fbc12",
+  "prompts": {},
+  "logical_commit_id": "afdabb501855f382e0f2f722eea6be3d250fbc12",
+  "sessions": {
+    "s_5754a483f5e2c0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1be4b-8fcb-7f73-917c-6d11f8ef4f92",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Zane <zane@bigo.sg>",
+      "total_additions": 3321,
+      "total_deletions": 150
+    }
+  }
+}
