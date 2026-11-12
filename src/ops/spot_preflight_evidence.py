@@ -6,6 +6,7 @@ from src.data.spot_preflight_evidence import SpotPreflightEvidence
 from src.ops.spot_fee_diagnostic import evaluate_spot_fee_diagnostic
 from src.ops.spot_liability_diagnostic import evaluate_spot_liability_diagnostic
 from src.ops.spot_preflight import SpotPreflightResult, evaluate_spot_order_preflight
+from src.ops.spot_sync_diagnostic import evaluate_spot_sync_diagnostic
 
 PREFLIGHT_MAX_AGE_MS = 30_000
 
@@ -50,9 +51,16 @@ def build_stored_spot_preflight(
         max_age_ms=PREFLIGHT_MAX_AGE_MS, expected_uid=evidence.uid,
         fee_uid=evidence.uid if trade_fee is not None else None,
     )
+    sync_diagnostic = evaluate_spot_sync_diagnostic(
+        latest_attempt=evidence.sync_latest_attempt,
+        last_committed=evidence.sync_last_committed,
+        account_scope_id=evidence.account_scope_id, symbol=symbol, now_ms=now_ms,
+        max_age_ms=PREFLIGHT_MAX_AGE_MS,
+    )
     # Unrounded scenarios cannot supply the preflight's fee_reserve evidence.
     result = SpotPreflightResult(
-        result.checks + fee_diagnostic.checks + liability_diagnostic.checks,
+        result.checks + fee_diagnostic.checks + liability_diagnostic.checks
+        + sync_diagnostic.checks,
     )
 
     def provenance(observation):
@@ -78,6 +86,10 @@ def build_stored_spot_preflight(
         } | {
             "amounts_unrounded": True, "coverage": "unknown",
             "sign_convention": "positive_rebate_negative_commission",
+        },
+        "sync_diagnostic": {
+            "coverage": "unknown", "latest_attempt": sync_diagnostic.latest_attempt,
+            "last_committed": sync_diagnostic.last_committed,
         },
         "checks": [asdict(check) for check in result.checks],
         "liability_diagnostic": {"coverage": "unknown"} | {

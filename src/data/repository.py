@@ -59,6 +59,7 @@ from src.data.models import (
     has_placeholder_trade_identity,
     normalize_account_assets,
 )
+from src.data.private_sync_snapshot import snapshot_private_sync_receipt
 from src.data.spot_preflight_evidence import PreflightObservation, SpotPreflightEvidence
 from src.exchange.base import canonical_symbol
 from src.exchange.okx_account_facts import (
@@ -878,7 +879,7 @@ class _AccountingTransaction:
         # Reject foreign records rather than hiding them through a WHERE scope filter.
         models = (PrivateAccountConfigRecord, PrivateAccountBalanceRecord,
                   PrivateSpotInstrumentResponseRecord, PrivateSpotInstrumentRecord,
-                  PrivateSpotTradeFeeRecord)
+                  PrivateSpotTradeFeeRecord, PrivateSyncReceiptRecord)
         for model in models:
             invalid = model.account_scope_id != scope_id
             if model in (PrivateAccountConfigRecord, PrivateAccountBalanceRecord,
@@ -938,7 +939,16 @@ class _AccountingTransaction:
             text("private_spot_trade_fee.rowid DESC"),
         ).limit(1)).first()
         trade_fee = None if fee_record is None else _verify_trade_fee_record(fee_record)
-        return SpotPreflightEvidence(scope_id, uid, config, balance, instrument, trade_fee)
+        sync_status = self.get_private_sync_status()
+        sync_snapshots = {
+            key: snapshot_private_sync_receipt(record, account_scope_id=scope_id)
+            if record is not None else None
+            for key, record in sync_status.items()
+        }
+        return SpotPreflightEvidence(
+            scope_id, uid, config, balance, instrument, trade_fee,
+            sync_snapshots["latest_attempt"], sync_snapshots["last_committed"],
+        )
 
     def commit_private_spot_instruments(
         self, facts: tuple[SpotInstrumentFact, ...], *, raw_payload: object,
