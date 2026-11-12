@@ -49,6 +49,7 @@ from src.data.models import (
     PrivateAccountConfigRecord,
     PrivateSpotInstrumentRecord,
     PrivateSpotInstrumentResponseRecord,
+    PrivateSpotOrderRecord,
     PrivateSpotTradeFeeRecord,
     PrivateSyncReceiptRecord,
     PrivateUIDBindingRecord,
@@ -77,6 +78,7 @@ from src.exchange.okx_instrument_facts import (
     SpotInstrumentFact,
     parse_okx_spot_instruments,
 )
+from src.exchange.okx_order_facts import SpotOrderFact, parse_okx_spot_order
 from src.exchange.okx_private_facts import parse_okx_spot_fill_page
 from src.exchange.okx_trade_fee_facts import (
     SPOT_TRADE_FEE_FIELDS,
@@ -515,6 +517,77 @@ def _exact_record_values(fact: SpotFillFact) -> dict:
             "null" if value is None else "value"
         )
     return values
+
+
+_SPOT_ORDER_OPTIONALS = (
+    "cl_ord_id", "tag", "px", "acc_fill_sz", "avg_px", "fill_time", "trade_id",
+    "fee", "fee_ccy", "cancel_source", "cancel_source_reason", "rebate", "rebate_ccy",
+)
+_SPOT_ORDER_REQUIRED = (
+    "inst_type", "inst_id", "ord_id", "side", "ord_type", "sz", "state",
+    "c_time", "u_time",
+)
+
+
+def _spot_order_lookup(
+    *, lookup_kind: str | None = None, lookup_value: str | None = None,
+    ord_id: str | None = None, cl_ord_id: str | None = None,
+) -> tuple[str, str, str | None, str | None]:
+    """Normalize the public lookup identity to one native request field."""
+    aliases = (ord_id is not None) or (cl_ord_id is not None)
+    named = (lookup_kind is not None) or (lookup_value is not None)
+    if aliases and named:
+        raise ValueError("Use lookup_kind/lookup_value or ord_id/cl_ord_id, not both")
+    if named:
+        if lookup_kind not in {"ordId", "clOrdId"} or lookup_value is None:
+            raise ValueError("Exactly one spot order lookup identity is required")
+        validate_raw_text(lookup_value, "order lookup identity")
+        if lookup_kind == "ordId":
+            return lookup_kind, lookup_value, lookup_value, None
+        return lookup_kind, lookup_value, None, lookup_value
+    if (ord_id is None) == (cl_ord_id is None):
+        raise ValueError("Exactly one spot order lookup identity is required")
+    lookup_kind, lookup_value = (
+        ("ordId", ord_id) if ord_id is not None else ("clOrdId", cl_ord_id)
+    )
+    validate_raw_text(lookup_value, "order lookup identity")
+    return lookup_kind, lookup_value, ord_id, cl_ord_id
+
+
+def _spot_order_record_values(fact: SpotOrderFact) -> dict:
+    values = {name: getattr(fact, name) for name in _SPOT_ORDER_REQUIRED}
+    values["ord_id_state"] = "value"
+    for name in _SPOT_ORDER_OPTIONALS:
+        value = getattr(fact, name)
+        values[name] = None if value is MISSING else value
+        values[f"{name}_state"] = "missing" if value is MISSING else (
+            "null" if value is None else "value"
+        )
+    return values
+
+
+def _verify_spot_order_record(record: PrivateSpotOrderRecord) -> SpotOrderFact:
+    canonical_spot_symbol(record.requested_inst_id)
+    _receipt_integer(record.received_at, "spot order receipt time")
+    decoded, _, payload_hash = _exact_payload(record.raw_json)
+    if record.lookup_kind == "ordId":
+        fact = parse_okx_spot_order(
+            decoded,
+            inst_id=record.requested_inst_id, ord_id=record.lookup_value,
+        )
+    elif record.lookup_kind == "clOrdId":
+        fact = parse_okx_spot_order(
+            decoded,
+            inst_id=record.requested_inst_id, cl_ord_id=record.lookup_value,
+        )
+    else:
+        raise ValueError("Stored spot order lookup kind mismatch")
+    if record.payload_hash != payload_hash:
+        raise ValueError("Stored spot order payload hash mismatch")
+    values = _spot_order_record_values(fact)
+    if any(getattr(record, name) != value for name, value in values.items()):
+        raise ValueError("Stored spot order fact mismatch")
+    return fact
 
 
 def _exact_copy(record):
@@ -1205,6 +1278,85 @@ class _AccountingTransaction:
                 raise ValueError("Private spot trade fee scope or UID mismatch")
             _verify_trade_fee_record(record)
             if inst_id is None or record.requested_inst_id == inst_id:
+                result.append(_exact_copy(record))
+        return result
+
+    def commit_private_spot_order(
+        self, fact: SpotOrderFact, *, raw_payload: object, received_at: int,
+        requested_inst_id: str | None = None, lookup_kind: str | None = None,
+        lookup_value: str | None = None, uid: str | None = None,
+        ord_id: str | None = None, cl_ord_id: str | None = None,
+    ) -> PrivateSpotOrderRecord:
+        """Retain one exact order observation without changing operational state."""
+        scope_id = _receipt_scope(self.session)
+        received_at = _receipt_integer(received_at, "spot order received time")
+        bound_uid = self.get_private_uid()
+        if bound_uid is None:
+            raise ValueError("Spot order requires an existing private UID binding")
+        if uid is not None:
+            self._exact_uid_scope(uid)
+        if not isinstance(fact, SpotOrderFact):
+            raise ValueError("Invalid typed spot order fact")
+        requested_inst_id = fact.inst_id if requested_inst_id is None else requested_inst_id
+        canonical_spot_symbol(requested_inst_id)
+        lookup_kind, lookup_value, ord_id, cl_ord_id = _spot_order_lookup(
+            lookup_kind=lookup_kind, lookup_value=lookup_value,
+            ord_id=ord_id, cl_ord_id=cl_ord_id,
+        )
+        decoded, raw_json, payload_hash = _exact_payload(raw_payload)
+        parsed = parse_okx_spot_order(
+            decoded, inst_id=requested_inst_id, ord_id=ord_id, cl_ord_id=cl_ord_id,
+        )
+        if parsed != fact:
+            raise ValueError("Raw spot order does not match typed fact")
+        identity = (
+            scope_id, bound_uid, requested_inst_id, lookup_kind, lookup_value, payload_hash,
+        )
+        existing = self.session.get(PrivateSpotOrderRecord, identity)
+        if existing is not None:
+            _verify_spot_order_record(existing)
+            return _exact_copy(existing)
+        values = _spot_order_record_values(fact)
+        record = PrivateSpotOrderRecord(
+            account_scope_id=scope_id, uid=bound_uid, requested_inst_id=requested_inst_id,
+            lookup_kind=lookup_kind, lookup_value=lookup_value, payload_hash=payload_hash,
+            received_at=received_at, raw_json=raw_json, **values,
+        )
+        self.session.add(record)
+        self.session.flush()
+        return _exact_copy(record)
+
+    def get_private_spot_orders(
+        self, inst_id: str | None = None, *, uid: str | None = None,
+        lookup_kind: str | None = None, lookup_value: str | None = None,
+        ord_id: str | None = None, cl_ord_id: str | None = None,
+    ) -> list[PrivateSpotOrderRecord]:
+        scope_id = _receipt_scope(self.session)
+        bound_uid = self.get_private_uid()
+        if uid is not None:
+            self._exact_uid_scope(uid)
+        if inst_id is not None:
+            canonical_spot_symbol(inst_id)
+        lookup = None
+        if any(value is not None for value in (
+            lookup_kind, lookup_value, ord_id, cl_ord_id,
+        )):
+            lookup_kind, lookup_value, _, _ = _spot_order_lookup(
+                lookup_kind=lookup_kind, lookup_value=lookup_value,
+                ord_id=ord_id, cl_ord_id=cl_ord_id,
+            )
+            lookup = (lookup_kind, lookup_value)
+        rows = self.session.exec(select(PrivateSpotOrderRecord).order_by(
+            PrivateSpotOrderRecord.received_at, text("private_spot_order.rowid"),
+        )).all()
+        result = []
+        for record in rows:
+            if record.account_scope_id != scope_id or record.uid != bound_uid:
+                raise ValueError("Private spot order scope or UID mismatch")
+            _verify_spot_order_record(record)
+            if (inst_id is None or record.requested_inst_id == inst_id) and (
+                lookup is None or (record.lookup_kind, record.lookup_value) == lookup
+            ):
                 result.append(_exact_copy(record))
         return result
 
@@ -2008,6 +2160,29 @@ class Repository:
     ) -> list[PrivateSpotTradeFeeRecord]:
         with Session(self.engine) as session:
             return _AccountingTransaction(session).get_private_spot_trade_fees(inst_id, uid=uid)
+
+    def commit_private_spot_order(
+        self, fact: SpotOrderFact, *, raw_payload: object, received_at: int,
+        requested_inst_id: str | None = None, lookup_kind: str | None = None,
+        lookup_value: str | None = None, uid: str | None = None,
+        ord_id: str | None = None, cl_ord_id: str | None = None,
+    ) -> PrivateSpotOrderRecord:
+        return self.atomic_accounting(lambda transaction: transaction.commit_private_spot_order(
+            fact, raw_payload=raw_payload, received_at=received_at,
+            requested_inst_id=requested_inst_id, lookup_kind=lookup_kind,
+            lookup_value=lookup_value, uid=uid, ord_id=ord_id, cl_ord_id=cl_ord_id,
+        ))
+
+    def get_private_spot_orders(
+        self, inst_id: str | None = None, *, uid: str | None = None,
+        lookup_kind: str | None = None, lookup_value: str | None = None,
+        ord_id: str | None = None, cl_ord_id: str | None = None,
+    ) -> list[PrivateSpotOrderRecord]:
+        with Session(self.engine) as session:
+            return _AccountingTransaction(session).get_private_spot_orders(
+                inst_id, uid=uid, lookup_kind=lookup_kind, lookup_value=lookup_value,
+                ord_id=ord_id, cl_ord_id=cl_ord_id,
+            )
 
     def _read_exact_fill_history(self, read: Callable):
         """All journal/projection SELECTs share one SQLite read transaction."""

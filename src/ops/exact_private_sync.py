@@ -18,6 +18,7 @@ from src.data.models import (
     PrivateAccountBalanceRecord,
     PrivateAccountConfigRecord,
     PrivateSpotInstrumentRecord,
+    PrivateSpotOrderRecord,
     PrivateSpotTradeFeeRecord,
 )
 from src.exchange.okx_account_facts import (
@@ -35,6 +36,11 @@ from src.exchange.okx_instrument_facts import (
     RawOKXInstrumentExchange,
     SpotInstrumentFact,
 )
+from src.exchange.okx_order_facts import (
+    OKXSpotOrderFactsAdapter,
+    RawOKXOrderExchange,
+    SpotOrderFact,
+)
 from src.exchange.okx_private_facts import OKXSpotFillFactsAdapter, RawOKXFillExchange
 from src.exchange.okx_trade_fee_facts import (
     OKXSpotTradeFeeFactsAdapter,
@@ -50,6 +56,12 @@ class ExactPrivateFactsRepository(Protocol):
         self, fact: SpotTradeFeeFact, *, raw_payload: object, received_at: int,
         uid: str | None = None,
     ) -> PrivateSpotTradeFeeRecord: ...
+
+    def commit_private_spot_order(
+        self, fact: SpotOrderFact, *, raw_payload: object, received_at: int,
+        requested_inst_id: str | None = None, lookup_kind: str | None = None,
+        lookup_value: str | None = None, uid: str | None = None,
+    ) -> PrivateSpotOrderRecord: ...
 
     def commit_private_spot_instruments(
         self, facts: tuple[SpotInstrumentFact, ...], *, raw_payload: object,
@@ -149,6 +161,16 @@ class _CapturedTradeFeeExchange:
         return self.payload
 
 
+class _CapturedOrderExchange:
+    def __init__(self, exchange: RawOKXOrderExchange) -> None:
+        self.exchange = exchange
+        self.payload: object = None
+
+    async def private_get_trade_order(self, params: dict[str, str]) -> object:
+        self.payload = await self.exchange.private_get_trade_order(params)
+        return self.payload
+
+
 async def sync_exact_spot_trade_fee(
     repository: ExactPrivateFactsRepository, exchange: RawOKXTradeFeeExchange,
     received_at: int, *, inst_id: str, uid: str | None = None,
@@ -173,6 +195,39 @@ async def sync_exact_spot_trade_fee(
     await asyncio.sleep(0)
     return repository.commit_private_spot_trade_fee(
         fact, uid=bound_uid, raw_payload=captured.payload, received_at=received_at,
+    )
+
+
+async def sync_exact_spot_order(
+    repository: ExactPrivateFactsRepository, exchange: RawOKXOrderExchange,
+    received_at: int, *, inst_id: str, ord_id: str | None = None,
+    cl_ord_id: str | None = None, uid: str | None = None,
+) -> PrivateSpotOrderRecord:
+    """Collect one request-bound raw SPOT order observation."""
+    _validate_received_at(received_at)
+    canonical_spot_symbol(inst_id)
+    if (ord_id is None) == (cl_ord_id is None):
+        raise ValueError("Exactly one spot order lookup identity is required")
+    lookup_kind, lookup_value = (
+        ("ordId", ord_id) if ord_id is not None else ("clOrdId", cl_ord_id)
+    )
+    validate_raw_text(lookup_value, "order lookup identity")
+    if uid is not None:
+        validate_raw_text(uid, "UID")
+    bound_uid = repository.get_private_uid()
+    if bound_uid is None:
+        raise ValueError("Spot order requires an existing private UID binding")
+    if uid is not None:
+        if uid != bound_uid:
+            raise ValueError("Private UID binding conflict")
+    captured = _CapturedOrderExchange(exchange)
+    fact = await OKXSpotOrderFactsAdapter(captured).fetch(
+        inst_id=inst_id, ord_id=ord_id, cl_ord_id=cl_ord_id,
+    )
+    await asyncio.sleep(0)
+    return repository.commit_private_spot_order(
+        fact, uid=bound_uid, raw_payload=captured.payload, received_at=received_at,
+        requested_inst_id=inst_id, lookup_kind=lookup_kind, lookup_value=lookup_value,
     )
 
 
