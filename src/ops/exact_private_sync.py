@@ -18,6 +18,7 @@ from src.data.models import (
     PrivateAccountBalanceRecord,
     PrivateAccountConfigRecord,
     PrivateSpotInstrumentRecord,
+    PrivateSpotTradeFeeRecord,
 )
 from src.exchange.okx_account_facts import (
     AccountConfigFact,
@@ -35,10 +36,20 @@ from src.exchange.okx_instrument_facts import (
     SpotInstrumentFact,
 )
 from src.exchange.okx_private_facts import OKXSpotFillFactsAdapter, RawOKXFillExchange
+from src.exchange.okx_trade_fee_facts import (
+    OKXSpotTradeFeeFactsAdapter,
+    RawOKXTradeFeeExchange,
+    SpotTradeFeeFact,
+)
 
 
 class ExactPrivateFactsRepository(Protocol):
     def get_private_uid(self) -> str | None: ...
+
+    def commit_private_spot_trade_fee(
+        self, fact: SpotTradeFeeFact, *, raw_payload: object, received_at: int,
+        uid: str | None = None,
+    ) -> PrivateSpotTradeFeeRecord: ...
 
     def commit_private_spot_instruments(
         self, facts: tuple[SpotInstrumentFact, ...], *, raw_payload: object,
@@ -120,6 +131,44 @@ class _CapturedFillExchange:
     async def private_get_trade_fills_history(self, params: dict[str, str]) -> object:
         self.payload = await self.exchange.private_get_trade_fills_history(params)
         return self.payload
+
+
+class _CapturedTradeFeeExchange:
+    def __init__(self, exchange: RawOKXTradeFeeExchange) -> None:
+        self.exchange = exchange
+        self.payload: object = None
+
+    async def private_get_account_trade_fee(self, params: dict[str, str]) -> object:
+        self.payload = await self.exchange.private_get_account_trade_fee(params)
+        return self.payload
+
+
+async def sync_exact_spot_trade_fee(
+    repository: ExactPrivateFactsRepository, exchange: RawOKXTradeFeeExchange,
+    received_at: int, *, inst_id: str, uid: str | None = None,
+) -> PrivateSpotTradeFeeRecord:
+    """Collect one rate response for an already-bound UID and explicit symbol.
+
+    The caller owns transport for the bound account; this identity-free response
+    cannot verify credential ownership. No reserve, fee policy or execution
+    permission is derived from these signed raw observations.
+    """
+    canonical_spot_symbol(inst_id)
+    if type(received_at) is not int or not 0 <= received_at <= 2**63 - 1:
+        raise ValueError("received timestamp must be an integer from 0 to 2**63 - 1")
+    bound_uid = repository.get_private_uid()
+    if bound_uid is None:
+        raise ValueError("Spot trade fee requires an existing private UID binding")
+    if uid is not None:
+        validate_raw_text(uid, "UID")
+        if uid != bound_uid:
+            raise ValueError("Private UID binding conflict")
+    captured = _CapturedTradeFeeExchange(exchange)
+    fact = await OKXSpotTradeFeeFactsAdapter(captured).fetch(inst_id)
+    await asyncio.sleep(0)
+    return repository.commit_private_spot_trade_fee(
+        fact, uid=bound_uid, raw_payload=captured.payload, received_at=received_at,
+    )
 
 
 async def sync_exact_account_config(

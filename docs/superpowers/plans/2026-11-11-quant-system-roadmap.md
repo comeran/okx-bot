@@ -27,6 +27,7 @@ Acceptance: explicit draft configuration persists without granting trading permi
 - [ ] Define exclusive initial spot ownership, budget consumption/reservations and strategy-local cash/position/PnL queries.
 - [x] Pure read-only exact SPOT order preflight with UID/balance binding, receipt freshness, borrow policy, native live instrument rules, decimal tick/lot/minimum checks and side-specific availBal including caller fee reserve. Unknown liability/fee/reconciliation/sync evidence keeps diagnostics closed; account level alone cannot prove unleveraged safety.
 - [x] Bind persisted exact config/balance/instrument evidence to a read-only SPOT preflight API. One transaction validates store/UID binding, raw hashes and typed projections; latest missing or unsafe evidence never falls back. Responses expose bounded source provenance and checks. Fee/liability/reconciliation/sync proofs remain unknown and execution stays closed.
+- [x] Retain exact account SPOT trade-fee rates and nested fee-group observations through a single-response injected raw adapter and explicit collector. UID/account/request-symbol-bound append-only storage preserves signed strings, raw/hash/state integrity and original receipt time on replay. Fee-group/currency/rounding coverage policy remains pending; no preflight blocker is removed.
 - [ ] Integrate trusted preflight evidence with atomic funded allocations and runtime order enforcement. Derivatives require their own account/risk design before activation.
 - [ ] Atomically validate/activate a draft from trusted fresh exchange facts; refuse overlapping/excess allocation and unsafe runtime edits.
 
@@ -56,6 +57,8 @@ Instrument spec/evidence: `docs/superpowers/specs/2026-11-12-spot-instrument-fac
 Read-only preflight spec/evidence: `docs/superpowers/specs/2026-11-12-spot-preflight-design.md` and `docs/superpowers/plans/2026-11-12-spot-preflight-plan.md`. Diagnostic readiness does not activate strategies or submit orders.
 
 Persisted diagnostic bridge: `docs/superpowers/specs/2026-11-12-persisted-spot-preflight-design.md` and `docs/superpowers/plans/2026-11-12-persisted-spot-preflight-plan.md`. `POST /api/ops/spot/preflight` consumes only server-stored exact evidence and requires the current account-scope handshake; client readiness attestations are rejected.
+
+Fee acquisition evidence: `docs/superpowers/specs/2026-11-12-spot-trade-fee-facts-design.md` and `docs/superpowers/plans/2026-11-12-spot-trade-fee-facts-plan.md`. Before deriving a reserve, map rates to instrument groups and account fee currency, define conservative rounding and promotion handling, and bind freshness. Raw rates alone do not prove coverage.
 
 ## Phase 3 — reconciliation, unknown outcomes and lifecycle recovery
 

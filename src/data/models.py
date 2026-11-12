@@ -211,6 +211,75 @@ for _action in ("UPDATE", "DELETE", "INSERT"):
     )
 
 
+class PrivateSpotTradeFeeRecord(SQLModel, table=True):
+    """Raw account fee observations, bound to their requested SPOT instrument."""
+
+    __tablename__ = "private_spot_trade_fee"
+    __table_args__ = (
+        CheckConstraint("received_at >= 0", name="ck_spot_trade_fee_received"),
+        CheckConstraint("inst_type = 'SPOT'", name="ck_spot_trade_fee_type"),
+        CheckConstraint("length(payload_hash) = 64", name="ck_spot_trade_fee_hash"),
+        CheckConstraint("length(requested_inst_id) BETWEEN 1 AND 256",
+                        name="ck_spot_trade_fee_request"),
+        CheckConstraint("length(CAST(raw_json AS BLOB)) <= 4194304",
+                        name="ck_spot_trade_fee_raw_size"),
+        *(CheckConstraint(
+            f"({name}_state IN ('missing','null') AND {name} IS NULL) OR "
+            f"({name}_state = 'value' AND {name} IS NOT NULL)",
+            name=f"ck_spot_trade_fee_{name}_state",
+        ) for name in ("level", "maker", "taker", "maker_usdc", "taker_usdc",
+                       "ts", "rule_type", "category")),
+        CheckConstraint(
+            "(fee_group_state IN ('missing','null') AND fee_group_json IS NULL) OR "
+            "(fee_group_state = 'value' AND fee_group_json IS NOT NULL)",
+            name="ck_spot_trade_fee_group_state",
+        ),
+    )
+
+    account_scope_id: str = Field(primary_key=True)
+    uid: str = Field(primary_key=True)
+    requested_inst_id: str = Field(primary_key=True)
+    payload_hash: str = Field(primary_key=True)
+    inst_type: str
+    received_at: int
+    raw_json: str = Field(sa_column=Column(Text, nullable=False))
+    level: str | None = None
+    level_state: str
+    maker: str | None = None
+    maker_state: str
+    taker: str | None = None
+    taker_state: str
+    maker_usdc: str | None = None
+    maker_usdc_state: str
+    taker_usdc: str | None = None
+    taker_usdc_state: str
+    ts: str | None = None
+    ts_state: str
+    rule_type: str | None = None
+    rule_type_state: str
+    category: str | None = None
+    category_state: str
+    fee_group_json: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
+    fee_group_state: str
+
+
+for _action in ("UPDATE", "DELETE", "INSERT"):
+    _condition = (
+        " WHEN EXISTS (SELECT 1 FROM private_spot_trade_fee "
+        "WHERE account_scope_id = NEW.account_scope_id AND uid = NEW.uid "
+        "AND requested_inst_id = NEW.requested_inst_id AND payload_hash = NEW.payload_hash)"
+        if _action == "INSERT" else ""
+    )
+    event.listen(
+        PrivateSpotTradeFeeRecord.__table__, "after_create",
+        DDL(
+            f"CREATE TRIGGER private_spot_trade_fee_no_{_action.lower()} BEFORE {_action} "
+            f"ON private_spot_trade_fee{_condition} "
+            "BEGIN SELECT RAISE(ABORT, 'append-only spot trade fee observation'); END"
+        ).execute_if(dialect="sqlite"),
+    )
+
+
 class PrivateSpotInstrumentResponseRecord(SQLModel, table=True):
     """One bounded raw public response, retained once within an account scope."""
 
