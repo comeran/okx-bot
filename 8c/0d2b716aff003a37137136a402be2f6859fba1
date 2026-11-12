@@ -1,0 +1,22 @@
+docs/superpowers/plans/2026-11-12-spot-trade-fee-facts-plan.md
+  s_5754a483f5e2c0::t_926f39edd3d0d8 50,60-61
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "8c0d2b716aff003a37137136a402be2f6859fba1",
+  "prompts": {},
+  "logical_commit_id": "8c0d2b716aff003a37137136a402be2f6859fba1",
+  "sessions": {
+    "s_5754a483f5e2c0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1be4b-8fcb-7f73-917c-6d11f8ef4f92",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Zane <zane@bigo.sg>",
+      "total_additions": 3,
+      "total_deletions": 2
+    }
+  }
+}
