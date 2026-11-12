@@ -1,0 +1,37 @@
+docs/superpowers/specs/2026-11-12-exact-fill-recovery-design.md
+  s_5754a483f5e2c0::t_5bbd35628c2ce8 1-25
+tests/unit/test_exact_fill_recovery.py
+  s_5754a483f5e2c0::t_0aedf84061e6f7 1-138
+docs/superpowers/plans/2026-11-11-quant-system-roadmap.md
+  s_5754a483f5e2c0::t_a6c24c8cfcb63d 75,81-82
+docs/superpowers/plans/2026-11-12-exact-fill-recovery-plan.md
+  s_5754a483f5e2c0::t_5bbd35628c2ce8 1-25,30-34,38-42
+  s_5754a483f5e2c0::t_a6c24c8cfcb63d 26-29,43-44
+  s_5754a483f5e2c0::t_d8a9b88b36a724 35-36,45
+  s_5754a483f5e2c0::t_7de6644c0b9458 37
+  s_5754a483f5e2c0::t_af8c96e74e82ed 46-48
+tests/unit/test_exact_fill_recovery_sync.py
+  s_5754a483f5e2c0::t_aead5e368e1820 10,117
+  s_5754a483f5e2c0::t_4e43994d1a7fae 1-9,11-116,118-121
+src/data/repository.py
+  s_5754a483f5e2c0::t_199ddf9ca142d8 383-386,1138-1139,1201-1206,1208-1274,1281-1282,1298,1307,1317,1334-1335,1349-1350,2001-2009,2011,2014,2020-2021,2023-2024
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "73fa865fe327601014b4995f228d2274bc19e06d",
+  "prompts": {},
+  "logical_commit_id": "73fa865fe327601014b4995f228d2274bc19e06d",
+  "sessions": {
+    "s_5754a483f5e2c0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1be4b-8fcb-7f73-917c-6d11f8ef4f92",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Zane <zane@bigo.sg>",
+      "total_additions": 1851,
+      "total_deletions": 105
+    }
+  }
+}
