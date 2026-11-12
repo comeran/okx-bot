@@ -72,11 +72,14 @@ Liability diagnostic evidence: `docs/superpowers/specs/2026-11-12-spot-liability
 - [x] Persist exact SPOT page journals, typed fill facts, immutable provider UID binding, and a transactional versioned cursor. Replays are idempotent, stale/cyclic traversal fails closed, and coverage remains non-complete.
 - [x] Add injected single-response account-config ingestion and exact SPOT fill-page orchestration; each explicit call resumes its durable filter-bound tail/version and returns detached evidence. No automatic catch-up or completeness inference.
 - [x] Add caller-invoked bounded exact SPOT fill catch-up using durable filter-bound cursors. Each page commits independently; short pages continue, empty pages stay unknown and the page bound returns partial coverage. Stale/cyclic cursors fail closed; there are no retries or completeness/ledger/activation writes.
+- [x] Verify exact local fill recovery before reads and append/replay: raw/hash/request identities, insertion-ordered traversal chains, complete cursor/page sets and first-observed full fill projections must agree within one transaction. Corrupt/orphan state blocks resume without automatic repair; valid overlap, advanced replay and empty-tail semantics remain conservative. This establishes local journal integrity, not provider-history completeness.
 - [ ] Startup and continuous private-state synchronization, with bounded retries and visible freshness.
 - [ ] Resolve ambiguous submission/cancel outcomes by durable client/exchange identity before another action; never blindly resubmit.
 - [ ] Persist intended/actual runtime state and checkpoints; reconcile before resume, singleton execution lease and graceful shutdown.
 
 Acceptance: delayed/partial fills, more than one history page, lost responses, network interruption, duplicate messages and process restarts converge to explained orders/fills/positions without duplicate orders.
+
+Local exact recovery spec/evidence: `docs/superpowers/specs/2026-11-12-exact-fill-recovery-design.md` and `docs/superpowers/plans/2026-11-12-exact-fill-recovery-plan.md`. Exact getters and page commits validate the account's complete retained journal before returning a resumable cursor. History-dependent verification cost and explicit operator recovery remain; account-equity reconciliation and provider completeness are not certified.
 
 ## Phase 4 — continuous risk and operator controls
 
