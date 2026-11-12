@@ -49,6 +49,7 @@ from src.data.models import (
     PrivateAccountConfigRecord,
     PrivateSpotInstrumentRecord,
     PrivateSpotInstrumentResponseRecord,
+    PrivateSpotTradeFeeRecord,
     PrivateSyncReceiptRecord,
     PrivateUIDBindingRecord,
     RiskEventRecord,
@@ -76,6 +77,11 @@ from src.exchange.okx_instrument_facts import (
     parse_okx_spot_instruments,
 )
 from src.exchange.okx_private_facts import parse_okx_spot_fill_page
+from src.exchange.okx_trade_fee_facts import (
+    SPOT_TRADE_FEE_FIELDS,
+    SpotTradeFeeFact,
+    parse_okx_spot_trade_fee,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -458,6 +464,24 @@ def _verify_projection(record, fact, optional_fields, required_fields=()):
         if (getattr(record, name) != (None if value is MISSING else value)
                 or getattr(record, f"{name}_state") != state):
             raise ValueError("Stored preflight optional state mismatch")
+
+
+def _fee_group_projection(decoded: dict) -> tuple[str | None, str]:
+    groups = decoded["data"][0].get("feeGroup", MISSING)
+    if groups is MISSING or groups is None:
+        return None, "missing" if groups is MISSING else "null"
+    return json.dumps(groups, allow_nan=False, sort_keys=True, separators=(",", ":")), "value"
+
+
+def _verify_trade_fee_record(record: PrivateSpotTradeFeeRecord) -> None:
+    canonical_spot_symbol(record.requested_inst_id)
+    _verified_observation(
+        record, lambda raw: parse_okx_spot_trade_fee(raw, inst_id=record.requested_inst_id),
+        SPOT_TRADE_FEE_FIELDS, ("requested_inst_id", "inst_type"),
+    )
+    decoded, _, _ = _exact_payload(record.raw_json)
+    if (record.fee_group_json, record.fee_group_state) != _fee_group_projection(decoded):
+        raise ValueError("Stored trade fee group projection mismatch")
 
 
 def _exact_traversal(scope_id: str, uid: str, endpoint: str,
@@ -1111,6 +1135,66 @@ class _AccountingTransaction:
             ExactSpotFillRecord.account_scope_id == scope_id, ExactSpotFillRecord.uid == uid,
         ).order_by(ExactSpotFillRecord.bill_id.desc())).all()
         return [_exact_fact(record) for record in records]
+
+    def commit_private_spot_trade_fee(
+        self, fact: SpotTradeFeeFact, *, raw_payload: object, received_at: int,
+        uid: str | None = None,
+    ) -> PrivateSpotTradeFeeRecord:
+        """Retain one raw response under its account and requested instrument."""
+        scope_id = _receipt_scope(self.session)
+        received_at = _receipt_integer(received_at, "spot trade fee received time")
+        bound_uid = self.get_private_uid()
+        if bound_uid is None:
+            raise ValueError("Spot trade fee requires an existing private UID binding")
+        if uid is not None:
+            self._exact_uid_scope(uid)
+        if not isinstance(fact, SpotTradeFeeFact):
+            raise ValueError("Invalid typed spot trade fee fact")
+        decoded, raw_json, payload_hash = _exact_payload(raw_payload)
+        if parse_okx_spot_trade_fee(decoded, inst_id=fact.requested_inst_id) != fact:
+            raise ValueError("Raw spot trade fee does not match typed fact")
+        identity = (scope_id, bound_uid, fact.requested_inst_id, payload_hash)
+        existing = self.session.get(PrivateSpotTradeFeeRecord, identity)
+        if existing is not None:
+            _verify_trade_fee_record(existing)
+            return _exact_copy(existing)
+        values = {}
+        for name in SPOT_TRADE_FEE_FIELDS:
+            value = getattr(fact, name)
+            values[name] = None if value is MISSING else value
+            values[f"{name}_state"] = "missing" if value is MISSING else (
+                "null" if value is None else "value"
+            )
+        group_json, group_state = _fee_group_projection(decoded)
+        record = PrivateSpotTradeFeeRecord(
+            account_scope_id=scope_id, uid=bound_uid, requested_inst_id=fact.requested_inst_id,
+            payload_hash=payload_hash, inst_type=fact.inst_type, received_at=received_at,
+            raw_json=raw_json, fee_group_json=group_json, fee_group_state=group_state, **values,
+        )
+        self.session.add(record)
+        self.session.flush()
+        return _exact_copy(record)
+
+    def get_private_spot_trade_fees(
+        self, inst_id: str | None = None, *, uid: str | None = None,
+    ) -> list[PrivateSpotTradeFeeRecord]:
+        scope_id = _receipt_scope(self.session)
+        bound_uid = self.get_private_uid()
+        if uid is not None:
+            self._exact_uid_scope(uid)
+        if inst_id is not None:
+            canonical_spot_symbol(inst_id)
+        records = self.session.exec(select(PrivateSpotTradeFeeRecord).order_by(
+            PrivateSpotTradeFeeRecord.received_at, text("private_spot_trade_fee.rowid"),
+        )).all()
+        result = []
+        for record in records:
+            if record.account_scope_id != scope_id or record.uid != bound_uid:
+                raise ValueError("Private spot trade fee scope or UID mismatch")
+            _verify_trade_fee_record(record)
+            if inst_id is None or record.requested_inst_id == inst_id:
+                result.append(_exact_copy(record))
+        return result
 
     def get_exact_spot_fill_pages(self, *, uid: str) -> list[ExactSpotFillPageRecord]:
         scope_id = self._exact_uid_scope(uid)
@@ -1847,6 +1931,20 @@ class Repository:
     ) -> list[PrivateAccountBalanceRecord]:
         with Session(self.engine) as session:
             return _AccountingTransaction(session).get_private_account_balances(uid=uid)
+
+    def commit_private_spot_trade_fee(
+        self, fact: SpotTradeFeeFact, *, raw_payload: object, received_at: int,
+        uid: str | None = None,
+    ) -> PrivateSpotTradeFeeRecord:
+        return self.atomic_accounting(lambda transaction: transaction.commit_private_spot_trade_fee(
+            fact, raw_payload=raw_payload, received_at=received_at, uid=uid,
+        ))
+
+    def get_private_spot_trade_fees(
+        self, inst_id: str | None = None, *, uid: str | None = None,
+    ) -> list[PrivateSpotTradeFeeRecord]:
+        with Session(self.engine) as session:
+            return _AccountingTransaction(session).get_private_spot_trade_fees(inst_id, uid=uid)
 
     def get_exact_spot_fills(self, *, uid: str) -> list[SpotFillFact]:
         with Session(self.engine) as session:
