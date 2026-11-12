@@ -1,0 +1,59 @@
+src/data/models.py
+  s_5754a483f5e2c0::t_66339bb694daa8 266-355
+tests/unit/test_spot_order_sync.py
+  s_5754a483f5e2c0::t_a1074135f7c797 112-122
+  s_5754a483f5e2c0::t_38112034eb7da1 1-8,11-111,123-212
+  s_5754a483f5e2c0::t_edcfd78a2fd488 9-10
+src/data/repository.py
+  s_5754a483f5e2c0::t_da3d256e38d9e8 532-556
+  s_5754a483f5e2c0::t_7cc7db9c68a3d6 1286-1288,1302-1304
+  s_5754a483f5e2c0::t_62b7733bf5d31c 2164-2165,2169-2171,2174-2177,2179-2182,2185-2186
+  s_5754a483f5e2c0::t_02f8c2a4e5033a 1284-1285,1289-1301,1305-1330,1332-1339,1349-1357,1359,1362
+  s_5754a483f5e2c0::t_f0d0c214ac71ba 52,81
+  s_5754a483f5e2c0::t_ff6acd7712944f 1331,1340,1344-1348,1358
+  s_5754a483f5e2c0::t_8f9562ee298b17 2166-2168,2172-2173,2178,2183-2184
+  s_5754a483f5e2c0::t_c9ca0155a64a29 522-531,557-570,573-574,576-579,581-584,586-592
+  s_5754a483f5e2c0::t_cde8483bcfac05 571-572,575,580,585
+  s_5754a483f5e2c0::t_cacfd74613afd3 1341-1343
+  s_5754a483f5e2c0::t_a3bcf79ba12b2e 1281-1283
+  s_5754a483f5e2c0::t_d1f0e3919a88a5 2163
+docs/superpowers/plans/2026-11-12-spot-order-fact-store-plan.md
+  s_5754a483f5e2c0::t_6aa20a9ac2c66a 7-10
+  s_5754a483f5e2c0::t_488f2f094cf948 1-6,11-15
+src/ops/exact_private_sync.py
+  s_5754a483f5e2c0::t_a0ef9a250ddb4e 21
+  s_5754a483f5e2c0::t_5238c71529a39a 39-43,60-61,64-65,161-170,172-173,197-207,217-228
+  s_5754a483f5e2c0::t_286fc7f1362655 62-63,208-214,230
+  s_5754a483f5e2c0::t_a5e05bb310c044 215-216
+docs/superpowers/specs/2026-11-12-spot-order-fact-store-design.md
+  s_5754a483f5e2c0::t_488f2f094cf948 1-35
+tests/unit/test_spot_order_fact_store.py
+  s_5754a483f5e2c0::t_edcfd78a2fd488 14-15,65-67
+  s_5754a483f5e2c0::t_85575829f3c366 210-225
+  s_5754a483f5e2c0::t_15bc81cf480a07 8,16,33,35,116,125
+  s_5754a483f5e2c0::t_ebcd3674f28f0b 1-7,9-13,17-32,34,36-64,68-115,117-124,126-143,146-147,152-209,244-257
+  s_5754a483f5e2c0::t_57cdecea79bde7 144-145,148-151
+  s_5754a483f5e2c0::t_4d31da9bf7bcc0 226-243
+docs/superpowers/plans/2026-11-12-spot-order-fact-store-progress.md
+  s_5754a483f5e2c0::t_488f2f094cf948 1-2
+  s_5754a483f5e2c0::t_6aa20a9ac2c66a 3-9
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "db56b96571b35b7ac64f96801c4e92a89e65de63",
+  "prompts": {},
+  "logical_commit_id": "db56b96571b35b7ac64f96801c4e92a89e65de63",
+  "sessions": {
+    "s_5754a483f5e2c0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1be4b-8fcb-7f73-917c-6d11f8ef4f92",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Zane <zane@bigo.sg>",
+      "total_additions": 4219,
+      "total_deletions": 200
+    }
+  }
+}
