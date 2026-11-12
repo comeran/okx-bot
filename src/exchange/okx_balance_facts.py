@@ -23,6 +23,7 @@ ASSET_BALANCE_FIELDS = {
     "cash_bal": "cashBal", "eq": "eq", "avail_bal": "availBal", "frozen_bal": "frozenBal",
     "upl": "upl", "u_time": "uTime", "liab": "liab", "interest": "interest",
     "eq_usd": "eqUsd", "ord_frozen": "ordFrozen",
+    "cross_liab": "crossLiab", "iso_liab": "isoLiab", "upl_liab": "uplLiab",
 }
 
 
@@ -48,6 +49,9 @@ class AssetBalanceFact:
     interest: OptionalRawText = MISSING
     eq_usd: OptionalRawText = MISSING
     ord_frozen: OptionalRawText = MISSING
+    cross_liab: OptionalRawText = MISSING
+    iso_liab: OptionalRawText = MISSING
+    upl_liab: OptionalRawText = MISSING
 
     def __post_init__(self) -> None:
         validate_raw_text(self.ccy, "ccy")

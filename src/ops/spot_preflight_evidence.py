@@ -4,6 +4,7 @@ from dataclasses import asdict
 
 from src.data.spot_preflight_evidence import SpotPreflightEvidence
 from src.ops.spot_fee_diagnostic import evaluate_spot_fee_diagnostic
+from src.ops.spot_liability_diagnostic import evaluate_spot_liability_diagnostic
 from src.ops.spot_preflight import SpotPreflightResult, evaluate_spot_order_preflight
 
 PREFLIGHT_MAX_AGE_MS = 30_000
@@ -16,6 +17,15 @@ def build_stored_spot_preflight(
     """Use source receipt times and leave unproved operational gates unknown."""
     config, balance, instrument = evidence.config, evidence.balance, evidence.instrument
     trade_fee = evidence.trade_fee
+    liability_diagnostic = evaluate_spot_liability_diagnostic(
+        config=config.fact if config is not None else None,
+        balance=balance.fact if balance is not None else None,
+        now_ms=now_ms,
+        config_received_at=config.received_at if config is not None else None,
+        balance_received_at=balance.received_at if balance is not None else None,
+        max_age_ms=PREFLIGHT_MAX_AGE_MS, expected_uid=evidence.uid,
+        balance_uid=evidence.uid if balance is not None else None,
+    )
     result = evaluate_spot_order_preflight(
         config=config.fact if config is not None else None,
         balance=balance.fact if balance is not None else None,
@@ -27,6 +37,7 @@ def build_stored_spot_preflight(
         max_age_ms=PREFLIGHT_MAX_AGE_MS,
         expected_uid=evidence.uid,
         balance_uid=evidence.uid if balance is not None else None,
+        liability_free=liability_diagnostic.liability_free,
     )
     fee_diagnostic = evaluate_spot_fee_diagnostic(
         config=config.fact if config is not None else None,
@@ -40,7 +51,9 @@ def build_stored_spot_preflight(
         fee_uid=evidence.uid if trade_fee is not None else None,
     )
     # Unrounded scenarios cannot supply the preflight's fee_reserve evidence.
-    result = SpotPreflightResult(result.checks + fee_diagnostic.checks)
+    result = SpotPreflightResult(
+        result.checks + fee_diagnostic.checks + liability_diagnostic.checks,
+    )
 
     def provenance(observation):
         return None if observation is None else {
@@ -67,5 +80,12 @@ def build_stored_spot_preflight(
             "sign_convention": "positive_rebate_negative_commission",
         },
         "checks": [asdict(check) for check in result.checks],
+        "liability_diagnostic": {"coverage": "unknown"} | {
+            field: getattr(liability_diagnostic, field) for field in (
+                "observed_currency_count", "reported_liability_currency_count",
+                "negative_cash_currency_count", "uninterpretable_liability_field_count",
+                "uninterpretable_cash_field_count",
+            )
+        },
         "can_submit": result.can_submit, "can_activate": result.can_activate,
     }

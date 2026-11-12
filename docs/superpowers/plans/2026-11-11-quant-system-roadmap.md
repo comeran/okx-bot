@@ -29,6 +29,7 @@ Acceptance: explicit draft configuration persists without granting trading permi
 - [x] Bind persisted exact config/balance/instrument evidence to a read-only SPOT preflight API. One transaction validates store/UID binding, raw hashes and typed projections; latest missing or unsafe evidence never falls back. Responses expose bounded source provenance and checks. Fee/liability/reconciliation/sync proofs remain unknown and execution stays closed.
 - [x] Retain exact account SPOT trade-fee rates and nested fee-group observations through a single-response injected raw adapter and explicit collector. UID/account/request-symbol-bound append-only storage preserves signed strings, raw/hash/state integrity and original receipt time on replay. Rates alone do not prove fee coverage; no preflight blocker is removed.
 - [x] Explain group-bound ordinary SPOT maker/taker fees in the stored preflight API. Verified raw instrument groupId and latest request-symbol fee evidence determine signed, exact unrounded scenarios and charging currency under fresh UID-bound configuration. No root/category fallback; rounding/promotion coverage remains unknown and execution stays closed.
+- [x] Surface explicit balance liabilities/accrued interest across every returned currency and separate negative-cash shortfalls. Fresh UID-bound positive debt makes the existing liability gate fail; zero/empty/missing fields never prove account-wide liability freedom. Extended asset fields reconstruct from immutable full journals without a migration or historical rewrite; API exposes bounded counts only.
 - [ ] Integrate trusted preflight evidence with atomic funded allocations and runtime order enforcement. Derivatives require their own account/risk design before activation.
 - [ ] Atomically validate/activate a draft from trusted fresh exchange facts; refuse overlapping/excess allocation and unsafe runtime edits.
 
@@ -62,6 +63,8 @@ Persisted diagnostic bridge: `docs/superpowers/specs/2026-11-12-persisted-spot-p
 Fee acquisition evidence: `docs/superpowers/specs/2026-11-12-spot-trade-fee-facts-design.md` and `docs/superpowers/plans/2026-11-12-spot-trade-fee-facts-plan.md`. Raw rates alone do not prove coverage. The diagnostic slice below adds group/currency/freshness interpretation; reserves additionally require trusted rounding and promotion handling.
 
 Fee diagnostic evidence: `docs/superpowers/specs/2026-11-12-spot-fee-diagnostics-design.md` and `docs/superpowers/plans/2026-11-12-spot-fee-diagnostics-plan.md`. Group/currency/freshness interpretation is delivered as unrounded scenarios. Trusted fee rounding and promotion coverage, liability evidence and complete synchronization/reconciliation remain prerequisites for funded allocation and runtime integration.
+
+Liability diagnostic evidence: `docs/superpowers/specs/2026-11-12-spot-liability-diagnostics-design.md` and `docs/superpowers/plans/2026-11-12-spot-liability-diagnostics-plan.md`. Observed positive liabilities/interest now explicitly reject readiness; balance coverage and mode applicability are not certified, so absence remains unknown. Full synchronization/reconciliation, trusted fee coverage and funded runtime enforcement remain pending.
 
 ## Phase 3 — reconciliation, unknown outcomes and lifecycle recovery
 
