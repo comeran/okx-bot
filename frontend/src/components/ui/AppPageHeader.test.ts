@@ -5,7 +5,7 @@ import { mount, textContent } from '../../test-utils/mount';
 import AppPageHeader from './AppPageHeader.vue';
 
 describe('AppPageHeader', () => {
-  it('renders the page heading and action slot', async () => {
+  it('renders the primary page heading and action slot', async () => {
     const wrapper = await mount(defineComponent({
       setup() {
         return () => h(AppPageHeader, {
@@ -17,7 +17,7 @@ describe('AppPageHeader', () => {
       },
     }));
 
-    expect(textContent(wrapper.find((node) => node.type === 'h2'))).toBe('Strategy overview');
+    expect(textContent(wrapper.find((node) => node.type === 'h1'))).toBe('Strategy overview');
     expect(textContent(wrapper.find((node) => node.props.id === 'header-action'))).toBe('Refresh');
     expect(textContent(wrapper.find((node) => node.type === 'p' && node.props.class === 'app-page-header__description'))).toBe('Manage runtime strategy instances.');
 

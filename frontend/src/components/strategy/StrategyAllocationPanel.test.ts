@@ -1,8 +1,16 @@
+import { createPinia } from 'pinia';
+import { useAccountContextStore } from '@/stores/accountContext';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mount } from '@/test-utils/mount';
 import StrategyAllocationPanel from './StrategyAllocationPanel.vue';
 const api = vi.hoisted(() => ({
-  get: vi.fn(), save: vi.fn(), remove: vi.fn(), start: vi.fn(), activate: vi.fn(), release: vi.fn(),
+  get: vi.fn(),
+  save: vi.fn(),
+  remove: vi.fn(),
+  start: vi.fn(),
+  activate: vi.fn(),
+  release: vi.fn(),
+  readiness: vi.fn(),
 }));
 vi.mock('@/services/strategyAllocations', () => ({
   getStrategyAllocation: api.get,
@@ -10,10 +18,17 @@ vi.mock('@/services/strategyAllocations', () => ({
   deleteStrategyAllocation: api.remove,
   activateStrategyAllocation: api.activate,
   releaseStrategyAllocation: api.release,
+  getStrategyAllocationReadiness: api.readiness,
 }));
 vi.mock('@/services/strategies', () => ({ startStrategy: api.start }));
+function executionContext(id = 'execution-a') {
+  return { account_scope_id: id, exchange: 'okx' as const, environment: 'sandbox' as const,
+    market_type: 'spot', available: true, reason: null, identity_verified: false as const, execution_ready: false as const };
+}
+let accountStore: ReturnType<typeof useAccountContextStore>;
 function envelope(name = 'alpha', changes: Record<string, unknown> = {}) {
   return {
+    execution_context: executionContext(),
     context: { available: true, reason: null, scope_id: 'sandbox-account', exchange: 'okx', environment: 'sandbox', account_fingerprint: 'abc123', identity_verified: false, market_type: 'spot', execution_mode: 'paper', draft_only: true, execution_ready: false },
     strategy: name, symbol: 'BTC-USDT', currency: 'USDT', lifecycle_status: 'stopped', can_edit: true,
     draft: { strategy: name, symbol: 'BTC-USDT', currency: 'USDT', budget: 100, revision: 2, status: 'draft', scope_id: 'sandbox-account', environment: 'sandbox', account_fingerprint: 'abc123', market_type: 'spot', created_at: 1, updated_at: 2 },
@@ -22,11 +37,15 @@ function envelope(name = 'alpha', changes: Record<string, unknown> = {}) {
 }
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((yes) => { resolve = yes; });
-  return { promise, resolve };
+  let reject!: (cause: unknown) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
 }
 async function mounted(strategyName = 'alpha') {
-  const wrapper = await mount(StrategyAllocationPanel, { locale: 'en', props: { strategyName } });
+  const pinia = createPinia();
+  accountStore = useAccountContextStore(pinia);
+  accountStore.context = executionContext();
+  const wrapper = await mount(StrategyAllocationPanel, { locale: 'en', plugins: [pinia], props: { strategyName } });
   for (let i = 0; i < 4; i += 1) await wrapper.flush();
   return wrapper;
 }
@@ -36,6 +55,7 @@ async function budget(wrapper: Awaited<ReturnType<typeof mounted>>, value: strin
 beforeEach(() => {
   vi.resetAllMocks();
   api.get.mockResolvedValue(envelope());
+  api.readiness.mockResolvedValue({ execution_context: executionContext(), allocation_scope_id: 'sandbox-account', draft_revision: 2, strategy: 'alpha', symbol: 'BTC-USDT', currency: 'USDT', budget: '100', evaluated_at: 1, capacity: { observed_quote_available: null, proposed_total: '100', comparison: 'unavailable', trusted: false }, ledger: null, checks: [], can_activate: false, execution_ready: false });
   api.save.mockResolvedValue(envelope());
   api.remove.mockResolvedValue(envelope('alpha', { draft: null }));
 });
@@ -47,8 +67,10 @@ describe('StrategyAllocationPanel', () => {
     wrapper.unmount();
   });
   it('shows actual exchange routing separately from its live environment', async () => {
-    api.get.mockResolvedValue(envelope('alpha', { context: { ...envelope().context, environment: 'live', execution_mode: 'live' } }));
+    api.get.mockResolvedValue(envelope('alpha', { context: { ...envelope().context, environment: 'live', execution_mode: 'live' }, execution_context: { ...executionContext(), environment: 'live' } }));
     const wrapper = await mounted();
+    accountStore.context = { ...executionContext(), environment: 'live' };
+    for (let i = 0; i < 4; i += 1) await wrapper.flush();
     expect(wrapper.text()).toContain('OKX live');
     expect(wrapper.text()).toContain('Exchange routing');
     expect(wrapper.text()).toContain('Live activation stays closed');
@@ -210,4 +232,100 @@ describe('StrategyAllocationPanel', () => {
     expect(wrapper.text()).toContain('Local budget released');
     wrapper.unmount();
   });
+  it('evaluates only the saved budget while the input has unsaved edits', async () => {
+    const wrapper = await mounted();
+    const calls = api.readiness.mock.calls.length;
+    await budget(wrapper, '999');
+    expect(api.readiness.mock.calls.length).toBe(calls);
+    expect(wrapper.text()).toContain('Saved draft only');
+    expect(wrapper.text()).toContain('100 USDT');
+    wrapper.unmount();
+  });
+  it('clears the envelope immediately when account authority is invalidated', async () => {
+    const wrapper = await mounted();
+    accountStore.invalidate();
+    await wrapper.flush();
+    expect(wrapper.text()).not.toContain('abc123');
+    expect(wrapper.findAll((node) => node.props['data-testid'] === 'allocation-save')).toHaveLength(0);
+    wrapper.unmount();
+  });
+  it.each(['get', 'save', 'remove'])('ignores an old %s completion through account A to B to A', async (operation) => {
+    const stale = deferred<ReturnType<typeof envelope>>();
+    if (operation === 'get') api.get.mockReturnValueOnce(stale.promise);
+    const wrapper = await mounted();
+    if (operation === 'save') {
+      api.save.mockReturnValueOnce(stale.promise);
+      void wrapper.trigger(wrapper.getByTestId('allocation-form'), 'submit');
+    } else if (operation === 'remove') {
+      api.remove.mockReturnValueOnce(stale.promise);
+      void wrapper.trigger(wrapper.getByTestId('allocation-delete'), 'click');
+    }
+    api.get.mockResolvedValue(envelope('alpha', { draft: { ...envelope().draft, budget: 333, revision: 4 } }));
+    accountStore.invalidate();
+    accountStore.context = executionContext('execution-b');
+    accountStore.invalidate();
+    accountStore.context = executionContext();
+    for (let i = 0; i < 5; i += 1) await wrapper.flush();
+    stale.resolve(envelope('alpha', { draft: { ...envelope().draft, budget: 999 } }));
+    for (let i = 0; i < 5; i += 1) await wrapper.flush();
+    expect(wrapper.getByTestId('allocation-budget').props.value).toBe('333');
+    wrapper.unmount();
+  });
+  it('rejects a draft envelope for another account rather than enabling edits', async () => {
+    api.get.mockResolvedValue(envelope('alpha', { execution_context: executionContext('different') }));
+    const wrapper = await mounted();
+    expect(wrapper.text()).not.toContain('abc123');
+    expect(wrapper.text()).toContain('Could not load');
+    wrapper.unmount();
+  });
+
+  it.each(['get', 'save', 'remove'])('ignores stale %s error/finally while the current account draft is loading', async (operation) => {
+    const old = deferred<ReturnType<typeof envelope>>();
+    const current = deferred<ReturnType<typeof envelope>>();
+    if (operation === 'get') api.get.mockReturnValueOnce(old.promise);
+    const wrapper = await mounted();
+    if (operation === 'save') {
+      api.save.mockReturnValueOnce(old.promise);
+      void wrapper.trigger(wrapper.getByTestId('allocation-form'), 'submit');
+    } else if (operation === 'remove') {
+      api.remove.mockReturnValueOnce(old.promise);
+      void wrapper.trigger(wrapper.getByTestId('allocation-delete'), 'click');
+    }
+    api.get.mockReturnValue(current.promise);
+    accountStore.invalidate(); accountStore.context = executionContext();
+    old.reject({ response: { status: 409, data: { detail: { message: 'obsolete failure' } } } });
+    for (let i = 0; i < 5; i += 1) await wrapper.flush();
+    expect(wrapper.text()).not.toContain('obsolete failure');
+    expect(wrapper.getByTestId('allocation-refresh').props.disabled).toBe(true);
+    current.resolve(envelope());
+    for (let i = 0; i < 5; i += 1) await wrapper.flush();
+    expect(wrapper.getByTestId('allocation-save').props.disabled).toBe(false);
+    wrapper.unmount();
+  });
+  it('keeps no-credentials draft display but never requests readiness or enables edit', async () => {
+    const wrapper = await mounted();
+    const unavailable = { ...executionContext(), available: false, account_scope_id: null, reason: 'credentials_unavailable' };
+    api.get.mockResolvedValue(envelope('alpha', { execution_context: unavailable,
+      context: { ...envelope().context, available: false, scope_id: null, account_fingerprint: null, reason: 'credentials_unavailable' }, draft: null, can_edit: false }));
+    const readinessCalls = api.readiness.mock.calls.length;
+    accountStore.invalidate(); accountStore.context = unavailable;
+    for (let i = 0; i < 5; i += 1) await wrapper.flush();
+    expect(wrapper.text()).toContain('Configure OKX credentials');
+    expect(wrapper.getByTestId('allocation-save').props.disabled).toBe(true);
+    expect(api.readiness.mock.calls.length).toBe(readinessCalls);
+    wrapper.unmount();
+  });
+
+  it('reloads when the saved strategy symbol changes while name and lifecycle stay the same', async () => {
+    const wrapper = await mounted();
+    await wrapper.updateProps({ strategySymbol: 'BTC-USDT' });
+    api.get.mockResolvedValue(envelope('alpha', { symbol: 'ETH-USDT', draft: { ...envelope().draft, symbol: 'BTC-USDT' } }));
+    const previous = api.get.mock.calls.length;
+    await wrapper.updateProps({ strategySymbol: 'ETH-USDT' });
+    for (let i = 0; i < 4; i += 1) await wrapper.flush();
+    expect(api.get.mock.calls.length).toBeGreaterThan(previous);
+    expect(wrapper.text()).toContain('ETH-USDT');
+    wrapper.unmount();
+  });
+
 });

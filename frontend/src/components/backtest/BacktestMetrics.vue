@@ -104,7 +104,7 @@ const hasMetrics = computed(() => Boolean(props.metrics));
   }
 }
 
-@media (max-width: 767px) {
+@media (max-width: 359px) {
   .backtest-metrics__grid {
     grid-template-columns: 1fr;
   }

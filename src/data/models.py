@@ -4,7 +4,7 @@ from dataclasses import asdict
 from typing import Any
 
 from pydantic import PrivateAttr, field_validator, model_validator
-from sqlalchemy import JSON, Column
+from sqlalchemy import DDL, JSON, CheckConstraint, Column, Text, UniqueConstraint, event
 from sqlmodel import Field, SQLModel
 
 from src.core.types import (
@@ -93,6 +93,499 @@ def normalize_account_assets(assets: object) -> list[dict[str, Any]]:
             item["upl"] = _finite_or_zero(item["upl"])
         normalized.append(item)
     return normalized
+
+
+class PrivateUIDBindingRecord(SQLModel, table=True):
+    """Provider UID observed for precisely one immutable account scope."""
+
+    __tablename__ = "private_uid_binding"
+    __table_args__ = (
+        CheckConstraint("length(uid) BETWEEN 1 AND 256", name="ck_private_uid_length"),
+        CheckConstraint("first_seen_at >= 0", name="ck_private_uid_first_seen"),
+    )
+
+    account_scope_id: str = Field(primary_key=True)
+    uid: str
+    first_seen_at: int
+    provider: str | None = None
+
+
+# Block direct UPDATE/DELETE and SQLite REPLACE, not merely API rebind attempts.
+for _action in ("UPDATE", "DELETE", "INSERT"):
+    _condition = (
+        " WHEN EXISTS (SELECT 1 FROM private_uid_binding "
+        "WHERE account_scope_id = NEW.account_scope_id)" if _action == "INSERT" else ""
+    )
+    event.listen(
+        PrivateUIDBindingRecord.__table__, "after_create",
+        DDL(
+            f"CREATE TRIGGER private_uid_no_{_action.lower()} BEFORE {_action} "
+            f"ON private_uid_binding{_condition} "
+            "BEGIN SELECT RAISE(ABORT, 'immutable private UID binding'); END"
+        ).execute_if(dialect="sqlite"),
+    )
+
+
+class PrivateAccountConfigRecord(SQLModel, table=True):
+    """Append-only API observations, without trading or activation authority."""
+
+    __tablename__ = "private_account_config"
+    __table_args__ = (
+        CheckConstraint("received_at >= 0", name="ck_private_config_received"),
+        *(CheckConstraint(
+            f"({name}_state IN ('missing','null') AND {name} IS NULL) OR "
+            f"({name}_state = 'value' AND {name} IS NOT NULL)",
+            name=f"ck_private_config_{name}_state",
+        ) for name in (
+            "acct_lv", "acct_stp_mode", "pos_mode", "auto_loan", "enable_spot_borrow",
+            "fee_type", "settle_ccy", "main_uid",
+        )),
+    )
+
+    account_scope_id: str = Field(primary_key=True)
+    uid: str = Field(primary_key=True)
+    payload_hash: str = Field(primary_key=True)
+    received_at: int
+    raw_json: str = Field(sa_column=Column(Text, nullable=False))
+    acct_lv: str | None = None
+    acct_lv_state: str
+    acct_stp_mode: str | None = None
+    acct_stp_mode_state: str
+    pos_mode: str | None = None
+    pos_mode_state: str
+    auto_loan: str | None = None
+    auto_loan_state: str
+    enable_spot_borrow: str | None = None
+    enable_spot_borrow_state: str
+    fee_type: str | None = None
+    fee_type_state: str
+    settle_ccy: str | None = None
+    settle_ccy_state: str
+    main_uid: str | None = None
+    main_uid_state: str
+
+
+class PrivateAccountBalanceRecord(SQLModel, table=True):
+    """Append-only raw balances; USD equity never represents USDT cash."""
+
+    __tablename__ = "private_account_balance"
+    __table_args__ = (
+        CheckConstraint("received_at >= 0", name="ck_private_balance_received"),
+        *(CheckConstraint(
+            f"({name}_state IN ('missing','null') AND {name} IS NULL) OR "
+            f"({name}_state = 'value' AND {name} IS NOT NULL)",
+            name=f"ck_private_balance_{name}_state",
+        ) for name in ("total_eq", "adj_eq", "avail_eq", "u_time")),
+    )
+
+    account_scope_id: str = Field(primary_key=True)
+    uid: str = Field(primary_key=True)
+    payload_hash: str = Field(primary_key=True)
+    received_at: int
+    raw_json: str = Field(sa_column=Column(Text, nullable=False))
+    details_json: str = Field(sa_column=Column(Text, nullable=False))
+    total_eq: str | None = None
+    total_eq_state: str
+    adj_eq: str | None = None
+    adj_eq_state: str
+    avail_eq: str | None = None
+    avail_eq_state: str
+    u_time: str | None = None
+    u_time_state: str
+
+
+# Keep audit observations append-only, including INSERT OR REPLACE collisions.
+for _action in ("UPDATE", "DELETE", "INSERT"):
+    _condition = (
+        " WHEN EXISTS (SELECT 1 FROM private_account_balance "
+        "WHERE account_scope_id = NEW.account_scope_id AND uid = NEW.uid "
+        "AND payload_hash = NEW.payload_hash)" if _action == "INSERT" else ""
+    )
+    event.listen(
+        PrivateAccountBalanceRecord.__table__, "after_create",
+        DDL(
+            f"CREATE TRIGGER private_balance_no_{_action.lower()} BEFORE {_action} "
+            f"ON private_account_balance{_condition} "
+            "BEGIN SELECT RAISE(ABORT, 'append-only private balance observation'); END"
+        ).execute_if(dialect="sqlite"),
+    )
+
+
+class PrivateSpotTradeFeeRecord(SQLModel, table=True):
+    """Raw account fee observations, bound to their requested SPOT instrument."""
+
+    __tablename__ = "private_spot_trade_fee"
+    __table_args__ = (
+        CheckConstraint("received_at >= 0", name="ck_spot_trade_fee_received"),
+        CheckConstraint("inst_type = 'SPOT'", name="ck_spot_trade_fee_type"),
+        CheckConstraint("length(payload_hash) = 64", name="ck_spot_trade_fee_hash"),
+        CheckConstraint("length(requested_inst_id) BETWEEN 1 AND 256",
+                        name="ck_spot_trade_fee_request"),
+        CheckConstraint("length(CAST(raw_json AS BLOB)) <= 4194304",
+                        name="ck_spot_trade_fee_raw_size"),
+        *(CheckConstraint(
+            f"({name}_state IN ('missing','null') AND {name} IS NULL) OR "
+            f"({name}_state = 'value' AND {name} IS NOT NULL)",
+            name=f"ck_spot_trade_fee_{name}_state",
+        ) for name in ("level", "maker", "taker", "maker_usdc", "taker_usdc",
+                       "ts", "rule_type", "category")),
+        CheckConstraint(
+            "(fee_group_state IN ('missing','null') AND fee_group_json IS NULL) OR "
+            "(fee_group_state = 'value' AND fee_group_json IS NOT NULL)",
+            name="ck_spot_trade_fee_group_state",
+        ),
+    )
+
+    account_scope_id: str = Field(primary_key=True)
+    uid: str = Field(primary_key=True)
+    requested_inst_id: str = Field(primary_key=True)
+    payload_hash: str = Field(primary_key=True)
+    inst_type: str
+    received_at: int
+    raw_json: str = Field(sa_column=Column(Text, nullable=False))
+    level: str | None = None
+    level_state: str
+    maker: str | None = None
+    maker_state: str
+    taker: str | None = None
+    taker_state: str
+    maker_usdc: str | None = None
+    maker_usdc_state: str
+    taker_usdc: str | None = None
+    taker_usdc_state: str
+    ts: str | None = None
+    ts_state: str
+    rule_type: str | None = None
+    rule_type_state: str
+    category: str | None = None
+    category_state: str
+    fee_group_json: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
+    fee_group_state: str
+
+
+class PrivateSpotOrderRecord(SQLModel, table=True):
+    """Append-only exact SPOT order-detail observations."""
+
+    __tablename__ = "private_spot_order"
+    __table_args__ = (
+        CheckConstraint("inst_type = 'SPOT'", name="ck_spot_order_type"),
+        CheckConstraint("received_at >= 0", name="ck_spot_order_received"),
+        CheckConstraint("length(payload_hash) = 64", name="ck_spot_order_hash"),
+        CheckConstraint("length(CAST(raw_json AS BLOB)) <= 4194304",
+                        name="ck_spot_order_raw_size"),
+        CheckConstraint("lookup_kind IN ('ordId','clOrdId')", name="ck_spot_order_lookup_kind"),
+        CheckConstraint("length(lookup_value) BETWEEN 1 AND 256",
+                        name="ck_spot_order_lookup_value"),
+        CheckConstraint("length(requested_inst_id) BETWEEN 1 AND 256",
+                        name="ck_spot_order_request"),
+        *(CheckConstraint(
+            f"({name}_state IN ('missing','null') AND {name} IS NULL) OR "
+            f"({name}_state = 'value' AND {name} IS NOT NULL)",
+            name=f"ck_spot_order_{name}_state",
+        ) for name in (
+            "cl_ord_id", "tag", "px", "acc_fill_sz", "avg_px", "fill_time",
+            "trade_id", "fee", "fee_ccy", "cancel_source", "cancel_source_reason",
+            "rebate", "rebate_ccy",
+        )),
+    )
+
+    account_scope_id: str = Field(primary_key=True)
+    uid: str = Field(primary_key=True)
+    requested_inst_id: str = Field(primary_key=True)
+    lookup_kind: str = Field(primary_key=True)
+    lookup_value: str = Field(primary_key=True)
+    payload_hash: str = Field(primary_key=True)
+    inst_type: str
+    received_at: int
+    raw_json: str = Field(sa_column=Column(Text, nullable=False))
+    inst_id: str
+    ord_id: str
+    ord_id_state: str = "value"
+    cl_ord_id: str | None = None
+    cl_ord_id_state: str
+    tag: str | None = None
+    tag_state: str
+    side: str
+    ord_type: str
+    px: str | None = None
+    px_state: str
+    sz: str
+    acc_fill_sz: str | None = None
+    acc_fill_sz_state: str
+    avg_px: str | None = None
+    avg_px_state: str
+    state: str
+    c_time: str
+    u_time: str
+    fill_time: str | None = None
+    fill_time_state: str
+    trade_id: str | None = None
+    trade_id_state: str
+    fee: str | None = None
+    fee_state: str
+    fee_ccy: str | None = None
+    fee_ccy_state: str
+    cancel_source: str | None = None
+    cancel_source_state: str
+    cancel_source_reason: str | None = None
+    cancel_source_reason_state: str
+    rebate: str | None = None
+    rebate_state: str
+    rebate_ccy: str | None = None
+    rebate_ccy_state: str
+
+
+for _action in ("UPDATE", "DELETE", "INSERT"):
+    _condition = (
+        " WHEN EXISTS (SELECT 1 FROM private_spot_order "
+        "WHERE account_scope_id = NEW.account_scope_id AND uid = NEW.uid "
+        "AND requested_inst_id = NEW.requested_inst_id AND lookup_kind = NEW.lookup_kind "
+        "AND lookup_value = NEW.lookup_value AND payload_hash = NEW.payload_hash)"
+        if _action == "INSERT" else ""
+    )
+    event.listen(
+        PrivateSpotOrderRecord.__table__, "after_create",
+        DDL(
+            f"CREATE TRIGGER private_spot_order_no_{_action.lower()} BEFORE {_action} "
+            f"ON private_spot_order{_condition} "
+            "BEGIN SELECT RAISE(ABORT, 'append-only spot order observation'); END"
+        ).execute_if(dialect="sqlite"),
+    )
+
+
+for _action in ("UPDATE", "DELETE", "INSERT"):
+    _condition = (
+        " WHEN EXISTS (SELECT 1 FROM private_spot_trade_fee "
+        "WHERE account_scope_id = NEW.account_scope_id AND uid = NEW.uid "
+        "AND requested_inst_id = NEW.requested_inst_id AND payload_hash = NEW.payload_hash)"
+        if _action == "INSERT" else ""
+    )
+    event.listen(
+        PrivateSpotTradeFeeRecord.__table__, "after_create",
+        DDL(
+            f"CREATE TRIGGER private_spot_trade_fee_no_{_action.lower()} BEFORE {_action} "
+            f"ON private_spot_trade_fee{_condition} "
+            "BEGIN SELECT RAISE(ABORT, 'append-only spot trade fee observation'); END"
+        ).execute_if(dialect="sqlite"),
+    )
+
+
+class PrivateSpotInstrumentResponseRecord(SQLModel, table=True):
+    """One bounded raw public response, retained once within an account scope."""
+
+    __tablename__ = "private_spot_instrument_response"
+    __table_args__ = (
+        CheckConstraint("received_at >= 0", name="ck_instrument_response_received"),
+        CheckConstraint("length(payload_hash) = 64", name="ck_instrument_response_hash"),
+        CheckConstraint("length(CAST(raw_json AS BLOB)) <= 4194304",
+                        name="ck_instrument_response_size"),
+    )
+
+    account_scope_id: str = Field(primary_key=True)
+    payload_hash: str = Field(primary_key=True)
+    received_at: int
+    raw_json: str = Field(sa_column=Column(Text, nullable=False))
+
+
+class PrivateSpotInstrumentRecord(SQLModel, table=True):
+    """Append-only public rule evidence; no UID, freshness or trading authority.
+
+    Raw JSON lives in the response table. Repository reads attach that immutable
+    text to detached values so callers need no open storage session.
+    """
+
+    __tablename__ = "private_spot_instrument"
+    __table_args__ = (
+        CheckConstraint("received_at >= 0", name="ck_spot_instrument_received"),
+        CheckConstraint("length(payload_hash) = 64", name="ck_spot_instrument_hash"),
+        CheckConstraint("inst_id = base_ccy || '-' || quote_ccy",
+                        name="ck_spot_instrument_currencies"),
+        *(CheckConstraint(
+            f"length({name}) BETWEEN 1 AND 128", name=f"ck_spot_instrument_{name}_length",
+        ) for name in ("tick_sz", "lot_sz", "min_sz")),
+        *(CheckConstraint(
+            f"({name}_state IN ('missing','null') AND {name} IS NULL) OR "
+            f"({name}_state = 'value' AND {name} IS NOT NULL AND length({name}) <= 256)",
+            name=f"ck_spot_instrument_{name}_state",
+        ) for name in (
+            "state", "rule_type", "trade_quote_ccy", "max_lmt_sz", "max_mkt_sz", "lever",
+        )),
+    )
+
+    account_scope_id: str = Field(primary_key=True)
+    payload_hash: str = Field(primary_key=True)
+    inst_id: str = Field(primary_key=True)
+    received_at: int
+    base_ccy: str
+    quote_ccy: str
+    tick_sz: str
+    lot_sz: str
+    min_sz: str
+    state: str | None = None
+    state_state: str
+    rule_type: str | None = None
+    rule_type_state: str
+    trade_quote_ccy: str | None = None
+    trade_quote_ccy_state: str
+    max_lmt_sz: str | None = None
+    max_lmt_sz_state: str
+    max_mkt_sz: str | None = None
+    max_mkt_sz_state: str
+    lever: str | None = None
+    lever_state: str
+    _raw_json: str = PrivateAttr(default="")
+
+    @property
+    def raw_json(self) -> str:
+        return self._raw_json
+
+
+event.listen(
+    PrivateSpotInstrumentRecord.__table__, "after_create",
+    DDL(
+        "CREATE TRIGGER private_spot_instrument_response_required BEFORE INSERT "
+        "ON private_spot_instrument WHEN NOT EXISTS "
+        "(SELECT 1 FROM private_spot_instrument_response "
+        "WHERE account_scope_id = NEW.account_scope_id AND payload_hash = NEW.payload_hash "
+        "AND received_at = NEW.received_at) "
+        "BEGIN SELECT RAISE(ABORT, 'spot instrument response mismatch'); END"
+    ).execute_if(dialect="sqlite"),
+)
+
+
+# Prevent UPDATE/DELETE and SQLite REPLACE collisions for rows and raw evidence.
+for _model in (PrivateSpotInstrumentResponseRecord, PrivateSpotInstrumentRecord):
+    _table_name = _model.__tablename__
+    for _action in ("UPDATE", "DELETE", "INSERT"):
+        _identity = " AND ".join(
+            f"{column.name} = NEW.{column.name}" for column in _model.__table__.primary_key
+        )
+        _condition = (
+            f" WHEN EXISTS (SELECT 1 FROM {_table_name} WHERE {_identity})"
+            if _action == "INSERT" else ""
+        )
+        event.listen(
+            _model.__table__, "after_create",
+            DDL(
+                f"CREATE TRIGGER {_table_name}_no_{_action.lower()} BEFORE {_action} "
+                f"ON {_table_name}{_condition} "
+                "BEGIN SELECT RAISE(ABORT, 'append-only spot instrument evidence'); END"
+            ).execute_if(dialect="sqlite"),
+        )
+
+
+class ExactSpotFillRecord(SQLModel, table=True):
+    """Exact provider text. Optional state distinguishes absent, null and value."""
+
+    __tablename__ = "exact_spot_fill"
+    __table_args__ = (
+        CheckConstraint("side IN ('buy','sell')", name="ck_exact_fill_side"),
+        *(CheckConstraint(
+            f"({name}_state IN ('missing','null') AND {name} IS NULL) OR "
+            f"({name}_state = 'value' AND {name} IS NOT NULL)",
+            name=f"ck_exact_fill_{name}_state",
+        ) for name in ("cl_ord_id", "fee", "fee_ccy")),
+    )
+
+    account_scope_id: str = Field(primary_key=True)
+    uid: str = Field(primary_key=True)
+    bill_id: str = Field(primary_key=True)
+    symbol: str
+    inst_id: str
+    trade_id: str
+    ord_id: str
+    side: str
+    fill_sz: str
+    fill_px: str
+    fill_time: str
+    record_time: str
+    cl_ord_id: str | None = None
+    cl_ord_id_state: str
+    fee: str | None = None
+    fee_state: str
+    fee_ccy: str | None = None
+    fee_ccy_state: str
+
+
+class ExactSpotFillPageRecord(SQLModel, table=True):
+    """One raw response and explicit traversal filters, never a sync receipt."""
+
+    __tablename__ = "exact_spot_fill_page"
+    __table_args__ = (
+        CheckConstraint("inst_type = 'SPOT'", name="ck_exact_page_spot"),
+        CheckConstraint(
+            "coverage IN ('unknown','partial','complete')", name="ck_exact_page_coverage",
+        ),
+        CheckConstraint("received_at >= 0", name="ck_exact_page_received"),
+    )
+
+    page_id: str = Field(primary_key=True)
+    traversal_id: str = Field(index=True)
+    account_scope_id: str = Field(index=True)
+    uid: str
+    endpoint: str
+    inst_type: str = "SPOT"
+    inst_id: str | None = None
+    requested_before: str | None = None
+    requested_after: str | None = None
+    next_after: str | None = None
+    coverage: str
+    received_at: int
+    payload_hash: str
+    raw_json: str = Field(sa_column=Column(Text, nullable=False))
+
+
+class ExactSpotFillCursorRecord(SQLModel, table=True):
+    """CAS version for one explicit traversal; paging proves no completeness."""
+
+    __tablename__ = "exact_spot_fill_cursor"
+    __table_args__ = (
+        CheckConstraint("inst_type = 'SPOT'", name="ck_exact_cursor_spot"),
+        CheckConstraint("version > 0", name="ck_exact_cursor_version"),
+        CheckConstraint("complete = 0", name="ck_exact_cursor_incomplete"),
+    )
+
+    traversal_id: str = Field(primary_key=True)
+    account_scope_id: str = Field(index=True)
+    uid: str
+    endpoint: str
+    inst_type: str = "SPOT"
+    inst_id: str | None = None
+    requested_before: str | None = None
+    version: int
+    next_after: str | None = None
+    complete: bool = False
+
+
+class PrivateSyncReceiptRecord(SQLModel, table=True):
+    """Bounded synchronization audit; never exact financial or execution evidence."""
+
+    __tablename__ = "private_sync_receipt"
+    __table_args__ = (
+        UniqueConstraint("attempt_id", name="uq_private_sync_attempt"),
+        UniqueConstraint("generation", name="uq_private_sync_generation"),
+        CheckConstraint(
+            "state IN ('in_progress','committed','partial','failed','abandoned')",
+            name="ck_private_sync_state",
+        ),
+        CheckConstraint("generation > 0", name="ck_private_sync_generation"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    attempt_id: str = Field(index=True)
+    generation: int = Field(index=True)
+    account_scope_id: str = Field(index=True)
+    state: str = Field(default="in_progress", index=True)
+    symbols: list[str] | None = Field(default=None, sa_column=Column(JSON, nullable=True))
+    since: int | None = None
+    limit: int
+    started_at: int
+    completed_at: int | None = None
+    received_at: int | None = None
+    parts: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
+    cursor: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
+    result: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
+    error_code: str | None = None
 
 
 class AccountRecord(SQLModel, table=True):

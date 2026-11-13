@@ -6,6 +6,8 @@ import { withApiToken } from '@/services/apiToken';
 interface UseWebSocketOptions {
   onMessage?: (message: DashboardWebSocketMessage) => void;
   reconnectDelayMs?: number;
+  reconnect?: boolean;
+  onClose?: () => void;
 }
 
 const LOCAL_MESSAGE_HISTORY_LIMIT = 20;
@@ -16,7 +18,7 @@ function resolveWebSocketUrl(path: string): string {
   return `${protocol}//${window.location.host}${path}`;
 }
 
-export function useWebSocket(path = '/ws', options: UseWebSocketOptions = {}) {
+export function useWebSocket(path: string | (() => string | null) = '/ws', options: UseWebSocketOptions = {}) {
   const connected = ref(false);
   const messages = ref<DashboardWebSocketMessage[]>([]);
   const reconnectDelayMs = options.reconnectDelayMs ?? DEFAULT_RECONNECT_DELAY_MS;
@@ -34,6 +36,7 @@ export function useWebSocket(path = '/ws', options: UseWebSocketOptions = {}) {
   const disconnect = () => {
     manuallyDisconnected = true;
     clearReconnectTimer();
+    messages.value = [];
     if (!socket) {
       connected.value = false;
       return;
@@ -51,7 +54,9 @@ export function useWebSocket(path = '/ws', options: UseWebSocketOptions = {}) {
       return;
     }
 
-    const currentSocket = new WebSocket(resolveWebSocketUrl(withApiToken(path)));
+    const currentPath = typeof path === 'function' ? path() : path;
+    if (!currentPath) return;
+    const currentSocket = new WebSocket(resolveWebSocketUrl(withApiToken(currentPath)));
     socket = currentSocket;
 
     currentSocket.onopen = () => {
@@ -63,7 +68,8 @@ export function useWebSocket(path = '/ws', options: UseWebSocketOptions = {}) {
       if (socket !== currentSocket) return;
       connected.value = false;
       socket = null;
-      if (!manuallyDisconnected) {
+      options.onClose?.();
+      if (!manuallyDisconnected && options.reconnect !== false) {
         reconnectTimer = window.setTimeout(connect, reconnectDelayMs);
       }
     };
@@ -74,6 +80,7 @@ export function useWebSocket(path = '/ws', options: UseWebSocketOptions = {}) {
     };
 
     currentSocket.onmessage = (event) => {
+      if (socket !== currentSocket) return;
       const receivedAt = Date.now();
       try {
         const message = {

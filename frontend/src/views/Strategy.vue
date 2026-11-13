@@ -501,6 +501,7 @@ onMounted(() => {
     <StrategyAllocationPanel
       v-if="mode === 'edit' && selectedName && configByName(selectedName)"
       :strategy-name="selectedName"
+      :strategy-symbol="configByName(selectedName)?.symbol"
       :status="selectedStatus ?? 'unknown'"
     />
   </section>
@@ -508,11 +509,14 @@ onMounted(() => {
 
 <style scoped>
 .strategy-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-16);
   min-width: 0;
 }
 
 .strategy-page__alert {
-  margin-bottom: var(--ui-space-16);
+  min-width: 0;
 }
 
 .strategy-page__content {

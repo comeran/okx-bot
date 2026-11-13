@@ -154,6 +154,15 @@ class AllocationStore:
             record = self._record(session, scope, strategy)
             return _draft(record) if record is not None and not record.deleted else None
 
+    def list_drafts(self, scope: AllocationScope) -> list[AllocationDraft]:
+        """Read one detached, same-scope snapshot of active proposals."""
+        with Session(self.engine) as session:
+            records = session.exec(select(AllocationDraftRecord).where(
+                AllocationDraftRecord.scope_id == scope.scope_id,
+                AllocationDraftRecord.deleted.is_(False),
+            ).order_by(AllocationDraftRecord.strategy)).all()
+            return [_draft(record) for record in records]
+
     @staticmethod
     def _record(session: Session, scope: AllocationScope, strategy: str):
         return session.exec(select(AllocationDraftRecord).where(

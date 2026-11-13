@@ -156,4 +156,48 @@ describe('BacktestResultsTable', () => {
 
     expect(emptyWrapper.text()).toContain('No backtest results yet.');
   });
+
+  it('distinguishes history errors from empty data and retries only this table', async () => {
+    const onRefresh = vi.fn();
+    const wrapper = await mount(BacktestResultsTable, {
+      locale: 'en',
+      components: elComponents,
+      props: {
+        results: [],
+        selectedResultId: null,
+        error: 'Could not load backtest history. Retry to refresh.',
+        onRefresh,
+      },
+    });
+
+    const alert = wrapper.find((node) => node.props.role === 'alert');
+    expect(wrapper.text()).toContain('Could not load backtest history. Retry to refresh.');
+    expect(wrapper.text()).not.toContain('No backtest results yet.');
+    expect(alert).toBeDefined();
+    const retry = wrapper.find((node) => node.type === 'button' && node.props['aria-label'] === 'Retry');
+    await wrapper.invoke(retry, 'onClick');
+    expect(onRefresh).toHaveBeenCalledTimes(1);
+  });
+
+  it('labels stale history while keeping its selected record and actions usable', async () => {
+    const onSelectResult = vi.fn();
+    const wrapper = await mount(BacktestResultsTable, {
+      locale: 'en',
+      components: elComponents,
+      props: {
+        results,
+        selectedResultId: 'result-a',
+        error: 'Could not load backtest history. Retry to refresh.',
+        stale: true,
+        onSelectResult,
+      },
+    });
+
+    expect(wrapper.text()).toContain('Stale data');
+    expect(wrapper.text()).toContain('Could not load backtest history. Retry to refresh.');
+    const table = wrapper.find((node) => node.type === 'el-table');
+    expect(table.props.currentRowKey ?? table.props['current-row-key']).toBe('result-a');
+    await wrapper.invoke(table, 'onRowClick', results[0], {}, {});
+    expect(onSelectResult).toHaveBeenCalledWith('result-a');
+  });
 });

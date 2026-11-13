@@ -14,6 +14,7 @@ from src.core.config import (
     WebConfig,
 )
 from src.core.runtime_settings import load_runtime_settings, save_runtime_settings
+from src.web.exchange_auth import probe_saved_exchange_auth
 
 MarketType = Literal["spot", "swap", "future", "futures", "option", "options"]
 RuntimeMode = Literal["backtest", "paper", "demo", "live"]
@@ -185,13 +186,21 @@ def _save_settings(settings: SettingsUpdate) -> None:
     save_runtime_settings(_config_from_settings(settings))
 
 
-def create_router() -> APIRouter:
+def create_router(broadcast=None) -> APIRouter:
     router = APIRouter()
     settings = _load_settings()
 
     @router.get("")
     async def get_settings() -> dict[str, object]:
         return _serialize_settings(settings)
+
+    @router.post("/exchange-auth")
+    async def exchange_auth(
+        expected_account_scope_id: str | None = None,
+    ) -> dict[str, object]:
+        return await probe_saved_exchange_auth(
+            load_runtime_settings, expected_account_scope_id,
+        )
 
     @router.put("")
     async def update_settings(update: SettingsUpdate) -> dict[str, object]:
@@ -219,6 +228,8 @@ def create_router() -> APIRouter:
         settings.notify.telegram_chat_id = update.notify.telegram_chat_id
         settings.web = update.web
         _save_settings(settings)
+        if broadcast is not None:
+            await broadcast({"type": "context_changed"})
         return _serialize_settings(settings)
 
     return router

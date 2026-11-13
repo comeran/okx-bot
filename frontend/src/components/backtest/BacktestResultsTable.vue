@@ -17,10 +17,14 @@ interface Props {
   results: BacktestResult[];
   selectedResultId: string | null;
   loading?: boolean;
+  error?: string | null;
+  stale?: boolean;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   loading: false,
+  error: null,
+  stale: false,
 });
 
 const emit = defineEmits<{
@@ -60,6 +64,8 @@ function rowClassName({ row }: { row: BacktestResult }): string {
 
     <DataState
       :loading="props.loading"
+      :error="props.error"
+      :stale="props.stale"
       :empty="!hasResults"
       :empty-description="t('backtest.noResults')"
       @retry="refresh"
@@ -94,27 +100,27 @@ function rowClassName({ row }: { row: BacktestResult }): string {
             {{ formatBacktestTime(row.created_at, currentLocale) }}
           </template>
         </el-table-column>
-        <el-table-column :label="t('backtest.metrics.totalReturn')" min-width="130">
+        <el-table-column :label="t('backtest.metrics.totalReturn')" min-width="130" align="right" header-align="right">
           <template #default="{ row }">
             {{ formatBacktestPercent(row.total_return) }}
           </template>
         </el-table-column>
-        <el-table-column :label="t('backtest.metrics.sharpeRatio')" min-width="130">
+        <el-table-column :label="t('backtest.metrics.sharpeRatio')" min-width="130" align="right" header-align="right">
           <template #default="{ row }">
             {{ formatBacktestNumber(row.sharpe_ratio) }}
           </template>
         </el-table-column>
-        <el-table-column :label="t('backtest.metrics.maxDrawdown')" min-width="140">
+        <el-table-column :label="t('backtest.metrics.maxDrawdown')" min-width="140" align="right" header-align="right">
           <template #default="{ row }">
             {{ formatBacktestPercent(row.max_drawdown) }}
           </template>
         </el-table-column>
-        <el-table-column :label="t('backtest.metrics.winRate')" min-width="120">
+        <el-table-column :label="t('backtest.metrics.winRate')" min-width="120" align="right" header-align="right">
           <template #default="{ row }">
             {{ formatBacktestPercent(row.win_rate) }}
           </template>
         </el-table-column>
-        <el-table-column :label="t('backtest.metrics.totalTrades')" min-width="120">
+        <el-table-column :label="t('backtest.metrics.totalTrades')" min-width="120" align="right" header-align="right">
           <template #default="{ row }">
             {{ row.total_trades === null || row.total_trades === undefined ? EMPTY_BACKTEST_VALUE : formatBacktestNumber(row.total_trades, 0) }}
           </template>

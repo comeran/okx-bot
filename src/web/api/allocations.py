@@ -1,29 +1,38 @@
-"""Configure allocation drafts and local paper reservations without granting live ownership."""
+"""Configure drafts, paper reservations, and cached evidence without granting live ownership."""
 
 from __future__ import annotations
 
 import hashlib
 import time
+from copy import deepcopy
 from dataclasses import asdict
 from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy.exc import SQLAlchemyError
 
+from src.core.config import AppConfig
 from src.core.execution_mode import account_environment
+from src.core.execution_scope import build_execution_context
 from src.core.runtime_settings import load_runtime_settings
 from src.data.allocations import (
     AllocationConflict,
+    AllocationDraft,
     AllocationNotFound,
     AllocationScope,
     AllocationStore,
     spot_symbol,
 )
+from src.data.exchange_store import ExchangeStoreError
 from src.data.live_ownership import OwnershipError, grant_ownership_from_balance
+from src.data.models import EXCHANGE_STRATEGY
 from src.data.paper_book import PaperBook, PaperBookError, PaperBookNotFound
 from src.data.repository import Repository
+from src.ops.allocation_readiness import build_allocation_readiness
 from src.strategy.definitions import StrategyConfigValidationError
 from src.web.api.strategies import StrategyRuntimeState
+from src.web.exchange_context import bind_exchange_store
 
 
 class DraftRequest(BaseModel):
@@ -43,8 +52,10 @@ class ReservationRequest(BaseModel):
     expected_symbol: Annotated[str, Field(strict=True, min_length=1, max_length=128)]
 
 
-def allocation_context() -> tuple[dict[str, object], AllocationScope | None]:
-    settings = load_runtime_settings()
+def allocation_context(
+    settings: AppConfig | None = None,
+) -> tuple[dict[str, object], AllocationScope | None]:
+    settings = settings if settings is not None else load_runtime_settings()
     exchange = settings.exchange
     environment = account_environment(settings.mode, exchange.demo)
     market_type = exchange.market_type.strip().lower()
@@ -115,11 +126,14 @@ def create_router(runtime: StrategyRuntimeState) -> APIRouter:
 
     def envelope(name: str) -> dict[str, object]:
         symbol, currency = strategy_symbol(name)
-        context, scope = allocation_context()
+        settings = deepcopy(load_runtime_settings())
+        context, scope = allocation_context(settings)
+        execution_context, _ = build_execution_context(settings.exchange)
         status = lifecycle_status(name)
         draft = store.get_draft(scope, name) if scope is not None else None
         return {
             "context": context,
+            "execution_context": execution_context,
             "draft": asdict(draft) if draft is not None else None,
             "reservation": _reservation_view(book, repository, scope, name),
             "other_scope_reservation": _other_scope_reservation(book, scope, name),
@@ -165,6 +179,96 @@ def create_router(runtime: StrategyRuntimeState) -> APIRouter:
     @router.get("/context")
     def context() -> dict[str, object]:
         return allocation_context()[0]
+
+    def readiness_draft(
+        drafts: list[AllocationDraft], name: str, symbol: str, expected_revision: int,
+    ) -> AllocationDraft:
+        draft = next((item for item in drafts if item.strategy == name), None)
+        if draft is None or draft.revision != expected_revision:
+            raise _error(409, "revision_conflict", "Saved allocation changed; reload the draft")
+        if draft.symbol != symbol:
+            raise _error(
+                409, "allocation_symbol_changed", "Strategy symbol changed; reload the draft",
+            )
+        return draft
+
+    @router.get("/{strategy}/readiness")
+    async def get_readiness(
+        strategy: str,
+        expected_account_scope_id: Annotated[str, Query(min_length=1, max_length=128)],
+        expected_scope_id: Annotated[str, Query(min_length=1, max_length=128)],
+        expected_revision: Annotated[int, Query(ge=1)],
+        expected_symbol: Annotated[str, Query(min_length=1, max_length=128)],
+    ) -> dict[str, object]:
+        from src.data.spot_ledger import SpotLedgerError, SpotLedgerStore
+
+        async with runtime.lifecycle_lock(strategy):
+            settings = deepcopy(load_runtime_settings())
+            symbol, _ = strategy_symbol(strategy)
+            _, scope = allocation_context(settings)
+            bound = bind_exchange_store(
+                settings.exchange, repository, expected_account_scope_id, require_available=True,
+            )
+            if scope is None or bound.repository is None or bound.scope is None:
+                raise _error(
+                    409, "account_context_unavailable", "Spot account context is unavailable",
+                )
+            if scope.scope_id != expected_scope_id:
+                raise _error(
+                    409, "allocation_scope_changed", "Account context changed; reload the draft",
+                )
+            try:
+                loaded_symbol, _ = spot_symbol(expected_symbol)
+            except ValueError as exc:
+                raise _error(
+                    422, "invalid_symbol", "A spot symbol precondition is required",
+                ) from exc
+            if loaded_symbol != symbol:
+                raise _error(
+                    409, "allocation_symbol_changed", "Strategy symbol changed; reload the draft",
+                )
+            # One master snapshot supplies both the target and every same-quote proposal.
+            drafts = store.list_drafts(scope)
+            draft = readiness_draft(drafts, strategy, symbol, expected_revision)
+            facts = bound.repository
+            try:
+                account = facts.get_account(
+                    EXCHANGE_STRATEGY, source="live_exchange", runtime_mode="live",
+                )
+                orders = facts.get_orders(source="live_exchange", runtime_mode="live")
+                global_kill = repository.get_kill_switch().engaged
+                account_kill = facts.get_kill_switch().engaged
+                ledger = SpotLedgerStore(facts.engine, bound.scope).get_strategy(strategy)
+            except (ExchangeStoreError, SpotLedgerError, SQLAlchemyError) as exc:
+                raise _error(
+                    503, "account_store_unavailable", "Exchange account facts are unavailable",
+                ) from exc
+            # Diagnostic reads span two files. Drift rejects this response; it never
+            # becomes an atomic activation certificate or a reusable authorization.
+            current_settings = load_runtime_settings()
+            if (
+                current_settings.exchange != settings.exchange
+                or current_settings.mode != settings.mode
+            ):
+                raise _error(
+                    409, "account_scope_changed", "Account context changed; reload the draft",
+                )
+            current_symbol, _ = strategy_symbol(strategy)
+            if current_symbol != symbol:
+                raise _error(
+                    409, "allocation_symbol_changed", "Strategy symbol changed; reload the draft",
+                )
+            current_draft = store.get_draft(scope, strategy)
+            readiness_draft(
+                [current_draft] if current_draft is not None else [],
+                strategy, symbol, expected_revision,
+            )
+            return build_allocation_readiness(
+                draft=draft, drafts=drafts, execution_context=bound.context,
+                lifecycle_status=lifecycle_status(strategy), account=account, orders=orders,
+                global_kill=global_kill, account_kill=account_kill, ledger=ledger,
+                evaluated_at=int(time.time() * 1000),
+            )
 
     @router.get("/{strategy}")
     async def get_draft(strategy: str) -> dict[str, object]:

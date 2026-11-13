@@ -30,7 +30,7 @@ from src.exchange.okx_swap import OKXSwapAdapter
 from src.market.service import MarketDataService
 from src.notify.telegram import RiskEventTelegramNotifier, TelegramNotifier
 from src.ops.private_sync import sync_private_state
-from src.order.manager import UnifiedOrderManager
+from src.order.manager import PRICE_FRESHNESS_UNTRACKED, UnifiedOrderManager
 from src.order.mark_to_market import PaperMarkToMarketService
 from src.order.router import OrderHandler, OrderRouter
 from src.risk.manager import RiskManager
@@ -530,16 +530,16 @@ def create_router(
 
         return latest_price
 
-    def price_observed_at_for_strategy(strategy) -> Callable[[str], int | None]:
+    def price_observed_at_for_strategy(strategy) -> Callable[[str], int | None | object]:
         timeframe = getattr(strategy, "timeframe", None)
 
-        def observed_at(symbol: str) -> int | None:
+        def observed_at(symbol: str) -> int | None | object:
             if timeframe is None:
-                return None
+                return PRICE_FRESHNESS_UNTRACKED
             service = get_market_data_service()
             getter = getattr(service, "price_observed_at", None)
             if not callable(getter):
-                return None
+                return PRICE_FRESHNESS_UNTRACKED
             value = getter(symbol, timeframe)
             return None if value is None else int(value)
 
@@ -691,8 +691,10 @@ def create_router(
         include_orders: bool = True,
         runtime_mode: str = "unknown",
     ) -> None:
-        if broadcast is None:
+        if broadcast is None or runtime_mode == "live":
+            # Live strategy ownership/accounting is not implemented yet.
             return
+        source, normalized_runtime = scoped_provenance(runtime_mode)
         positions = (
             scoped_rows(repository, "get_open_positions", strategy, runtime_mode)
             if hasattr(repository, "get_open_positions")
@@ -705,35 +707,38 @@ def create_router(
                     "type": "orders",
                     "scope": "strategy",
                     "strategy": strategy,
+                    "source": source,
+                    "runtime_mode": normalized_runtime,
                     "orders": [
                         trading.serialize_order_record(order) for order in strategy_orders
                     ],
                 }
             )
         account = scoped_account(repository, strategy, runtime_mode)
-        if runtime_mode == "live" and not has_real_strategy_owned_data(
-            positions, account, strategy_orders
-        ):
-            return
         if account is None:
             await broadcast(
                 {
                     "type": "positions",
                     "scope": "strategy",
                     "strategy": strategy,
+                    "source": source,
+                    "runtime_mode": normalized_runtime,
                     "positions": trading.serialize_records(positions),
                 }
             )
         else:
-            await broadcast_position_account_updates(positions, account)
+            await broadcast_position_account_updates(positions, account, runtime_mode)
 
-    async def broadcast_position_account_updates(positions, account) -> None:
-        if broadcast is None:
+    async def broadcast_position_account_updates(positions, account, runtime_mode) -> None:
+        if broadcast is None or runtime_mode == "live":
             return
+        source, normalized_runtime = scoped_provenance(runtime_mode)
         await broadcast({
             "type": "positions",
             "scope": "strategy",
             "strategy": getattr(account, "strategy", None),
+            "source": source,
+            "runtime_mode": normalized_runtime,
             "positions": trading.serialize_records(positions),
         })
         await broadcast(
@@ -741,6 +746,8 @@ def create_router(
                 "type": "account",
                 "scope": "strategy",
                 "strategy": getattr(account, "strategy", None),
+                "source": source,
+                "runtime_mode": normalized_runtime,
                 "account": trading.serialize_account(
                     account,
                     scope="strategy",
@@ -756,6 +763,7 @@ def create_router(
     ) -> None:
         runtime_mode = "paper" if runtime_mode == "demo" else runtime_mode
         source = "live_exchange" if runtime_mode == "live" else runtime_mode
+        payload = {**payload, "source": source, "runtime_mode": runtime_mode}
         save_risk_event = getattr(repository, "save_risk_event", None)
         if callable(save_risk_event):
             try:
@@ -766,7 +774,7 @@ def create_router(
                 )
             except TypeError:
                 save_risk_event(payload)
-        if broadcast is not None:
+        if broadcast is not None and runtime_mode != "live":
             await broadcast(payload)
         notifier = create_risk_event_notifier()
         if notifier is None:
@@ -814,7 +822,9 @@ def create_router(
             timestamp=bar.timestamp,
         )
         if update is not None:
-            await broadcast_position_account_updates(update.positions, update.account)
+            await broadcast_position_account_updates(
+                update.positions, update.account, mark_to_market.runtime_mode,
+            )
 
     def serialize_strategy_config(config: StrategyConfigRecord) -> dict[str, Any]:
         result = config.model_dump()

@@ -10,10 +10,13 @@ import SettingsSection from '@/components/settings/SettingsSection.vue';
 import SecretField from '@/components/settings/SecretField.vue';
 import { useDirtyGuard } from '@/composables/useDirtyGuard';
 import { getApiToken, setApiToken } from '@/services/apiToken';
+import { useAccountContextStore } from '@/stores/accountContext';
+import { useDashboardStore } from '@/stores/dashboard';
 import { getSettings, updateSettings } from '@/services/settings';
 import type { AppSettingsUpdate, AppSettingsView } from '@/types/settings';
 
 const { t, locale } = useI18n();
+const accountContext = useAccountContextStore();
 
 const apiToken = ref(getApiToken());
 const loading = ref(false);
@@ -130,6 +133,8 @@ const initialLoading = computed(() => loading.value && !hasLoadedSettings.value)
 const staleData = computed(() => hasLoadedSettings.value && Boolean(loadError.value) && !loading.value);
 const actionDisabled = computed(() => loading.value || saving.value);
 const canPersist = computed(() => hasLoadedSettings.value && !loadError.value);
+const authenticationCheckDisabled = computed(() => actionDisabled.value || !canPersist.value
+  || isDirty.value || accountContext.loading || accountContext.authenticationChecking);
 const allowedModes = ['backtest', 'paper', 'live'] as const;
 const allowedMarketTypes = ['spot', 'swap', 'future', 'option'] as const;
 
@@ -329,13 +334,33 @@ async function saveSettings(): Promise<void> {
   saving.value = true;
   try {
     applySettings(await updateSettings(buildUpdatePayload()));
+    const authority = accountContext;
+    const request = authority.reload();
+    const epoch = authority.epoch;
+    const context = await request;
+    if (context && authority.epoch === epoch) void useDashboardStore().loadInitialData();
     loadError.value = null;
-    ElMessage.success(t('settings.saveSuccess'));
+    const authentication = context && authority.epoch === epoch ? await authority.checkAuthentication() : null;
+    if (authority.epoch !== epoch || !context) {
+      ElMessage.error(t('exchangeAuth.savedButUnavailable'));
+    } else if (authentication?.status === 'failed') {
+      ElMessage.error(t('exchangeAuth.savedButFailed'));
+    } else if (authentication?.status === 'unavailable' || (context.available && !authentication)) {
+      ElMessage.error(t('exchangeAuth.savedButUnavailable'));
+    } else {
+      ElMessage.success(t(authentication?.status === 'authenticated' ? 'exchangeAuth.savedAndVerified' : 'settings.saveSuccess'));
+    }
   } catch {
     ElMessage.error(t('settings.saveError'));
   } finally {
     saving.value = false;
   }
+}
+
+async function checkSavedAuthentication(): Promise<void> {
+  if (authenticationCheckDisabled.value) return;
+  const context = await accountContext.ensure();
+  if (context) await accountContext.checkAuthentication(true);
 }
 
 onMounted(() => {
@@ -383,7 +408,7 @@ onBeforeRouteLeave(async () => confirmIfDirty());
     >
       <form class="settings-page__content" :aria-label="t('settings.title')" @submit.prevent="saveSettings">
         <el-form :model="form" label-position="top" class="settings-form" :disabled="actionDisabled">
-          <SettingsSection :title="t('settings.runtime')" :description="t('settings.runtimeDescription')">
+          <SettingsSection class="settings-section--runtime" :title="t('settings.runtime')" :description="t('settings.runtimeDescription')">
             <template v-if="validationState.runtime.length" #status>
               <span class="settings-page__validation-status">
                 {{ validationState.runtime[0] }}
@@ -409,7 +434,7 @@ onBeforeRouteLeave(async () => confirmIfDirty());
             </template>
           </SettingsSection>
 
-          <SettingsSection :title="t('settings.okxExchange')" :description="t('settings.exchangeDescription')">
+          <SettingsSection class="settings-section--exchange" :title="t('settings.okxExchange')" :description="t('settings.exchangeDescription')">
             <template v-if="validationState.exchange.length" #status>
               <span class="settings-page__validation-status">
                 {{ validationState.exchange[0] }}
@@ -469,6 +494,18 @@ onBeforeRouteLeave(async () => confirmIfDirty());
                   />
                 </el-col>
               </el-row>
+              <div class="settings-page__authentication">
+                <button
+                  type="button"
+                  class="settings-page__authentication-check"
+                  data-testid="exchange-auth-check"
+                  :disabled="authenticationCheckDisabled"
+                  @click="checkSavedAuthentication"
+                >
+                  {{ t(accountContext.authenticationChecking ? 'exchangeAuth.status.checking' : 'exchangeAuth.checkSaved') }}
+                </button>
+                <p>{{ t(isDirty ? 'exchangeAuth.saveFirst' : 'exchangeAuth.savedOnly') }}</p>
+              </div>
             </template>
           </SettingsSection>
 
@@ -685,9 +722,89 @@ onBeforeRouteLeave(async () => confirmIfDirty());
 }
 
 .settings-form {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--ui-space-16);
+  align-items: start;
+  min-width: 0;
+}
+
+.settings-form > * {
+  min-width: 0;
+}
+
+.settings-form :deep(.el-row) {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--ui-space-16);
+  margin-inline: 0 !important;
+}
+
+.settings-form :deep(.el-col) {
+  flex: none;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  padding-inline: 0 !important;
+}
+
+.settings-section--runtime :deep(.el-row) {
+  grid-template-columns: minmax(0, 360px);
+}
+
+.settings-form :deep(.el-form-item__label) {
+  height: auto;
+  overflow-wrap: anywhere;
+}
+
+@media (min-width: 1280px) {
+  .settings-form {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .settings-section--runtime,
+  .settings-section--exchange {
+    grid-column: 1 / -1;
+  }
+
+  .settings-section--exchange :deep(.el-row) {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+.settings-page__authentication {
+  margin-top: var(--ui-space-16);
+  padding-top: var(--ui-space-12);
+  border-top: var(--ui-border-width-thin) solid var(--ui-color-border);
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--ui-space-12);
+}
+
+.settings-page__authentication p {
+  flex: 1 1 240px;
+  min-width: 0;
+  margin: 0;
+  color: var(--ui-color-text-secondary);
+  font-size: var(--ui-font-size-13);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.settings-page__authentication-check {
+  padding: var(--ui-space-8) var(--ui-space-12);
+  border: var(--ui-border-width-thin) solid var(--ui-color-border);
+  border-radius: var(--ui-radius-4);
+  background: var(--ui-color-surface);
+  color: var(--ui-color-primary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.settings-page__authentication-check:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .settings-form__control,
@@ -733,6 +850,16 @@ onBeforeRouteLeave(async () => confirmIfDirty());
 
   .settings-page__header {
     top: 0;
+  }
+
+  .settings-form :deep(.el-row),
+  .settings-section--runtime :deep(.el-row) {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settings-page__authentication-check {
+    width: 100%;
+    white-space: normal;
   }
 
   .settings-page__header :deep(.app-page-header__actions) {

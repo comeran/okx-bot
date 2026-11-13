@@ -102,6 +102,10 @@ def order_notional(order: Any, price: float) -> float:
     return shared_order_notional(order, price)
 
 
+# 行情源没有观测时间时使用。这和“观测过但时间缺失”不同，不能当成过期。
+PRICE_FRESHNESS_UNTRACKED = object()
+
+
 def _position_has_explicit_ownership(repository: Any, position: Any, strategy: str) -> bool:
     for field in ("ownership", "owner_strategy", "allocation_strategy"):
         marker = getattr(position, field, None)
@@ -1713,6 +1717,8 @@ class UnifiedOrderManager:
         except Exception:
             logger.warning("读取行情时间失败", exc_info=True)
             return "Price freshness is unavailable"
+        if observed is PRICE_FRESHNESS_UNTRACKED:
+            return None
         if observed is None:
             return "Price freshness is unavailable"
         try:

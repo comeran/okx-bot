@@ -7,6 +7,7 @@ import { defineHostComponent, mount, textContent } from '@/test-utils/mount';
 const storeMocks = vi.hoisted(() => ({
   dashboard: {} as Record<string, unknown>,
   strategies: {} as Record<string, unknown>,
+  accountContext: {} as Record<string, unknown>,
 }));
 
 vi.mock('@/services/ops', () => ({
@@ -17,6 +18,8 @@ vi.mock('@/services/ops', () => ({
   cancelOpenOrders: vi.fn(),
   flattenPositions: vi.fn(),
 }));
+
+vi.mock('@/stores/accountContext', () => ({ useAccountContextStore: () => storeMocks.accountContext }));
 
 vi.mock('@/stores/dashboard', () => ({
   useDashboardStore: () => storeMocks.dashboard,
@@ -91,6 +94,7 @@ const DashboardWithLocale = defineComponent({
 });
 
 function createStoreMocks() {
+  storeMocks.accountContext = reactive({ context: null, loading: false, error: null, authentication: null, authenticationChecking: false });
   storeMocks.dashboard = reactive({
     account: null,
     positions: [{ symbol: 'BTC-USDT', amount: 1 }],
@@ -123,6 +127,10 @@ function createStoreMocks() {
     loadInitialData: vi.fn().mockResolvedValue(undefined),
     refreshAccountOverview: vi.fn().mockResolvedValue(undefined),
     refreshStrategyPerformance: vi.fn().mockResolvedValue(undefined),
+    privateSyncLoading: false,
+    privateSyncError: null,
+    privateSyncResult: null,
+    syncExchangeAccount: vi.fn().mockResolvedValue(undefined),
   });
 
   storeMocks.strategies = reactive({
@@ -143,7 +151,69 @@ describe('Dashboard view', () => {
     createStoreMocks();
   });
 
-  it('renders the header status, six metrics, and capped recent dashboard activity', async () => {
+  it('offers a retry after an automatic sync failure and explains why a snapshot is missing', async () => {
+    storeMocks.accountContext.context = {
+      available: true, account_scope_id: 'A', exchange: 'okx', environment: 'sandbox',
+      market_type: 'spot', identity_verified: false, execution_ready: false, reason: null,
+    };
+    storeMocks.accountContext.authentication = {
+      account_scope_id: 'A', environment: 'sandbox', status: 'authenticated',
+      reason: null, provider_code: null, checked_at: 1,
+    };
+    storeMocks.dashboard.privateSyncError = 'sync_unavailable';
+    const wrapper = await mount(Dashboard, { locale: 'en', components: {
+      ElButton: defineHostComponent('el-button'), ElAlert: defineHostComponent('el-alert'),
+    } });
+    await wrapper.flush();
+    expect(wrapper.text()).toContain('Retry account sync');
+    expect(wrapper.text()).toContain('balances, open orders, and recent trades');
+    expect(wrapper.text()).toContain('risk protection and configured notifications');
+    expect(storeMocks.dashboard.syncExchangeAccount).not.toHaveBeenCalled();
+    const button = wrapper.find(node => node.type === 'el-button' && textContent(node).includes('Retry account sync'));
+    expect(button.props.disabled).toBe(false);
+    await wrapper.trigger(button, 'click');
+    expect(storeMocks.dashboard.syncExchangeAccount).toHaveBeenCalledTimes(1);
+
+    storeMocks.accountContext.authentication = { account_scope_id: 'B', environment: 'sandbox', status: 'authenticated' };
+    await wrapper.flush();
+    expect(button.props.disabled).toBe(true);
+    storeMocks.accountContext.authentication = { account_scope_id: 'A', environment: 'sandbox', status: 'failed' };
+    await wrapper.flush();
+    expect(button.props.disabled).toBe(true);
+    storeMocks.accountContext.context = { available: true, account_scope_id: 'A', environment: 'live' };
+    await wrapper.flush();
+    expect(button.props.disabled).toBe(true);
+    expect(wrapper.text()).toContain('currently available for OKX sandbox accounts');
+    wrapper.unmount();
+  });
+
+  it('keeps partial-sync and risk outcomes visible and translates safe errors', async () => {
+    storeMocks.accountContext.context = { available: true, account_scope_id: 'A', environment: 'sandbox' };
+    storeMocks.dashboard.privateSyncResult = {
+      account_upserted: 1, orders_upserted: 2, trades_upserted: 0,
+      trades_status: 'unavailable', risk_events_saved: 1, kill_switch_engaged: true,
+      divergences: [{ message: 'provider-secret-must-not-render' }],
+    };
+    const wrapper = await mount(DashboardWithLocale, { locale: 'en', components: {
+      ElButton: defineHostComponent('el-button'), ElAlert: defineHostComponent('el-alert'),
+    } });
+    await wrapper.flush();
+    expect(wrapper.text()).toContain('Recent trades could not be retrieved');
+    expect(wrapper.text()).toContain('Account risk protection is engaged');
+    expect(wrapper.text()).not.toContain('provider-secret-must-not-render');
+    storeMocks.dashboard.privateSyncResult = { ...(storeMocks.dashboard.privateSyncResult as object), account_upserted: 0 };
+    await wrapper.flush();
+    expect(wrapper.text()).toContain('No account snapshot was updated');
+    storeMocks.dashboard.privateSyncError = 'scope_changed';
+    await wrapper.flush();
+    expect(wrapper.text()).toContain('The configured account changed');
+    localeState.locale!.value = 'zh-CN';
+    await wrapper.flush();
+    expect(wrapper.text()).toContain('账户配置已变更');
+    wrapper.unmount();
+  });
+
+  it('renders six metrics and capped activity without duplicating the global authentication status', async () => {
     const wrapper = await mount(Dashboard, {
       locale: 'en',
       components: {
@@ -173,14 +243,59 @@ describe('Dashboard view', () => {
     expect(textContent(metricValues[4])).toBe('—');
     expect(textContent(metricValues[5])).toBe('2');
 
-    const badge = wrapper.find((node) => String(node.props.class).includes('status-badge'));
-    expect(textContent(badge)).toContain('Disconnected');
-    expect(wrapper.findAll((node) => node.type === 'svg')).not.toHaveLength(0);
+    expect(wrapper.text()).not.toContain('OKX credentials not configured');
+    expect(wrapper.findAll((node) => String(node.props.class).includes('exchange-auth-badge'))).toHaveLength(0);
 
     const activity = wrapper.find((node) => node.type === 'dashboard-activity-stub');
     expect(activity.props['data-recent-orders']).toBe(20);
     expect(activity.props['data-websocket-messages']).toBe(5);
 
+    wrapper.unmount();
+  });
+
+  it('leaves authentication failure ownership with the global shell when the data socket connects', async () => {
+    storeMocks.dashboard.websocketConnected = true;
+    storeMocks.accountContext.context = { available: true, environment: 'sandbox' };
+    storeMocks.accountContext.authentication = {
+      account_scope_id: 'scope-A', environment: 'sandbox', status: 'failed',
+      reason: 'invalid_credentials', provider_code: '50119', checked_at: 1,
+    };
+    const wrapper = await mount(Dashboard, {
+      locale: 'en', components: {
+        ElButton: defineHostComponent('el-button'), ElAlert: defineHostComponent('el-alert'),
+        ElRow: defineHostComponent('el-row'), ElCol: defineHostComponent('el-col'),
+      },
+    });
+    expect(wrapper.text()).not.toContain('OKX authentication failed');
+    expect(wrapper.text()).not.toContain('OKX authentication verified');
+    wrapper.unmount();
+  });
+
+  it('shows missing snapshot only when account and context are neither loading nor in error', async () => {
+    storeMocks.accountContext.context = {
+      available: true, account_scope_id: 'A', exchange: 'okx', environment: 'sandbox',
+      market_type: 'spot', identity_verified: false, execution_ready: false, reason: null,
+    };
+    const wrapper = await mount(Dashboard, { locale: 'en', components: {
+      ElButton: defineHostComponent('el-button'), ElAlert: defineHostComponent('el-alert'),
+      ElRow: defineHostComponent('el-row'), ElCol: defineHostComponent('el-col'),
+    } });
+    await wrapper.flush();
+    expect(wrapper.text()).toContain('No snapshot');
+    for (const [store, field, value] of [
+      [storeMocks.dashboard, 'error', 'Invalid facts header'],
+      [storeMocks.dashboard, 'accountError', 'Account refresh failed'],
+      [storeMocks.dashboard, 'accountLoading', true],
+      [storeMocks.accountContext, 'loading', true],
+      [storeMocks.accountContext, 'error', 'Context unavailable'],
+    ] as const) {
+      store[field] = value;
+      await wrapper.flush();
+      expect(wrapper.text()).not.toContain('No snapshot');
+      store[field] = typeof value === 'boolean' ? false : null;
+      await wrapper.flush();
+    }
+    expect(wrapper.text()).toContain('No snapshot');
     wrapper.unmount();
   });
 
@@ -348,12 +463,12 @@ describe('Dashboard view', () => {
     await wrapper.flush();
 
     const section = wrapper.find((node) => node.type === 'section' && String(node.props.class).includes('dashboard-view'));
-    const directChildren = section.children;
+    const directChildren = section.children.filter((child) => child.props.class !== 'account-context'
+      && child.props.class !== 'dashboard-view__sync');
 
     expect(directChildren).toHaveLength(6);
     expect(String(directChildren[0].props.class)).toContain('app-page-header');
     expect(String(directChildren[1].props.class)).toContain('dashboard-view__alerts');
-    expect(directChildren[2].type).toBe('el-row');
     expect(String(directChildren[2].props.class)).toContain('dashboard-view__metrics');
     expect(String(directChildren[3].props.class)).toContain('dashboard-view__section');
     expect(String(directChildren[4].props.class)).toContain('dashboard-view__section');

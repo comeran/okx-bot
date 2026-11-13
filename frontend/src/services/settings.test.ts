@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import axios from 'axios';
 
-import { getSettings, updateSettings } from './settings';
+import { checkExchangeAuthentication, getSettings, updateSettings } from './settings';
 import type { AppSettingsUpdate } from '@/types/settings';
 
 vi.mock('axios');
@@ -9,6 +9,14 @@ vi.mock('axios');
 const mockedAxios = vi.mocked(axios);
 
 describe('settings service', () => {
+  it('checks only saved credentials with an expected account scope and no secret request body', async () => {
+    const result = { status: 'failed', reason: 'invalid_credentials', provider_code: '50119' };
+    mockedAxios.post.mockResolvedValueOnce({ data: result });
+    expect(await checkExchangeAuthentication('scope-A')).toEqual(result);
+    expect(mockedAxios.post).toHaveBeenCalledWith('/api/settings/exchange-auth', undefined, {
+      params: { expected_account_scope_id: 'scope-A' },
+    });
+  });
   it('loads settings from the settings API', async () => {
     mockedAxios.get.mockResolvedValueOnce({
       data: {

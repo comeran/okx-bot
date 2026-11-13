@@ -14,6 +14,7 @@ from ccxt.base.errors import (
     DDoSProtection,
     ExchangeNotAvailable,
     NetworkError,
+    NotSupported,
     PermissionDenied,
     RateLimitExceeded,
     RequestTimeout,
@@ -36,6 +37,7 @@ from src.data.models import (
     OrderRecord,
     TradeRecord,
 )
+from src.data.repository import Repository
 from src.exchange.base import canonical_symbol, is_supported_canonical_symbol
 from src.exchange.errors import MalformedProviderData
 
@@ -151,10 +153,139 @@ async def sync_private_state(
     limit: int = 100,
     timestamp_ms: Callable[[], int] = current_timestamp_ms,
     risk_event_notifier: RiskEventNotifier | None = None,
+    account_scope_id: str | None = None,
 ) -> PrivateSyncResult:
     target_symbols = _normalize_symbols(symbols, adapter)
+    receipt = None
+    if account_scope_id is not None and isinstance(repository, Repository):
+        attempt = repository.start_private_sync_receipt(
+            account_scope_id=account_scope_id, symbols=target_symbols,
+            since=since, limit=limit, started_at=timestamp_ms(),
+        )
+        receipt = _SyncReceipt(attempt.attempt_id, attempt.started_at, target_symbols, since, limit)
+    try:
+        return await _perform_private_sync(
+            repository, adapter, target_symbols=target_symbols, since=since, limit=limit,
+            timestamp_ms=timestamp_ms, risk_event_notifier=risk_event_notifier, receipt=receipt,
+        )
+    except Exception as error:
+        if receipt is not None:
+            code = _receipt_error_code(error, receipt.active_part)
+            if receipt.active_part is not None:
+                receipt.parts[receipt.active_part].update(state="failed", error_code=code)
+            try:
+                repository.fail_private_sync_receipt(
+                    receipt.attempt_id, completed_at=timestamp_ms(), error_code=code,
+                    parts=receipt.parts, cursor=receipt.cursor,
+                )
+            except Exception:
+                # The durable start remains observable if finalizing the audit
+                # fails. Preserve the original provider/persistence exception.
+                logger.error("Failed to finalize private sync attempt audit")
+        raise
+
+
+class _SyncReceipt:
+    def __init__(self, attempt_id, started_at, symbols, since, limit):
+        self.attempt_id = attempt_id
+        self.started_at = started_at
+        self.active_part = None
+        self.parts = {
+            name: {
+                "state": "pending", "received_at": None, "provider_timestamp": None,
+                "coverage": {
+                    "kind": kind, "completeness": "unknown",
+                    "symbols": None if name == "account" else symbols,
+                    **({"since": since, "limit": limit} if name == "trades" else {}),
+                },
+            }
+            for name, kind in (("account", "account_snapshot"), ("orders", "open_orders"),
+                               ("trades", "recent_trades"))
+        }
+        self.cursor = {
+            "mode": "since" if since is not None else "recent",
+            "requested_since": since, "requested_limit": limit,
+            "durable": False, "complete": False, "watermark": None,
+        }
+
+    def received(self, part, timestamp, snapshots):
+        self.parts[part]["received_at"] = timestamp
+        candidates = snapshots if isinstance(snapshots, (list, tuple)) else [snapshots]
+        times = [
+            value for snapshot in candidates
+            for value in (getattr(snapshot, "timestamp", None),
+                          getattr(snapshot, "updated_at", None))
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0
+        ]
+        self.parts[part]["provider_timestamp"] = max(times) if times else None
+        if part != "account":
+            self.parts[part]["provider_timestamp_kind"] = "latest_observed_item"
+
+    def finalize(self, transaction, result, timestamp_ms):
+        completed_at = timestamp_ms()
+        received_at = max(
+            (part["received_at"] for part in self.parts.values()
+             if part["received_at"] is not None), default=self.started_at,
+        )
+        return transaction.finalize_private_sync_receipt(
+            self.attempt_id,
+            state="partial" if result.trades_status == "unavailable" else "committed",
+            completed_at=completed_at, received_at=received_at,
+            parts=self.parts, cursor=self.cursor, result=_receipt_result(result),
+        )
+
+
+def _receipt_result(result: PrivateSyncResult) -> dict[str, object]:
+    # Full divergences stay in the operation result and risk-event rows. Audit
+    # metadata must remain bounded even when a valid provider page is large.
+    summary = {
+        "account_upserted": result.account_upserted,
+        "orders_upserted": result.orders_upserted,
+        "trades_upserted": result.trades_upserted,
+        "trades_status": result.trades_status,
+        "risk_events_saved": result.risk_events_saved,
+        "kill_switch_engaged": result.kill_switch_engaged,
+        "divergence_count": len(result.divergences),
+        "divergence_sample": [],
+        "divergences_truncated": bool(result.divergences),
+    }
+    for divergence in result.divergences[:5]:
+        candidate = {**summary, "divergence_sample": [*summary["divergence_sample"], divergence]}
+        try:
+            encoded = json.dumps(candidate, allow_nan=False, sort_keys=True, separators=(",", ":"))
+        except (TypeError, ValueError, OverflowError, RecursionError):
+            break
+        if len(encoded.encode("utf-8")) > 8000:
+            break
+        summary = candidate
+    summary["divergences_truncated"] = (
+        len(result.divergences) > len(summary["divergence_sample"])
+    )
+    return summary
+
+
+def _receipt_error_code(error, active_part):
+    if isinstance(error, MalformedProviderData):
+        return "malformed_data"
+    if isinstance(error, PermissionDenied):
+        return "permission_denied"
+    if isinstance(error, AuthenticationError):
+        return "authentication_failed"
+    if isinstance(error, NotSupported):
+        return "capability_unsupported"
+    if isinstance(error, (NetworkError, TimeoutError, ConnectionError)):
+        return "provider_unavailable"
+    if isinstance(error, ValueError) and "superseded" in str(error):
+        return "superseded"
+    return "persistence_failed" if active_part is None else "sync_failed"
+
+
+async def _perform_private_sync(
+    repository, adapter, *, target_symbols, since, limit, timestamp_ms,
+    risk_event_notifier, receipt,
+):
     if target_symbols == []:
-        return PrivateSyncResult(
+        result = PrivateSyncResult(
             account_upserted=0,
             orders_upserted=0,
             trades_upserted=0,
@@ -163,10 +294,31 @@ async def sync_private_state(
             kill_switch_engaged=_kill_switch_is_engaged(repository),
             divergences=[],
         )
+        if receipt is not None:
+            for part in receipt.parts.values():
+                part["state"] = "skipped"
+            repository.atomic_private_sync(
+                lambda transaction: receipt.finalize(transaction, result, timestamp_ms),
+            )
+        return result
 
+    if receipt is not None:
+        receipt.active_part = "account"
     account = await adapter.fetch_account_snapshot()
+    if receipt is not None:
+        receipt.received("account", timestamp_ms(), account)
+    if not isinstance(account, AccountSnapshot):
+        raise MalformedProviderData("Malformed provider account response")
+    if receipt is not None:
+        receipt.parts["account"]["state"] = "available"
+        receipt.active_part = "orders"
     exchange_orders = await adapter.fetch_open_order_snapshots(target_symbols)
+    if receipt is not None:
+        receipt.received("orders", timestamp_ms(), exchange_orders)
     _validate_order_snapshots(exchange_orders)
+    if receipt is not None:
+        receipt.parts["orders"]["state"] = "available"
+        receipt.active_part = "trades"
     trades_available = True
     complete_trade_page = False
     complete_trade_since = None
@@ -177,10 +329,16 @@ async def sync_private_state(
         exchange_trades = await adapter.fetch_recent_trade_snapshots(
             target_symbols, since=effective_since, limit=limit
         )
+        if receipt is not None:
+            receipt.received("trades", timestamp_ms(), exchange_trades)
         if not isinstance(exchange_trades, (list, tuple)):
             raise MalformedProviderData("Malformed provider recent-trade response")
         _validate_trade_snapshots(exchange_trades)
         _validate_trade_identities(exchange_trades)
+        if receipt is not None:
+            receipt.parts["trades"]["state"] = "available"
+            if exchange_trades:
+                receipt.parts["trades"]["coverage"]["completeness"] = "partial"
         complete_trade_page = bool(
             getattr(exchange_trades, "complete", False)
             and getattr(exchange_trades, "mode", None) in {"since", "cumulative"}
@@ -222,6 +380,11 @@ async def sync_private_state(
         exchange_trades = []
         complete_trade_page = False
         complete_trade_since = None
+        if receipt is not None:
+            receipt.parts["trades"].update(state="unavailable", error_code="provider_unavailable")
+
+    if receipt is not None:
+        receipt.active_part = None
 
     def persist_consistently(transaction):
         try:
@@ -249,7 +412,7 @@ async def sync_private_state(
             scoped_exchange_orders = exchange_orders
             scoped_exchange_trades = exchange_trades
         local_by_exchange_id, local_by_client_id = _local_order_indexes(local_orders)
-        return _persist_private_state(
+        persisted = _persist_private_state(
             transaction,
             account,
             scoped_exchange_orders,
@@ -263,6 +426,9 @@ async def sync_private_state(
             complete_trade_page=complete_trade_page,
             complete_trade_since=complete_trade_since,
         )
+        if receipt is not None:
+            receipt.finalize(transaction, persisted[0], timestamp_ms)
+        return persisted
 
     atomic_sync = getattr(repository, "atomic_private_sync", None)
     if callable(atomic_sync):

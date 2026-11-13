@@ -87,7 +87,7 @@ function update(value: string | number | null | undefined): void {
 
 .secret-field__label {
   color: var(--ui-color-text);
-  font-size: var(--ui-font-size-14);
+  font-size: var(--ui-font-size-13);
   line-height: 1.5;
   font-weight: 600;
 }

@@ -2,21 +2,21 @@
 import { computed, onMounted, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { CircleCheckFilled, CircleCloseFilled } from '@element-plus/icons-vue';
 
 import AccountOverview from '@/components/dashboard/AccountOverview.vue';
+import AccountContextNotice from '@/components/dashboard/AccountContextNotice.vue';
+import { useAccountContextStore } from '@/stores/accountContext';
 import DashboardActivity from '@/components/dashboard/DashboardActivity.vue';
 import StrategyPerformanceTable from '@/components/dashboard/StrategyPerformanceTable.vue';
 import AppPageHeader from '@/components/ui/AppPageHeader.vue';
 import MetricCard from '@/components/ui/MetricCard.vue';
-import StatusBadge from '@/components/ui/StatusBadge.vue';
 import {
+  cancelOpenOrders,
   fetchKillSwitch,
   fetchOpeningPause,
+  flattenPositions,
   updateKillSwitch,
   updateOpeningPause,
-  cancelOpenOrders,
-  flattenPositions,
 } from '@/services/ops';
 import { useDashboardStore } from '@/stores/dashboard';
 import { useStrategiesStore } from '@/stores/strategies';
@@ -25,6 +25,7 @@ import { enrichStrategyPerformanceRows } from '@/utils/strategyPerformance';
 
 const { t, locale } = useI18n();
 const dashboard = useDashboardStore();
+const accountContext = useAccountContextStore();
 const strategies = useStrategiesStore();
 
 const latestMessages = computed(() => dashboard.websocketMessages.slice(0, 5));
@@ -37,6 +38,31 @@ const strategyPerformanceRows = computed(() => enrichStrategyPerformanceRows(
 ));
 const lastUpdatedText = computed(() => formatRuntimeTime(dashboard.lastUpdatedAt ?? undefined, locale.value));
 const headerLoading = computed(() => dashboard.loading || strategies.loadingInitial);
+const canSyncAccount = computed(() => {
+  const context = accountContext.context;
+  const auth = accountContext.authentication;
+  return Boolean(context?.available && context.account_scope_id && context.environment === 'sandbox'
+    && auth?.status === 'authenticated' && auth.account_scope_id === context.account_scope_id
+    && auth.environment === context.environment && !accountContext.loading
+    && !accountContext.authenticationChecking && !dashboard.loading && !dashboard.privateSyncLoading);
+});
+const privateSyncErrorText = computed(() => {
+  const code = dashboard.privateSyncError;
+  return code ? t(`dashboard.accountSync.errors.${code}`) : null;
+});
+const privateSyncSummary = computed(() => {
+  const result = dashboard.privateSyncResult;
+  return result ? t('dashboard.accountSync.completed', {
+    accounts: result.account_upserted, orders: result.orders_upserted, trades: result.trades_upserted,
+  }) : null;
+});
+const showSyncRetry = computed(() => Boolean(
+  dashboard.privateSyncError || (dashboard.privateSyncResult && dashboard.error),
+));
+
+function syncAccount() {
+  if (canSyncAccount.value) void dashboard.syncExchangeAccount();
+}
 
 const accountOverviewHasVisibleData = computed(() => (dashboard.account?.assets?.length ?? 0) > 0);
 const dashboardVisibleData = computed(() => (
@@ -293,11 +319,6 @@ onMounted(() => {
       :description="`${t('dashboard.lastUpdated')}: ${lastUpdatedText}`"
     >
       <template #actions>
-        <StatusBadge
-          :status="dashboard.websocketConnected ? t('common.connected') : t('common.disconnected')"
-          :tone="dashboard.websocketConnected ? 'success' : 'danger'"
-          :icon="dashboard.websocketConnected ? CircleCheckFilled : CircleCloseFilled"
-        />
         <el-button :loading="headerLoading" @click="refreshAll">
           {{ t('common.refresh') }}
         </el-button>
@@ -336,6 +357,9 @@ onMounted(() => {
         >
           {{ t('dashboard.flattenPositions') }}
         </el-button>
+        <el-button v-if="showSyncRetry" type="primary" :loading="dashboard.privateSyncLoading" :disabled="!canSyncAccount" @click="syncAccount">
+          {{ t('dashboard.accountSync.retry') }}
+        </el-button>
       </template>
     </AppPageHeader>
 
@@ -351,56 +375,69 @@ onMounted(() => {
       />
     </div>
 
-    <el-row :gutter="16" class="dashboard-view__metrics">
-      <el-col :xs="24" :sm="12" :lg="4">
-        <MetricCard
-          :label="t('dashboard.equity')"
-          :value="formatRuntimeCurrency(dashboard.account?.equity)"
-          tone="primary"
-          :loading="dashboard.loading"
-        />
-      </el-col>
-      <el-col :xs="24" :sm="12" :lg="4">
-        <MetricCard
-          :label="t('dashboard.cashBalance')"
-          :value="formatRuntimeCurrency(dashboard.account?.cash_balance)"
-          tone="neutral"
-          :loading="dashboard.loading"
-        />
-      </el-col>
-      <el-col :xs="24" :sm="12" :lg="4">
-        <MetricCard
-          :label="t('dashboard.realizedPnl')"
-          :value="formatRuntimeCurrency(dashboard.account?.realized_pnl)"
-          tone="success"
-          :loading="dashboard.loading"
-        />
-      </el-col>
-      <el-col :xs="24" :sm="12" :lg="4">
-        <MetricCard
-          :label="t('dashboard.dailyPnl')"
-          :value="formatRuntimeCurrency(dashboard.account?.daily_pnl)"
-          tone="warning"
-          :loading="dashboard.loading"
-        />
-      </el-col>
-      <el-col :xs="24" :sm="12" :lg="4">
-        <MetricCard
-          :label="t('dashboard.feesPaid')"
-          :value="formatRuntimeCurrency(dashboard.account?.fees_paid)"
-          tone="danger"
-          :loading="dashboard.loading"
-        />
-      </el-col>
-      <el-col :xs="24" :sm="12" :lg="4">
-        <MetricCard
-          :label="t('dashboard.activeStrategies')"
-          :value="strategies.error && strategies.runtimeSummaries.length === 0 ? '—' : String(strategies.activeStrategyCount)"
-          tone="primary"
-          :loading="strategies.loadingInitial && strategies.runtimeSummaries.length === 0"
-        />
-      </el-col>
-    </el-row>
+    <AccountContextNotice
+      :context="accountContext.context"
+      :loading="accountContext.loading"
+      :error="accountContext.error"
+      :missing-snapshot="dashboard.account === null
+        && !dashboard.loading && !dashboard.accountLoading
+        && !dashboard.error && !dashboard.accountError
+        && !accountContext.loading && !accountContext.error"
+    />
+
+    <div class="dashboard-view__sync" role="status" aria-live="polite">
+      <p>{{ t('dashboard.accountSync.description') }}</p>
+      <p v-if="accountContext.context?.environment === 'live'">{{ t('dashboard.accountSync.demoOnly') }}</p>
+      <p v-else-if="!canSyncAccount && !dashboard.privateSyncLoading && !dashboard.loading">{{ t('dashboard.accountSync.authRequired') }}</p>
+      <p v-if="privateSyncErrorText" class="dashboard-view__sync-error">{{ privateSyncErrorText }}</p>
+      <template v-if="dashboard.privateSyncResult">
+        <p>{{ privateSyncSummary }}</p>
+        <p v-if="dashboard.privateSyncResult.account_upserted === 0" class="dashboard-view__sync-warning">{{ t('dashboard.accountSync.accountUnchanged') }}</p>
+        <p v-if="dashboard.privateSyncResult.trades_status === 'unavailable'" class="dashboard-view__sync-warning">{{ t('dashboard.accountSync.partial') }}</p>
+        <p v-if="dashboard.privateSyncResult.kill_switch_engaged" class="dashboard-view__sync-warning">{{ t('dashboard.accountSync.riskEngaged') }}</p>
+        <p v-else-if="dashboard.privateSyncResult.risk_events_saved > 0 || dashboard.privateSyncResult.divergences.length > 0" class="dashboard-view__sync-warning">{{ t('dashboard.accountSync.riskDetected') }}</p>
+        <p v-if="dashboard.error">{{ t('dashboard.accountSync.refreshFailed') }}</p>
+      </template>
+    </div>
+
+    <div class="dashboard-view__metrics">
+      <MetricCard
+        :label="t('dashboard.equity')"
+        :value="formatRuntimeCurrency(dashboard.account?.equity)"
+        tone="primary"
+        :loading="dashboard.loading"
+      />
+      <MetricCard
+        :label="t('dashboard.cashBalance')"
+        :value="formatRuntimeCurrency(dashboard.account?.cash_balance)"
+        tone="neutral"
+        :loading="dashboard.loading"
+      />
+      <MetricCard
+        :label="t('dashboard.realizedPnl')"
+        :value="formatRuntimeCurrency(dashboard.account?.realized_pnl)"
+        tone="success"
+        :loading="dashboard.loading"
+      />
+      <MetricCard
+        :label="t('dashboard.dailyPnl')"
+        :value="formatRuntimeCurrency(dashboard.account?.daily_pnl)"
+        tone="warning"
+        :loading="dashboard.loading"
+      />
+      <MetricCard
+        :label="t('dashboard.feesPaid')"
+        :value="formatRuntimeCurrency(dashboard.account?.fees_paid)"
+        tone="danger"
+        :loading="dashboard.loading"
+      />
+      <MetricCard
+        :label="t('dashboard.activeStrategies')"
+        :value="strategies.error && strategies.runtimeSummaries.length === 0 ? '—' : String(strategies.activeStrategyCount)"
+        tone="primary"
+        :loading="strategies.loadingInitial && strategies.runtimeSummaries.length === 0"
+      />
+    </div>
 
     <div class="dashboard-view__section">
       <AccountOverview
@@ -437,6 +474,20 @@ onMounted(() => {
 </template>
 
 <style scoped>
+.dashboard-view__sync {
+  display: grid;
+  gap: var(--ui-space-4);
+  min-width: 0;
+  color: var(--ui-color-text-secondary);
+  font-size: var(--ui-font-size-13);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.dashboard-view__sync p { margin: 0; }
+.dashboard-view__sync-error { color: var(--ui-color-danger); }
+.dashboard-view__sync-warning { color: var(--ui-color-warning); }
+
 .dashboard-view {
   display: flex;
   flex-direction: column;
@@ -455,7 +506,27 @@ onMounted(() => {
 }
 
 .dashboard-view__metrics {
-  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: var(--ui-space-12);
+}
+
+@media (max-width: 1279px) {
+  .dashboard-view__metrics {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 767px) {
+  .dashboard-view__metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 359px) {
+  .dashboard-view__metrics {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .dashboard-view__section {

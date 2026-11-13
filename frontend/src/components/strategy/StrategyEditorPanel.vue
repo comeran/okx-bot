@@ -197,6 +197,12 @@ const modeLabel = computed(() => (props.advanced ? t('strategies.editor.advanced
   flex-wrap: wrap;
   gap: var(--ui-space-8);
   margin-top: var(--ui-space-16);
+  padding-top: var(--ui-space-12);
+  border-top: var(--ui-border-width-thin) solid var(--ui-color-border);
+}
+
+.strategy-editor-panel__actions :deep(.el-button) {
+  margin-left: 0;
 }
 
 @media (max-width: 767px) {
@@ -210,6 +216,10 @@ const modeLabel = computed(() => (props.advanced ? t('strategies.editor.advanced
     border-top: var(--ui-border-width-thin) solid var(--ui-color-border);
     background: color-mix(in srgb, var(--ui-color-surface) 94%, transparent);
     backdrop-filter: blur(var(--ui-blur-md));
+  }
+
+  .strategy-editor-panel__actions :deep(.el-button) {
+    flex: 1 1 auto;
   }
 }
 </style>

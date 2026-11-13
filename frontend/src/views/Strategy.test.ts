@@ -66,7 +66,7 @@ vi.mock('@/components/strategy/StrategyAllocationPanel.vue', async () => {
   const { defineComponent, h } = await import('vue');
   return {
     default: defineComponent({
-      props: ['strategyName', 'status'],
+      props: ['strategyName', 'status', 'strategySymbol'],
       setup(props) {
         return () => h('allocation-panel', { 'data-testid': 'strategy-allocation', ...props });
       },
@@ -322,6 +322,7 @@ describe('Strategy page', () => {
     await wrapper.trigger(selectButton(wrapper, 'strategies.actions.select:desk:btc'), 'click');
     expect(wrapper.getByTestId('strategy-allocation').props.strategyName).toBe('desk:btc');
     expect(wrapper.getByTestId('strategy-allocation').props.status).toBe('stopped');
+    expect(wrapper.getByTestId('strategy-allocation').props.strategySymbol).toBe(store.configs.find((config: StrategyConfig) => config.name === 'desk:btc')?.symbol);
     expect(store.start).not.toHaveBeenCalled();
     await wrapper.trigger(buttons(wrapper, 'strategies.actions.clone:desk:btc')[0], 'click');
     expect(wrapper.findAll((node) => node.type === 'allocation-panel')).toHaveLength(0);

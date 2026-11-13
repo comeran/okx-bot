@@ -7,11 +7,12 @@ from httpx import ASGITransport, AsyncClient
 from sqlmodel import Session, select
 
 from src.core.config import AppConfig, BacktestConfig, ExchangeConfig
+from src.core.execution_scope import build_execution_context
 from src.core.runtime_settings import save_runtime_settings
 from src.data.models import AccountRecord, PositionRecord, StrategyConfigRecord
 from src.data.repository import Repository
 from src.web import app as web_app
-from src.web.api import strategies
+from src.web.api import allocations, strategies
 
 
 def scope_id(client):
@@ -48,6 +49,35 @@ def test_allocation_routes_expose_configuration_only_context(allocation_client):
     assert "test-key" not in response.text
     assert "test-secret" not in response.text
     assert "test-passphrase" not in response.text
+
+
+@pytest.mark.parametrize("configured", [True, False])
+def test_draft_envelope_binds_both_scopes_from_one_settings_capture(
+    allocation_client, monkeypatch, configured,
+):
+    client, _ = allocation_client
+    captured = AppConfig(mode="live", exchange=ExchangeConfig(
+        api_key="test-key" if configured else "", secret="test-secret" if configured else "",
+        passphrase="test-passphrase" if configured else "", demo=True,
+    ))
+    changed = AppConfig(mode="paper", exchange=ExchangeConfig(
+        api_key="other-key", secret="other-secret", passphrase="other-passphrase", demo=False,
+    ))
+    calls = []
+
+    def changing_settings():
+        calls.append(1)
+        return captured if len(calls) == 1 else changed
+
+    monkeypatch.setattr(allocations, "load_runtime_settings", changing_settings)
+    response = client.get("/api/allocations/ma_cross")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["execution_context"] == build_execution_context(captured.exchange)[0]
+    assert payload["context"] == allocations.allocation_context(captured)[0]
+    assert len(calls) == 1
+    assert payload["execution_context"]["available"] is configured
+    assert "test-key" not in response.text
 
 
 def test_save_delete_recreate_is_draft_only_and_keeps_live_gate_closed(allocation_client):

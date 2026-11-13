@@ -17,7 +17,7 @@ describe('SettingsSection', () => {
       },
     }));
 
-    expect(textContent(wrapper.find((node) => node.type === 'h3' && node.props.class === 'section-card__title'))).toBe('Exchange');
+    expect(textContent(wrapper.find((node) => node.type === 'h2' && node.props.class === 'section-card__title'))).toBe('Exchange');
     expect(textContent(wrapper.find((node) => node.type === 'p' && node.props.class === 'section-card__description'))).toBe('Manage connection settings.');
     expect(textContent(wrapper.getById('section-body'))).toBe('Section content');
   });

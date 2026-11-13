@@ -1,3 +1,5 @@
+import type { ExecutionContext } from './executionContext';
+
 export interface AssetBalance {
   ccy: string;
   cash_bal: number;
@@ -82,6 +84,9 @@ interface DashboardMessageBase {
   received_at?: number;
   scope?: 'exchange' | 'strategy';
   strategy?: string;
+  context?: ExecutionContext;
+  source?: string;
+  runtime_mode?: string;
 }
 
 export interface ConnectedDashboardWebSocketMessage extends DashboardMessageBase {
