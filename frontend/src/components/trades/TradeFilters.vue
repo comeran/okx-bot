@@ -131,7 +131,7 @@ function clearFilters(): void {
 .trade-filters__grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: var(--ui-space-12);
+  gap: var(--ui-space-12) var(--ui-space-16);
 }
 
 .trade-filters__field {
@@ -142,7 +142,7 @@ function clearFilters(): void {
 }
 
 .trade-filters__field--search {
-  grid-column: span 2;
+  min-width: 0;
 }
 
 .trade-filters__label {
@@ -152,22 +152,28 @@ function clearFilters(): void {
   font-weight: 600;
 }
 
+.trade-filters__field :deep(.el-select),
+.trade-filters__field :deep(.el-input) {
+  width: 100%;
+  min-width: 0;
+}
+
 .trade-filters__actions {
   display: flex;
   justify-content: flex-end;
+}
+
+.trade-filters__actions :deep(.el-button) {
+  min-width: 160px;
 }
 
 @media (max-width: 1023px) {
   .trade-filters__grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
-
-  .trade-filters__field--search {
-    grid-column: span 2;
-  }
 }
 
-@media (max-width: 767px) {
+@media (max-width: 640px) {
   .trade-filters__grid {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -182,6 +188,7 @@ function clearFilters(): void {
 
   .trade-filters__actions :deep(.el-button) {
     width: 100%;
+    min-width: 0;
   }
 }
 </style>

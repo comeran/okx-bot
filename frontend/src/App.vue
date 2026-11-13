@@ -12,6 +12,8 @@ import { useRoute } from 'vue-router';
 
 import AppHeader from '@/components/layout/AppHeader.vue';
 import AppSidebar from '@/components/layout/AppSidebar.vue';
+import ExchangeAuthBadge from '@/components/dashboard/ExchangeAuthBadge.vue';
+import ExchangeAuthNotice from '@/components/dashboard/ExchangeAuthNotice.vue';
 import StatusBadge from '@/components/ui/StatusBadge.vue';
 import { useWebSocket } from '@/composables/useWebSocket';
 import { useAccountContextStore } from '@/stores/accountContext';
@@ -43,6 +45,7 @@ const accountContext = useAccountContextStore();
 const strategies = useStrategiesStore();
 const mobileNavigationOpen = ref(false);
 const appHeaderRef = ref<InstanceType<typeof AppHeader> | null>(null);
+const mainContentRef = ref<HTMLElement | null>(null);
 let reconnectTimer: ReturnType<typeof globalThis.setTimeout> | null = null;
 let disposed = false;
 function cancelReconnect(): void {
@@ -97,8 +100,28 @@ watch(() => accountContext.epoch, () => {
   exchangeWebSocket.disconnect();
 }, { flush: 'sync' });
 watch(() => accountContext.context, (context) => {
-  if (context?.available && context.account_scope_id) exchangeWebSocket.connect();
+  if (context?.available && context.account_scope_id) {
+    exchangeWebSocket.connect();
+    void accountContext.checkAuthentication();
+  }
 }, { immediate: true });
+watch(
+  () => [
+    accountContext.authentication?.status,
+    accountContext.authentication?.account_scope_id,
+    accountContext.authentication?.checked_at,
+  ] as const,
+  ([status, scopeId]) => {
+    const context = accountContext.context;
+    if (status !== 'authenticated' || !scopeId || !context?.available
+      || context.account_scope_id !== scopeId || context.environment !== 'sandbox'
+      || accountContext.loading || accountContext.authenticationChecking) {
+      return;
+    }
+    void dashboard.autoSyncExchangeAccount();
+  },
+  { immediate: true },
+);
 onBeforeUnmount(() => {
   disposed = true;
   cancelReconnect();
@@ -117,11 +140,11 @@ const pageTitle = computed(() => (
 ));
 
 const websocketStatusLabel = computed(() => (
-  dashboard.websocketConnected ? t('common.connected') : t('common.disconnected')
+  strategyWebSocket.connected.value ? t('exchangeAuth.serviceConnected') : t('exchangeAuth.serviceDisconnected')
 ));
 
 const websocketStatusTone = computed(() => (
-  dashboard.websocketConnected ? 'success' : 'neutral'
+  strategyWebSocket.connected.value ? 'success' : 'neutral'
 ));
 
 watch(exchangeWebSocket.connected, (connected) => {
@@ -140,6 +163,10 @@ function closeMobileNavigation(): void {
   mobileNavigationOpen.value = false;
 }
 
+function focusMainContent(): void {
+  mainContentRef.value?.focus();
+}
+
 async function restoreMenuFocus(): Promise<void> {
   await nextTick();
   appHeaderRef.value?.focusMenuButton();
@@ -152,12 +179,16 @@ onMounted(() => {
 </script>
 
 <template>
+  <a class="app-shell__skip-link" href="#main-content" @click.prevent="focusMainContent">
+    {{ t('app.skipToContent') }}
+  </a>
   <el-container class="app-shell">
     <el-aside width="220px" class="app-shell__sidebar">
       <AppSidebar />
     </el-aside>
 
     <el-drawer
+      id="mobile-navigation"
       v-model="mobileNavigationOpen"
       direction="ltr"
       size="min(82vw, 320px)"
@@ -179,15 +210,21 @@ onMounted(() => {
         v-model:locale="selectedLocale"
         :available-locales="locales"
         :page-title="pageTitle"
+        :menu-expanded="mobileNavigationOpen"
+        mobile-navigation-id="mobile-navigation"
         @menu-trigger="openMobileNavigation"
       >
         <template #status>
-          <StatusBadge :status="websocketStatusLabel" :tone="websocketStatusTone" />
+          <div class="app-shell__connection-status">
+            <StatusBadge :status="websocketStatusLabel" :tone="websocketStatusTone" />
+            <ExchangeAuthBadge :context="accountContext.context" :authentication="accountContext.authentication" :checking="accountContext.authenticationChecking" />
+          </div>
         </template>
       </AppHeader>
-      <el-main class="app-shell__content">
+      <main id="main-content" ref="mainContentRef" class="app-shell__content" :tabindex="-1">
+        <ExchangeAuthNotice :authentication="accountContext.authentication" />
         <router-view />
-      </el-main>
+      </main>
     </el-container>
   </el-container>
 </template>
@@ -195,12 +232,35 @@ onMounted(() => {
 <style scoped>
 .app-shell {
   min-height: 100vh;
+  min-height: 100dvh;
   background: var(--ui-color-canvas);
 }
 
+.app-shell__skip-link {
+  position: fixed;
+  top: var(--ui-space-12);
+  left: var(--ui-space-12);
+  z-index: 3000;
+  padding: var(--ui-space-12) var(--ui-space-16);
+  color: var(--ui-color-surface);
+  background: var(--ui-color-primary);
+  border-radius: var(--ui-radius-8);
+  transform: translateY(calc(-100% - var(--ui-space-24)));
+}
+
+.app-shell__skip-link:focus {
+  transform: translateY(0);
+}
+
 .app-shell__sidebar {
+  position: sticky;
+  top: 0;
+  flex: 0 0 220px;
+  height: 100vh;
+  height: 100dvh;
   background: var(--ui-color-sidebar);
   border-right: var(--ui-border-width-thin) solid var(--ui-color-sidebar-active);
+  overflow: auto;
 }
 
 .app-shell__main {
@@ -208,16 +268,44 @@ onMounted(() => {
 }
 
 .app-shell__content {
+  box-sizing: border-box;
+  flex: 1;
   min-width: 0;
   width: 100%;
   max-width: var(--ui-content-max-width);
   margin: 0 auto;
   padding: var(--ui-space-24);
-  overflow-x: hidden;
+  outline-offset: calc(-1 * var(--ui-space-4));
+}
+
+.app-shell__connection-status {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: var(--ui-space-6);
+  min-width: 0;
 }
 
 :deep(.app-shell__mobile-navigation .el-drawer__body) {
   padding: 0;
+}
+
+:deep(.app-shell__mobile-navigation) {
+  background: var(--ui-color-sidebar);
+}
+
+:deep(.app-shell__mobile-navigation .el-drawer__header) {
+  margin: 0;
+  padding: var(--ui-space-16) var(--ui-space-20);
+  color: var(--ui-color-surface);
+  border-bottom: var(--ui-border-width-thin) solid var(--ui-color-sidebar-active);
+}
+
+:deep(.app-shell__mobile-navigation .el-drawer__close-btn) {
+  min-width: 44px;
+  min-height: 44px;
+  color: var(--ui-color-surface);
 }
 
 @media (max-width: 1024px) {
@@ -233,6 +321,10 @@ onMounted(() => {
 
   .app-shell__content {
     padding: var(--ui-space-12);
+  }
+
+  .app-shell__connection-status {
+    justify-content: flex-start;
   }
 }
 </style>

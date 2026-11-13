@@ -31,7 +31,8 @@ const loadingPlaceholder = '—';
 .metric-card {
   display: flex;
   flex-direction: column;
-  gap: var(--ui-space-8);
+  gap: var(--ui-space-10);
+  min-width: 0;
   padding: var(--ui-space-16);
   border: var(--ui-border-width-thin) solid var(--ui-color-border);
   border-radius: var(--ui-radius-8);
@@ -40,26 +41,32 @@ const loadingPlaceholder = '—';
 
 .metric-card__label {
   color: var(--ui-color-text-secondary);
-  font-size: var(--ui-font-size-13);
-  line-height: 1.4;
+  font-size: var(--ui-font-size-12);
+  line-height: 1.5;
+  font-weight: 500;
+  overflow-wrap: anywhere;
 }
 
 .metric-card__value-row {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
-  gap: var(--ui-space-8);
+  gap: var(--ui-space-6) var(--ui-space-8);
+  min-width: 0;
   min-height: 1.75rem;
 }
 
 .metric-card__value {
-  display: inline-flex;
-  align-items: baseline;
+  display: inline-block;
   min-width: 4ch;
+  max-width: 100%;
   color: var(--ui-color-text);
-  font-size: var(--ui-font-size-28);
-  line-height: 1.2;
+  font-size: clamp(1.375rem, 2.2vw, 1.75rem);
+  line-height: 1.25;
   font-weight: 700;
+  font-variant-numeric: tabular-nums lining-nums;
+  letter-spacing: -0.035em;
+  overflow-wrap: anywhere;
 }
 
 .metric-card__value--loading {
@@ -73,9 +80,10 @@ const loadingPlaceholder = '—';
 
 .metric-card__delta {
   color: var(--ui-color-text-secondary);
-  font-size: var(--ui-font-size-13);
+  font-size: var(--ui-font-size-12);
   line-height: 1.5;
-  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
 }
 
 .metric-card--primary {
@@ -101,6 +109,12 @@ const loadingPlaceholder = '—';
 
   50% {
     background-position: 100% 50%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .metric-card__value--loading {
+    animation: none;
   }
 }
 </style>

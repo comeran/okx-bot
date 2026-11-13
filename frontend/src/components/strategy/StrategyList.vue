@@ -238,6 +238,18 @@ function visibleActions(row: StrategyListRow) {
   width: 100%;
   border-collapse: collapse;
   table-layout: fixed;
+  font-size: var(--ui-font-size-13);
+}
+
+.strategy-list__table th {
+  background: var(--ui-color-info-soft);
+  color: var(--ui-color-text-secondary);
+  font-size: var(--ui-font-size-12);
+  font-weight: 600;
+}
+
+.strategy-list__table tbody tr:last-child td {
+  border-bottom: 0;
 }
 
 .strategy-list__col-name {
@@ -323,7 +335,9 @@ function visibleActions(row: StrategyListRow) {
   white-space: normal;
   overflow-wrap: anywhere;
   box-sizing: border-box;
+  min-height: 30px;
   height: auto;
+  margin-left: 0;
   text-align: left;
 }
 
@@ -348,7 +362,7 @@ function visibleActions(row: StrategyListRow) {
 }
 
 .strategy-list__card {
-  padding: var(--ui-space-16);
+  padding: var(--ui-space-12);
   border: var(--ui-border-width-thin) solid var(--ui-color-border);
   border-radius: var(--ui-radius-8);
   background: var(--ui-color-surface);
@@ -369,6 +383,10 @@ function visibleActions(row: StrategyListRow) {
   justify-content: space-between;
   gap: var(--ui-space-12);
   margin-bottom: var(--ui-space-12);
+}
+
+.strategy-list__card .strategy-list__actions {
+  padding-top: var(--ui-space-12);
 }
 
 .strategy-list__card dl {

@@ -49,7 +49,7 @@ export default defineComponent({
         showHeader
           ? h('header', { class: 'section-card__header' }, [
               h('div', { class: 'section-card__heading' }, [
-                hasTitle ? h('h3', { class: 'section-card__title' }, titleContent) : null,
+                hasTitle ? h('h2', { class: 'section-card__title' }, titleContent) : null,
                 hasDescription ? h('p', { class: 'section-card__description' }, descriptionContent) : null,
               ]),
               hasActions ? h('div', { class: 'section-card__actions' }, actionsSlotContent) : null,
@@ -64,10 +64,11 @@ export default defineComponent({
 
 <style scoped>
 .section-card {
+  min-width: 0;
   background: var(--ui-color-surface);
   border: var(--ui-border-width-thin) solid var(--ui-color-border);
   border-radius: var(--ui-radius-10);
-  padding: var(--ui-space-20);
+  padding: var(--ui-space-16);
   box-shadow: var(--ui-shadow-sm);
 }
 
@@ -75,11 +76,14 @@ export default defineComponent({
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: var(--ui-space-16);
+  flex-wrap: wrap;
+  gap: var(--ui-space-12);
   margin-bottom: var(--ui-space-16);
+  min-width: 0;
 }
 
 .section-card__heading {
+  flex: 1 1 180px;
   min-width: 0;
 }
 
@@ -89,22 +93,40 @@ export default defineComponent({
   font-size: var(--ui-font-size-16);
   line-height: 1.5;
   font-weight: 700;
+  letter-spacing: -0.015em;
+  overflow-wrap: anywhere;
 }
 
 .section-card__description {
   margin: var(--ui-space-4) 0 0;
   color: var(--ui-color-text-secondary);
+  font-size: var(--ui-font-size-13);
   line-height: 1.6;
+  overflow-wrap: anywhere;
 }
 
 .section-card__actions {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   justify-content: flex-end;
   gap: var(--ui-space-8);
+  min-width: 0;
+  max-width: 100%;
 }
 
 .section-card__body {
   min-width: 0;
+}
+
+@media (max-width: 767px) {
+  .section-card__heading {
+    flex-basis: 100%;
+  }
+
+  .section-card__actions {
+    justify-content: flex-start;
+    width: 100%;
+  }
 }
 </style>

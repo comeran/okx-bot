@@ -227,18 +227,18 @@ const currentFallbackSymbols = computed(() => fallbackSymbolsByType[props.market
               />
             </el-select>
           </label>
+        </div>
 
-          <div class="market-query-panel__actions">
-            <el-button
-              type="primary"
-              native-type="submit"
-              :loading="loading"
-              class="market-query-panel__submit"
-              data-testid="market-query-submit"
-            >
-              {{ t('market.loadChart') }}
-            </el-button>
-          </div>
+        <div class="market-query-panel__actions">
+          <el-button
+            type="primary"
+            native-type="submit"
+            :loading="loading"
+            class="market-query-panel__submit"
+            data-testid="market-query-submit"
+          >
+            {{ t('market.loadChart') }}
+          </el-button>
         </div>
 
         <section v-if="activeQuery" class="market-query-panel__summary" data-testid="market-active-query" aria-live="polite">
@@ -276,48 +276,47 @@ const currentFallbackSymbols = computed(() => fallbackSymbolsByType[props.market
 
 .market-query-panel__grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(220px, 1fr));
-  gap: var(--ui-space-16);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--ui-space-12) var(--ui-space-16);
   align-items: end;
 }
 
 .market-query-panel__field {
   display: flex;
   flex-direction: column;
-  gap: var(--ui-space-8);
+  gap: var(--ui-space-6);
   min-width: 0;
 }
 
 .market-query-panel__label,
 .market-query-panel__summary-title {
   color: var(--ui-color-text-secondary);
-  font-size: var(--ui-font-size-14);
+  font-size: var(--ui-font-size-13);
   line-height: 1.4;
   font-weight: 600;
 }
 
-.market-query-panel__control {
+.market-query-panel__control,
+.market-query-panel :deep(.el-date-editor) {
   width: 100%;
+  min-width: 0;
 }
 
 .market-query-panel__actions {
   display: flex;
-  align-items: end;
+  justify-content: flex-end;
 }
 
 .market-query-panel__submit {
-  width: 100%;
-  min-height: 40px;
+  min-width: 160px;
 }
 
 .market-query-panel__summary {
   display: flex;
   flex-direction: column;
   gap: var(--ui-space-12);
-  padding: var(--ui-space-16);
-  border: var(--ui-border-width-thin) solid var(--ui-color-border);
-  border-radius: var(--ui-radius-8);
-  background: var(--ui-color-info-soft);
+  padding-top: var(--ui-space-12);
+  border-top: var(--ui-border-width-thin) solid var(--ui-color-border);
 }
 
 .market-query-panel__summary-title {
@@ -327,7 +326,7 @@ const currentFallbackSymbols = computed(() => fallbackSymbolsByType[props.market
 
 .market-query-panel__summary-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 0.7fr) minmax(0, 1fr) minmax(0, 0.7fr) minmax(0, 2.2fr);
   gap: var(--ui-space-12);
   margin: 0;
 }
@@ -364,6 +363,7 @@ const currentFallbackSymbols = computed(() => fallbackSymbolsByType[props.market
   .market-query-panel__actions,
   .market-query-panel__submit {
     width: 100%;
+    min-width: 0;
   }
 }
 </style>

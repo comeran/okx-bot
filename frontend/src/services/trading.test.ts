@@ -1,13 +1,24 @@
 import axios from 'axios';
 import { describe, expect, it, vi } from 'vitest';
 
-import { fetchExchangeSnapshot, fetchStrategyPerformance, fetchTradingContext } from './trading';
+import { fetchExchangeSnapshot, fetchStrategyPerformance, fetchTradingContext, syncExchangeAccount } from './trading';
 
 vi.mock('axios');
 
 const mockedAxios = vi.mocked(axios);
 
 describe('trading service', () => {
+  it('manually synchronizes only the captured configured account without credentials or scope filters', async () => {
+    const result = { status: 'ok', account_upserted: 1 };
+    mockedAxios.post.mockResolvedValueOnce({ data: result });
+
+    await expect(syncExchangeAccount('scope/A')).resolves.toEqual(result);
+
+    expect(mockedAxios.post).toHaveBeenCalledWith('/api/ops/sync/private', {}, {
+      params: { expected_account_scope_id: 'scope/A' },
+    });
+  });
+
   it('reads authoritative context and binds snapshots and performance queries', async () => {
     mockedAxios.get.mockResolvedValue({ data: { available: true } });
     await fetchTradingContext();

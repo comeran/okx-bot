@@ -164,22 +164,22 @@ function retry() {
           :scroll-description="t('dashboard.assetAllocation')"
         >
           <el-table-column prop="ccy" :label="t('dashboard.currency')" min-width="90" />
-          <el-table-column :label="t('dashboard.assetCashBalance')" min-width="130">
+          <el-table-column align="right" :label="t('dashboard.assetCashBalance')" min-width="130">
             <template #default="{ row }">
               {{ formatRuntimeNumber(row.cash_bal) }}
             </template>
           </el-table-column>
-          <el-table-column :label="t('dashboard.nativeEquity')" min-width="130">
+          <el-table-column align="right" :label="t('dashboard.nativeEquity')" min-width="130">
             <template #default="{ row }">
               {{ formatRuntimeNumber(row.eq) }}
             </template>
           </el-table-column>
-          <el-table-column :label="t('dashboard.convertedEquity')" min-width="140">
+          <el-table-column align="right" :label="t('dashboard.convertedEquity')" min-width="140">
             <template #default="{ row }">
               {{ formatRuntimeCurrency(row.eq_utd) }}
             </template>
           </el-table-column>
-          <el-table-column :label="t('dashboard.allocationShare')" min-width="130">
+          <el-table-column align="right" :label="t('dashboard.allocationShare')" min-width="130">
             <template #default="{ row }">
               {{ `${formatRuntimeNumber(row.allocationShare)}%` }}
             </template>
@@ -193,8 +193,8 @@ function retry() {
 <style scoped>
 .account-overview {
   display: grid;
-  grid-template-columns: minmax(0, 320px) minmax(0, 1fr);
-  gap: var(--ui-space-16);
+  grid-template-columns: minmax(0, 280px) minmax(0, 1fr);
+  gap: var(--ui-space-20);
   align-items: start;
   min-width: 0;
 }
@@ -212,11 +212,13 @@ function retry() {
   font-size: var(--ui-font-size-13);
   line-height: 1.4;
   font-weight: 600;
+  overflow-wrap: anywhere;
 }
 
 .account-overview__chart {
   width: 100%;
-  min-height: 280px;
+  height: 248px;
+  min-height: 248px;
 }
 
 .account-overview__table {
@@ -226,6 +228,12 @@ function retry() {
 @media (max-width: 991px) {
   .account-overview {
     grid-template-columns: minmax(0, 1fr);
+    gap: var(--ui-space-16);
+  }
+
+  .account-overview__chart {
+    height: 224px;
+    min-height: 224px;
   }
 }
 </style>

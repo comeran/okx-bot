@@ -67,6 +67,8 @@ const selectedDetail = ref<BacktestResultDetailData | null>(null);
 const strategiesLoading = ref(false);
 const running = ref(false);
 const resultsLoading = ref(false);
+const resultsLoadFailed = ref(false);
+const resultsError = computed(() => (resultsLoadFailed.value ? t('backtest.historyLoadError') : null));
 const detailLoading = ref(false);
 const detailError = ref<string | null>(null);
 let detailRequestToken = 0;
@@ -274,9 +276,11 @@ async function loadResults(): Promise<void> {
     }
 
     results.value = nextResults;
+    resultsLoadFailed.value = false;
     clearSelectionIfMissing(nextResults);
   } catch {
     if (requestToken === historyRequestToken) {
+      resultsLoadFailed.value = true;
       ElMessage.error(t('backtest.loadResultsError'));
     }
   } finally {
@@ -384,6 +388,8 @@ onMounted(() => {
         :results="results"
         :selected-result-id="selectedResultId"
         :loading="resultsLoading"
+        :error="resultsError"
+        :stale="Boolean(resultsError && results.length > 0)"
         @select-result="handleSelectResult"
         @refresh="handleRefreshResults"
       />

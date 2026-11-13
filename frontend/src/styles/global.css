@@ -15,12 +15,13 @@ body,
 body {
   min-height: 100vh;
   font-size: 14px;
-  font-family: var(--el-font-family, Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
+  font-family: var(--ui-font-family);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
   background: var(--ui-color-canvas);
   color: var(--ui-color-text);
 }
 
-body,
 button,
 input,
 textarea,
@@ -31,6 +32,104 @@ select {
 :focus-visible {
   outline: 2px solid var(--ui-color-primary);
   outline-offset: 2px;
+}
+
+button,
+a,
+input,
+select {
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+h1,
+h2,
+h3 {
+  text-wrap: balance;
+  scroll-margin-top: 100px;
+}
+
+::selection {
+  color: var(--ui-color-text);
+  background: #cce9df;
+}
+
+.el-button {
+  --el-button-font-weight: 600;
+  min-height: 36px;
+  border-radius: 7px;
+  transition: color 160ms ease, background-color 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+}
+
+.el-button--primary:not(.is-link):not(.is-text):not(.is-plain) {
+  box-shadow: 0 2px 3px rgb(8 127 117 / 10%);
+}
+
+.el-form-item {
+  margin-bottom: 16px;
+}
+
+.el-form--label-top .el-form-item__label {
+  padding-bottom: 6px;
+  margin-bottom: 0;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.5;
+  color: var(--ui-color-text-secondary);
+}
+
+.el-input__wrapper,
+.el-select__wrapper {
+  min-height: 36px;
+  border-radius: 7px;
+}
+
+.el-input__inner,
+.el-select__selected-item,
+.el-textarea__inner {
+  font-size: 13px;
+}
+
+.el-table {
+  --el-table-header-bg-color: var(--ui-color-table-header);
+  --el-table-header-text-color: var(--ui-color-text-secondary);
+  --el-table-border-color: var(--ui-color-border-subtle);
+  --el-table-row-hover-bg-color: #f1f7f3;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.el-table th.el-table__cell {
+  height: 42px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.025em;
+}
+
+.el-table td.el-table__cell {
+  padding-block: 11px;
+}
+
+.el-table .cell {
+  line-height: 1.55;
+}
+
+.el-dialog,
+.el-drawer,
+.el-overlay-dialog,
+.el-drawer__body {
+  overscroll-behavior: contain;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 code,

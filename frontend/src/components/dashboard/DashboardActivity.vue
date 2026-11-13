@@ -93,12 +93,12 @@ function fullPayloadText(message: DashboardWebSocketMessage): string {
                 {{ formatRuntimeText(row.type) }}
               </template>
             </el-table-column>
-            <el-table-column :label="t('dashboard.price')" min-width="100">
+            <el-table-column align="right" :label="t('dashboard.price')" min-width="100">
               <template #default="{ row }">
                 {{ formatNullableNumber(row.price) }}
               </template>
             </el-table-column>
-            <el-table-column :label="t('dashboard.amount')" min-width="100">
+            <el-table-column align="right" :label="t('dashboard.amount')" min-width="100">
               <template #default="{ row }">
                 {{ formatNullableNumber(row.amount) }}
               </template>
@@ -138,22 +138,22 @@ function fullPayloadText(message: DashboardWebSocketMessage): string {
                 {{ formatRuntimeText(row.side) }}
               </template>
             </el-table-column>
-            <el-table-column :label="t('dashboard.size')" min-width="100">
+            <el-table-column align="right" :label="t('dashboard.size')" min-width="100">
               <template #default="{ row }">
                 {{ formatNullableNumber(row.amount) }}
               </template>
             </el-table-column>
-            <el-table-column :label="t('dashboard.entryPrice')" min-width="110">
+            <el-table-column align="right" :label="t('dashboard.entryPrice')" min-width="110">
               <template #default="{ row }">
                 {{ formatNullableNumber(row.entry_price) }}
               </template>
             </el-table-column>
-            <el-table-column :label="t('dashboard.markPrice')" min-width="110">
+            <el-table-column align="right" :label="t('dashboard.markPrice')" min-width="110">
               <template #default="{ row }">
                 {{ formatNullableNumber(row.mark_price) }}
               </template>
             </el-table-column>
-            <el-table-column :label="t('dashboard.unrealizedPnl')" min-width="130">
+            <el-table-column align="right" :label="t('dashboard.unrealizedPnl')" min-width="130">
               <template #default="{ row }">
                 {{ formatNullableNumber(row.unrealized_pnl) }}
               </template>
@@ -262,6 +262,8 @@ function fullPayloadText(message: DashboardWebSocketMessage): string {
   word-break: break-word;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
   color: var(--ui-color-text-secondary);
+  font-size: var(--ui-font-size-12);
+  line-height: 1.5;
 }
 
 @media (max-width: 991px) {

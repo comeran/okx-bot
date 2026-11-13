@@ -29,7 +29,17 @@ const { t } = useI18n();
 </template>
 <style scoped>
 .account-context {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ui-space-4) var(--ui-space-12);
+  min-width: 0;
   color: var(--ui-color-text-secondary);
+  font-size: var(--ui-font-size-13);
+  line-height: 1.6;
   overflow-wrap: anywhere;
+}
+
+.account-context p {
+  margin: 0;
 }
 </style>
