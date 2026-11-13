@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import re
 import secrets
@@ -7,15 +8,22 @@ import secrets
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
 from src.data.repository import Repository
 from src.web.api import allocations, backtest, market, ops, settings, strategies, trading
 from src.web.ws import WebSocketManager
 
+logger = logging.getLogger(__name__)
 ws_manager = WebSocketManager()
 
 API_TOKEN_ENV = "OKX_BOT_API_TOKEN"
 LOCAL_ORIGIN_PATTERN = re.compile(r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$")
+PUBLIC_API_PATHS = {"/api/health", "/api/auth/login", "/api/auth/session"}
+
+
+class LoginRequest(BaseModel):
+    token: str = Field(default="", max_length=512)
 
 
 def _is_local_origin(origin: str) -> bool:
@@ -106,16 +114,38 @@ def create_app() -> FastAPI:
             token
             and request.method != "OPTIONS"
             and path.startswith("/api")
-            and path != "/api/health"
+            and path not in PUBLIC_API_PATHS
         ):
             supplied = _supplied_api_token(request.headers)
             if not secrets.compare_digest(supplied, token):
                 return JSONResponse({"detail": "unauthorized"}, status_code=401)
         return await call_next(request)
 
-    @app.get("/api/health")
-    async def health() -> dict[str, str]:
-        return {"status": "ok"}
+    @app.get("/api/health", response_model=None)
+    async def health() -> JSONResponse | dict[str, str]:
+        try:
+            Repository().probe_database()
+        except Exception:
+            logger.warning("Database health probe failed", exc_info=True)
+            return JSONResponse(
+                {"status": "unavailable", "database": "unavailable"},
+                status_code=503,
+            )
+        return {"status": "ok", "database": "ok"}
+
+    @app.get("/api/auth/session")
+    async def auth_session() -> dict[str, bool]:
+        return {"required": bool(os.environ.get(API_TOKEN_ENV, ""))}
+
+    @app.post("/api/auth/login", response_model=None)
+    async def auth_login(request: LoginRequest) -> JSONResponse | dict[str, bool]:
+        expected = os.environ.get(API_TOKEN_ENV, "")
+        if not expected:
+            return {"required": False, "ok": True}
+        supplied = request.token.strip()
+        if not supplied or not secrets.compare_digest(supplied, expected):
+            return JSONResponse({"detail": "unauthorized"}, status_code=401)
+        return {"required": True, "ok": True}
 
     @app.websocket("/ws")
     async def websocket_endpoint(ws: WebSocket) -> None:

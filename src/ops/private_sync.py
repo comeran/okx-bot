@@ -170,9 +170,12 @@ async def sync_private_state(
     trades_available = True
     complete_trade_page = False
     complete_trade_since = None
+    cursor_scope = _fill_cursor_scope(target_symbols)
+    stored_cursor = None if since is not None else _stored_fill_cursor(repository, cursor_scope)
+    effective_since = since if since is not None else stored_cursor
     try:
         exchange_trades = await adapter.fetch_recent_trade_snapshots(
-            target_symbols, since=since, limit=limit
+            target_symbols, since=effective_since, limit=limit
         )
         if not isinstance(exchange_trades, (list, tuple)):
             raise MalformedProviderData("Malformed provider recent-trade response")
@@ -183,11 +186,11 @@ async def sync_private_state(
             and getattr(exchange_trades, "mode", None) in {"since", "cumulative"}
         )
         complete_trade_since = (
-            since
+            effective_since
             if complete_trade_page
-            and since is not None
+            and effective_since is not None
             and getattr(exchange_trades, "mode", None) == "since"
-            and getattr(exchange_trades, "since", None) == since
+            and getattr(exchange_trades, "since", None) == effective_since
             else None
         )
     except MalformedProviderData:
@@ -275,7 +278,52 @@ async def sync_private_state(
                 await risk_event_notifier(divergence)
             except Exception:
                 pass
+    if (
+        trades_available
+        and complete_trade_page
+        and exchange_trades
+        and (since is None or since == stored_cursor)
+    ):
+        _advance_fill_cursor(
+            repository,
+            cursor_scope,
+            max(int(trade.timestamp) for trade in exchange_trades),
+        )
     return result
+
+
+def _fill_cursor_scope(symbols: list[str] | None) -> str:
+    if not symbols:
+        return "live:*"
+    return "live:" + ",".join(sorted(symbols))
+
+
+def _stored_fill_cursor(repository, scope: str) -> int | None:
+    reader = getattr(repository, "get_fill_cursor", None)
+    if not callable(reader):
+        return None
+    try:
+        value = reader(scope)
+    except Exception:
+        logger.warning("读取成交游标失败", exc_info=True)
+        return None
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        logger.warning("成交游标不是整数", exc_info=True)
+        return None
+
+
+def _advance_fill_cursor(repository, scope: str, cursor_ms: int) -> None:
+    writer = getattr(repository, "advance_fill_cursor", None)
+    if not callable(writer):
+        return
+    try:
+        writer(scope, int(cursor_ms))
+    except Exception:
+        logger.warning("推进成交游标失败", exc_info=True)
 
 
 def _kill_switch_is_engaged(repository) -> bool:

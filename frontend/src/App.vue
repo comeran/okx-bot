@@ -99,7 +99,8 @@ onMounted(() => {
 </script>
 
 <template>
-  <el-container class="app-shell">
+  <router-view v-if="route.name === 'login'" />
+  <el-container v-else class="app-shell">
     <el-aside width="220px" class="app-shell__sidebar">
       <AppSidebar />
     </el-aside>

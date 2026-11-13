@@ -16,12 +16,19 @@ from src.backtest.historical_data import (
     ensure_historical_bars,
 )
 from src.backtest.matcher import OrderMatcher
+from src.backtest.report import drawdown_series
 from src.core.config import BacktestConfig
 from src.core.runtime_settings import load_runtime_settings
-from src.data.models import BacktestResultRecord, BacktestTradeRecord
+from src.data.models import (
+    BacktestEquityPointRecord,
+    BacktestRejectedOrderRecord,
+    BacktestResultRecord,
+    BacktestTradeRecord,
+)
 from src.data.repository import Repository
 from src.exchange.okx_client import OKX_RUNTIME_TIMEFRAME_MILLISECONDS
 from src.exchange.okx_spot import OKXSpotAdapter
+from src.risk.manager import RiskManager
 from src.web.api.strategies import create_strategy_registry
 
 router = APIRouter()
@@ -134,6 +141,7 @@ async def run_backtest(req: BacktestRequest) -> dict[str, float | int]:
         ),
         market_type=req.market_type,
         symbol=symbol,
+        risk_manager=research_risk_manager(),
     ).run(strategy, bars)
     metrics = {
         "total_return": report.total_return,
@@ -169,6 +177,39 @@ async def run_backtest(req: BacktestRequest) -> dict[str, float | int]:
         for trade in report.trades
     ]
     repository.save_backtest_result_with_trades(result, backtest_trades)
+    save_details = getattr(repository, "save_backtest_details", None)
+    if callable(save_details):
+        timestamps = report.equity_timestamps
+        if len(timestamps) != len(report.equity_curve):
+            timestamps = list(range(len(report.equity_curve)))
+        drawdowns = drawdown_series(report.equity_curve)
+        save_details(
+            result_id,
+            [
+                BacktestEquityPointRecord(
+                    result_id=result_id,
+                    seq=index,
+                    timestamp=int(timestamp),
+                    equity=float(equity),
+                    drawdown=float(drawdown),
+                )
+                for index, (timestamp, equity, drawdown) in enumerate(
+                    zip(timestamps, report.equity_curve, drawdowns, strict=True)
+                )
+            ],
+            [
+                BacktestRejectedOrderRecord(
+                    result_id=result_id,
+                    symbol=str(rejected["symbol"]),
+                    side=str(rejected["side"]),
+                    timestamp=int(rejected["timestamp"]),
+                    amount=float(rejected["amount"]),
+                    price=None if rejected["price"] is None else float(rejected["price"]),
+                    reason=str(rejected["reason"]),
+                )
+                for rejected in report.rejected_orders
+            ],
+        )
     return metrics
 
 
@@ -207,6 +248,10 @@ async def get_result_detail(result_id: str) -> dict[str, list[dict] | dict]:
         and getattr(kline, "runtime_mode", "unknown") == "backtest"
     ]
     markers = repository.get_backtest_trades(result_id)
+    equity_getter = getattr(repository, "get_backtest_equity_points", None)
+    rejected_getter = getattr(repository, "get_backtest_rejected_orders", None)
+    equity_curve = equity_getter(result_id) if callable(equity_getter) else []
+    rejected_orders = rejected_getter(result_id) if callable(rejected_getter) else []
     return {
         "result": result.model_dump(),
         "klines": [
@@ -224,6 +269,8 @@ async def get_result_detail(result_id: str) -> dict[str, list[dict] | dict]:
             for kline in klines
         ],
         "markers": [marker.model_dump() for marker in markers],
+        "equity_curve": [point.model_dump() for point in equity_curve],
+        "rejected_orders": [order.model_dump() for order in rejected_orders],
     }
 
 
@@ -233,3 +280,15 @@ def current_timestamp_ms() -> int:
 
 def load_backtest_config() -> BacktestConfig:
     return load_runtime_settings().backtest
+
+
+def research_risk_manager() -> RiskManager:
+    """回测使用和实盘相同的下单前比例规则，包含日亏和回撤。"""
+    risk = load_runtime_settings().risk
+    return RiskManager(
+        max_position_pct=risk.max_total_position_pct,
+        max_daily_loss_pct=risk.max_daily_loss_pct,
+        max_drawdown_pct=risk.max_drawdown_pct,
+        enforce_daily_loss=True,
+        enforce_drawdown=True,
+    )

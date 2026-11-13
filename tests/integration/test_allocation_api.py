@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 from httpx import ASGITransport, AsyncClient
 from sqlmodel import Session, select
 
-from src.core.config import AppConfig, ExchangeConfig
+from src.core.config import AppConfig, BacktestConfig, ExchangeConfig
 from src.core.runtime_settings import save_runtime_settings
 from src.data.models import AccountRecord, PositionRecord, StrategyConfigRecord
 from src.data.repository import Repository
@@ -41,7 +41,7 @@ def test_allocation_routes_expose_configuration_only_context(allocation_client):
     assert response.status_code == 200
     context = response.json()
     assert context["available"] is True
-    assert context["environment"] == "sandbox"
+    assert context["environment"] == "live"
     assert context["execution_mode"] == "live"
     assert context["identity_verified"] is False
     assert context["execution_ready"] is False
@@ -168,7 +168,7 @@ def test_context_and_drafts_follow_server_credentials_and_environment(allocation
     second = client.get("/api/allocations/ma_cross").json()
     assert second["draft"] is None
     assert second["context"]["scope_id"] != first["context"]["scope_id"]
-    assert second["context"]["environment"] == "live"
+    assert second["context"]["environment"] == "sandbox"
     assert second["context"]["execution_mode"] == "demo"
 
 
@@ -221,10 +221,15 @@ def test_stale_account_context_cannot_create_or_delete_drafts(allocation_client,
 
     with Session(Repository().engine) as session:
         audits_before = len(session.exec(select(AllocationAuditRecord)).all())
-    save_runtime_settings(AppConfig(mode="live", exchange=ExchangeConfig(
-        api_key="other-key" if change == "credentials" else "test-key",
-        secret="test-secret", passphrase="test-passphrase", demo=change != "environment",
-    )))
+    save_runtime_settings(AppConfig(
+        mode="demo" if change == "environment" else "live",
+        exchange=ExchangeConfig(
+            api_key="other-key" if change == "credentials" else "test-key",
+            secret="test-secret",
+            passphrase="test-passphrase",
+            demo=True,
+        ),
+    ))
     assert scope_id(client) != old_scope
     stale_save = client.put("/api/allocations/ma_cross", json={
         "expected_symbol": "BTC-USDT",
@@ -322,3 +327,182 @@ def test_mutations_require_explicit_loaded_symbol(allocation_client):
     assert client.delete("/api/allocations/ma_cross", params={
         "revision": 1, "expected_scope_id": scope_id(client),
     }).status_code == 422
+
+
+def _paper_settings():
+    return AppConfig(
+        mode="demo",
+        exchange=ExchangeConfig(
+            api_key="test-key", secret="test-secret", passphrase="test-passphrase", demo=True,
+        ),
+        backtest=BacktestConfig(initial_capital=1000),
+    )
+
+
+def test_local_budget_is_exclusive_and_live_activation_stays_closed(allocation_client):
+    client, runtime = allocation_client
+    blocked = client.post("/api/allocations/ma_cross/activate", json={
+        "expected_revision": 0,
+        "expected_scope_id": scope_id(client),
+        "expected_symbol": "BTC-USDT",
+    })
+    assert blocked.status_code == 409
+    assert blocked.json()["detail"]["code"] == "live_activation_blocked"
+    save_runtime_settings(_paper_settings())
+    Repository().upsert_strategy_config(StrategyConfigRecord(
+        name="eth_book", strategy_type="ma_cross", symbol="ETH-USDT", timeframe="1h",
+        params={}, created_at=1, updated_at=1,
+    ))
+    runtime.strategy_status["eth_book"] = "stopped"
+    assert client.put("/api/allocations/ma_cross", json={
+        "expected_symbol": "BTC-USDT",
+        "expected_scope_id": scope_id(client),
+        "budget": 600, "expected_revision": 0,
+    }).status_code == 200
+    activated = client.post("/api/allocations/ma_cross/activate", json={
+        "expected_revision": 1,
+        "expected_scope_id": scope_id(client),
+        "expected_symbol": "BTC-USDT",
+    })
+    assert activated.status_code == 200
+    body = activated.json()
+    assert body["draft"]["status"] == "draft"
+    assert body["context"]["execution_ready"] is False
+    assert body["reservation"]["budget"] == 600
+    assert body["reservation"]["cash"] == 600
+    assert body["reservation"]["holdings"] == 0
+    assert strategies.has_live_strategy_ownership_mapping(
+        Repository(), "ma_cross", "BTC-USDT",
+    ) is False
+    assert client.put("/api/allocations/eth_book", json={
+        "expected_symbol": "ETH-USDT",
+        "expected_scope_id": scope_id(client),
+        "budget": 500, "expected_revision": 0,
+    }).status_code == 200
+    excess = client.post("/api/allocations/eth_book/activate", json={
+        "expected_revision": 1,
+        "expected_scope_id": scope_id(client),
+        "expected_symbol": "ETH-USDT",
+    })
+    assert excess.status_code == 409
+    assert excess.json()["detail"]["code"] == "budget_exceeds_book"
+    assert client.put("/api/allocations/eth_book", json={
+        "expected_symbol": "ETH-USDT",
+        "expected_scope_id": scope_id(client),
+        "budget": 400, "expected_revision": 1,
+    }).status_code == 200
+    assert client.post("/api/allocations/eth_book/activate", json={
+        "expected_revision": 2,
+        "expected_scope_id": scope_id(client),
+        "expected_symbol": "ETH-USDT",
+    }).status_code == 200
+    locked = remove_draft(client, 1)
+    assert locked.status_code == 409
+    assert locked.json()["detail"]["code"] == "reservation_active"
+    save_runtime_settings(AppConfig(
+        mode="live",
+        exchange=ExchangeConfig(
+            api_key="test-key", secret="test-secret", passphrase="test-passphrase", demo=True,
+        ),
+        backtest=BacktestConfig(initial_capital=1000),
+    ))
+    live = client.post("/api/allocations/ma_cross/activate", json={
+        "expected_revision": 1,
+        "expected_scope_id": scope_id(client),
+        "expected_symbol": "BTC-USDT",
+    })
+    assert live.status_code == 409
+    assert live.json()["detail"]["code"] == "live_activation_blocked"
+    started = client.post("/api/strategies/ma_cross/start")
+    assert started.status_code == 409
+    assert started.json()["detail"]["code"] == "live_position_ownership_unavailable"
+
+
+def test_exchange_balance_grants_live_ownership_only_when_it_covers_the_draft(
+    allocation_client, monkeypatch,
+):
+    from src.web.api import allocations as allocation_api
+
+    client, _runtime = allocation_client
+    save_runtime_settings(AppConfig(mode="paper", exchange=ExchangeConfig(
+        api_key="test-key", secret="test-secret", passphrase="test-passphrase", demo=True,
+    )))
+
+    async def unavailable():
+        raise AssertionError("paper mode must not read the exchange")
+
+    monkeypatch.setattr(allocation_api, "fetch_exchange_available", unavailable)
+    blocked = client.post("/api/allocations/ma_cross/exchange-activate", json={
+        "expected_revision": 0,
+        "expected_scope_id": scope_id(client),
+        "expected_symbol": "BTC-USDT",
+    })
+    assert blocked.status_code == 409
+    assert blocked.json()["detail"]["code"] == "exchange_activation_only"
+
+    save_runtime_settings(AppConfig(mode="live", exchange=ExchangeConfig(
+        api_key="test-key", secret="test-secret", passphrase="test-passphrase", demo=False,
+    )))
+    assert client.put("/api/allocations/ma_cross", json={
+        "expected_symbol": "BTC-USDT",
+        "expected_scope_id": scope_id(client),
+        "budget": 100,
+        "expected_revision": 0,
+    }).status_code == 200
+
+    async def short_balance():
+        return 40.0
+
+    monkeypatch.setattr(allocation_api, "fetch_exchange_available", short_balance)
+    short = client.post("/api/allocations/ma_cross/exchange-activate", json={
+        "expected_revision": 1,
+        "expected_scope_id": scope_id(client),
+        "expected_symbol": "BTC-USDT",
+    })
+    assert short.status_code == 409
+    assert short.json()["detail"]["code"] == "balance_insufficient"
+    assert strategies.has_live_strategy_ownership_mapping(
+        Repository(), "ma_cross", "BTC-USDT",
+    ) is False
+
+    async def covered_balance():
+        return 150.0
+
+    monkeypatch.setattr(allocation_api, "fetch_exchange_available", covered_balance)
+    granted = client.post("/api/allocations/ma_cross/exchange-activate", json={
+        "expected_revision": 1,
+        "expected_scope_id": scope_id(client),
+        "expected_symbol": "BTC-USDT",
+    })
+    assert granted.status_code == 200
+    assert granted.json()["context"]["execution_ready"] is False
+    assert strategies.has_live_strategy_ownership_mapping(
+        Repository(), "ma_cross", "BTC-USDT",
+    ) is True
+    assert strategies.has_live_strategy_ownership_mapping(
+        Repository(), "ma_cross", "ETH-USDT",
+    ) is False
+
+    save_runtime_settings(AppConfig(mode="demo", exchange=ExchangeConfig(
+        api_key="sandbox-key", secret="test-secret", passphrase="test-passphrase", demo=False,
+    )))
+
+    async def sandbox_balance():
+        return 500.0
+
+    monkeypatch.setattr(allocation_api, "fetch_exchange_available", sandbox_balance)
+    assert client.put("/api/allocations/ma_cross", json={
+        "expected_symbol": "BTC-USDT",
+        "expected_scope_id": scope_id(client),
+        "budget": 80,
+        "expected_revision": 0,
+    }).status_code == 200
+    sandbox = client.post("/api/allocations/ma_cross/exchange-activate", json={
+        "expected_revision": 1,
+        "expected_scope_id": scope_id(client),
+        "expected_symbol": "BTC-USDT",
+    })
+    assert sandbox.status_code == 200
+    assert strategies.has_live_strategy_ownership_mapping(
+        Repository(), "ma_cross", "BTC-USDT",
+    ) is True

@@ -9,6 +9,7 @@ from src.backtest.matcher import OrderMatcher
 from src.backtest.report import BacktestReport, generate_report
 from src.core.types import Bar, Order, OrderSide, OrderStatus, OrderType, Position, PositionSide
 from src.exchange.base import canonical_symbol, is_supported_canonical_symbol
+from src.risk.manager import RiskManager
 
 
 def spot_backtest_symbol(symbol: str) -> str:
@@ -219,6 +220,7 @@ class BacktestEngine:
     def __init__(
         self, initial_capital: float, matcher: OrderMatcher, *,
         market_type: str = "spot", symbol: str | None = None,
+        risk_manager: RiskManager | None = None,
     ) -> None:
         if market_type != "spot":
             raise ValueError("backtest supports the unleveraged spot model only")
@@ -226,13 +228,20 @@ class BacktestEngine:
             raise ValueError("initial_capital must be positive and finite")
         self.initial_capital = initial_capital
         self.matcher = matcher
+        self.risk_manager = risk_manager
         self.symbol = spot_backtest_symbol(symbol) if symbol is not None else None
 
     async def run(self, strategy: Any, bars: list[Bar]) -> BacktestReport:
         portfolio = _Portfolio(cash=float(self.initial_capital))
         trades: list[dict[str, Any]] = []
+        rejected: list[dict[str, Any]] = []
         equity_curve = [portfolio.cash]
+        interval = bars[1].timestamp - bars[0].timestamp if len(bars) > 1 else 0
+        equity_timestamps = [bars[0].timestamp - interval] if bars else [0]
         pending: list[Order] = []
+        peak_equity = float(self.initial_capital)
+        day_key: int | None = None
+        day_start_equity = float(self.initial_capital)
 
         strategy_symbol = getattr(strategy, "symbol", None)
         symbol = self.symbol
@@ -251,6 +260,10 @@ class BacktestEngine:
                 await asyncio.sleep(0)
             portfolio.mark_price = bar.open
             portfolio.timestamp = bar.timestamp
+            bar_day = bar.timestamp // 86_400_000
+            if day_key != bar_day:
+                day_key = bar_day
+                day_start_equity = portfolio.equity(bar.open)
             resting: list[Order] = []
             for order in pending:
                 if order.status != OrderStatus.PENDING:
@@ -258,13 +271,15 @@ class BacktestEngine:
                 try:
                     order_manager.bind_symbol(order.symbol)
                 except ValueError as exc:
-                    await self._reject_order(strategy, order, str(exc))
+                    await self._reject_order(strategy, order, str(exc), bar.timestamp, rejected)
                     continue
                 match = self.matcher.match(order, bar)
                 if match.status == OrderStatus.FILLED:
                     reason = portfolio.fill_rejection(order, match.fill_price, match.fee)
                     if reason is not None:
-                        await self._reject_order(strategy, order, reason)
+                        await self._reject_order(
+                            strategy, order, reason, bar.timestamp, rejected
+                        )
                         continue
                     order.status = OrderStatus.FILLED
                     order.fill_price = match.fill_price
@@ -292,7 +307,10 @@ class BacktestEngine:
             pending = [order for order in resting if order.status == OrderStatus.PENDING]
 
             portfolio.mark_price = bar.close
-            equity_curve.append(portfolio.equity(bar.close))
+            close_equity = portfolio.equity(bar.close)
+            peak_equity = max(peak_equity, close_equity)
+            equity_curve.append(close_equity)
+            equity_timestamps.append(bar.timestamp)
 
             returned_order = await strategy.on_bar(bar)
             submitted = order_manager.take_submitted()
@@ -305,24 +323,92 @@ class BacktestEngine:
                     try:
                         order_manager.bind_symbol(order.symbol)
                     except ValueError as exc:
-                        await self._reject_order(strategy, order, str(exc))
+                        await self._reject_order(
+                            strategy, order, str(exc), bar.timestamp, rejected
+                        )
+                        continue
+                    risk_reason = self._risk_rejection(
+                        portfolio,
+                        order,
+                        mark_price=bar.close,
+                        equity=close_equity,
+                        peak_equity=peak_equity,
+                        day_start_equity=day_start_equity,
+                    )
+                    if risk_reason is not None:
+                        await self._reject_order(
+                            strategy, order, risk_reason, bar.timestamp, rejected
+                        )
                         continue
                     order_manager.track_order(order)
                     pending.append(order)
 
-        return generate_report(
+        report = generate_report(
             initial_capital=self.initial_capital,
             trades=trades,
             equity_curve=equity_curve,
             round_trip_pnls=portfolio.round_trip_pnls,
             bars_per_year=_bars_per_year(bars),
         )
+        report.equity_timestamps = equity_timestamps
+        report.rejected_orders = rejected
+        return report
 
-    async def _reject_order(self, strategy: Any, order: Order, reason: str) -> None:
+    def _risk_rejection(
+        self,
+        portfolio: _Portfolio,
+        order: Order,
+        *,
+        mark_price: float,
+        equity: float,
+        peak_equity: float,
+        day_start_equity: float,
+    ) -> str | None:
+        if self.risk_manager is None:
+            return None
+        reference_price = order.price if order.price is not None else mark_price
+        if not _finite_number(reference_price, positive=True):
+            return "risk check requires a positive price"
+        # 现货卖出只减仓。仓位上限只约束买入；日亏和回撤对买卖都生效。
+        if order.side == OrderSide.BUY:
+            position_value = portfolio.quantity * mark_price
+            order_value = order.amount * reference_price
+        else:
+            position_value = 0.0
+            order_value = 0.0
+        result = self.risk_manager.check_order(
+            order=order,
+            current_position_value=position_value,
+            total_equity=equity,
+            order_value=order_value,
+            daily_pnl=equity - day_start_equity,
+            peak_equity=peak_equity,
+            current_equity=equity,
+        )
+        return None if result.passed else result.reason
+
+    async def _reject_order(
+        self,
+        strategy: Any,
+        order: Order,
+        reason: str,
+        timestamp: int,
+        rejected: list[dict[str, Any]],
+    ) -> None:
         order.status = OrderStatus.REJECTED
         order.fill_price = None
         order.fill_time = None
         order.filled_amount = 0
         order.remaining_amount = order.amount
         order.params = {**order.params, "rejection_reason": reason}
+        rejected.append(
+            {
+                "symbol": order.symbol,
+                "side": order.side.value,
+                "timestamp": timestamp,
+                "amount": order.amount,
+                "price": order.price,
+                "reason": reason,
+            }
+        )
         await strategy.on_order(order)

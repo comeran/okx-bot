@@ -17,6 +17,8 @@ class BacktestReport:
     total_trades: int = 0
     trades: list[dict[str, Any]] = field(default_factory=list)
     equity_curve: list[float] = field(default_factory=list)
+    equity_timestamps: list[int] = field(default_factory=list)
+    rejected_orders: list[dict[str, Any]] = field(default_factory=list)
 
 
 def generate_report(
@@ -56,6 +58,15 @@ def generate_report(
         trades=trades,
         equity_curve=equity_curve,
     )
+
+
+def drawdown_series(equity_curve: list[float]) -> list[float]:
+    peak = 0.0
+    series: list[float] = []
+    for equity in equity_curve:
+        peak = max(peak, equity)
+        series.append(0.0 if peak == 0 else (peak - equity) / peak)
+    return series
 
 
 def _max_drawdown(equity_curve: list[float]) -> float:

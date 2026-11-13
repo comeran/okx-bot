@@ -1,6 +1,6 @@
 import axios from 'axios';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { deleteStrategyAllocation, getAllocationContext, getStrategyAllocation, saveStrategyAllocation } from './strategyAllocations';
+import { deleteStrategyAllocation, activateStrategyAllocation, getAllocationContext, getStrategyAllocation, releaseStrategyAllocation, saveStrategyAllocation } from './strategyAllocations';
 vi.mock('axios');
 const http = vi.mocked(axios);
 beforeEach(() => vi.resetAllMocks());
@@ -26,5 +26,13 @@ describe('allocation draft API', () => {
     http.delete.mockResolvedValueOnce({ data: { draft: null } });
     await expect(deleteStrategyAllocation('desk/btc', 7, 'loaded-sandbox-scope', 'BTC-USDT')).resolves.toEqual({ draft: null });
     expect(http.delete).toHaveBeenCalledWith('/api/allocations/desk%2Fbtc', { params: { revision: 7, expected_scope_id: 'loaded-sandbox-scope', expected_symbol: 'BTC-USDT' } });
+  });
+  it('activates and releases the loaded revision without sending a budget', async () => {
+    const update = { expected_revision: 2, expected_scope_id: 'loaded-sandbox-scope', expected_symbol: 'BTC-USDT' };
+    http.post.mockResolvedValue({ data: { reservation: { revision: 3, status: 'active' } } });
+    await expect(activateStrategyAllocation('desk/btc', update)).resolves.toEqual({ reservation: { revision: 3, status: 'active' } });
+    await releaseStrategyAllocation('desk/btc', update);
+    expect(http.post).toHaveBeenNthCalledWith(1, '/api/allocations/desk%2Fbtc/activate', update);
+    expect(http.post).toHaveBeenNthCalledWith(2, '/api/allocations/desk%2Fbtc/release', update);
   });
 });

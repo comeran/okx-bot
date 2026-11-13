@@ -17,6 +17,7 @@ from src.core.types import (
     _validate_amount_reconciliation,
 )
 from src.data.models import OrderRecord
+from src.data.paper_book import normalize_spot_symbol
 from src.exchange.base import canonical_symbol
 from src.exchange.errors import AcceptedUnknownOrderResultError
 from src.order.accounting import PaperAccountingService
@@ -68,6 +69,18 @@ def risk_reason_code(reason: str) -> str:
         "Live position ownership is unavailable": "live_position_ownership_unavailable",
         "Live inverse order requires valid contract size": "live_contract_size_unavailable",
         "Live derivative order requires valid contract size": "live_contract_size_unavailable",
+        "Symbol is reserved by another strategy": "paper_symbol_reserved",
+        "Paper reservation cash is insufficient": "paper_cash_insufficient",
+        "Paper spot sell exceeds reserved holdings": "paper_holdings_exceeded",
+        "Paper reservation does not include this symbol": "paper_symbol_mismatch",
+        "Paper reservation does not match the configured account": "paper_scope_mismatch",
+        "Paper reservation scope is unavailable": "paper_scope_unavailable",
+        "Activate a local paper budget before trading this symbol": "paper_budget_required",
+        "Unresolved live order requires reconciliation": "unresolved_live_order",
+        "Opening orders are paused": "opening_paused",
+        "Price freshness is unavailable": "price_freshness_unavailable",
+        "Price is stale": "price_stale",
+        "Protective reduce cannot open exposure": "protective_reduce_rejected",
     }.get(reason, "risk_rejected")
 
 
@@ -125,6 +138,11 @@ class UnifiedOrderManager:
         post_live_order_sync: PostLiveOrderSyncCallback | None = None,
         allow_live_open_orders: bool = False,
         live_max_order_notional: float = 0.0,
+        paper_book: Any | None = None,
+        paper_scope_id: Callable[[], str | None] | None = None,
+        opening_pause_checker: Callable[[], bool] | None = None,
+        price_observed_at_provider: Callable[[str], int | None] | None = None,
+        max_price_age_ms: int = 0,
     ) -> None:
         self.router = router
         self.repository = repository
@@ -143,6 +161,11 @@ class UnifiedOrderManager:
         self.post_live_order_sync = post_live_order_sync
         self.allow_live_open_orders = allow_live_open_orders
         self.live_max_order_notional = live_max_order_notional
+        self.paper_book = paper_book
+        self.paper_scope_id = paper_scope_id
+        self.opening_pause_checker = opening_pause_checker
+        self.price_observed_at_provider = price_observed_at_provider
+        self.max_price_age_ms = max(0, int(max_price_age_ms))
         self._balances: dict[str, float] = {}
         self._order_seq = 0
         self._order_token = uuid.uuid4().hex[:12]
@@ -160,6 +183,7 @@ class UnifiedOrderManager:
         stop_loss: float | None = None,
         take_profit: float | None = None,
         strategy_name: str = "",
+        protective_reduce: bool = False,
     ) -> Order:
         self._order_seq += 1
         order = Order(
@@ -176,13 +200,38 @@ class UnifiedOrderManager:
         if self.router.mode == "live":
             order.symbol = self._canonical_state_symbol(symbol)
             self._enrich_live_order_metadata(order)
-        if self.kill_switch_checker is not None and self.kill_switch_checker():
+        protective = protective_reduce and self._order_only_reduces_exposure(order, strategy_name)
+        if protective_reduce and not protective:
+            return await self._reject_order(
+                order,
+                strategy_name,
+                RiskGateResult(
+                    False,
+                    "Protective reduce cannot open exposure",
+                    effective_price=price,
+                ),
+            )
+        if not protective and self.kill_switch_checker is not None and self.kill_switch_checker():
             risk_result = RiskGateResult(
                 passed=False,
                 reason="Kill switch engaged",
                 effective_price=price,
             )
             return await self._reject_order(order, strategy_name, risk_result)
+        if not protective and self._opening_pause_blocks(order, strategy_name):
+            return await self._reject_order(
+                order,
+                strategy_name,
+                RiskGateResult(False, "Opening orders are paused", effective_price=price),
+            )
+        if not protective:
+            stale_reason = self._stale_price_block(order, strategy_name)
+            if stale_reason is not None:
+                return await self._reject_order(
+                    order,
+                    strategy_name,
+                    RiskGateResult(False, stale_reason, effective_price=price),
+                )
 
         if order.type is OrderType.LIMIT:
             try:
@@ -199,6 +248,14 @@ class UnifiedOrderManager:
                         effective_price=price,
                     ),
                 )
+
+        paper_block = None if protective else self._paper_order_block(order, strategy_name)
+        if paper_block is not None:
+            return await self._reject_order(
+                order,
+                strategy_name,
+                RiskGateResult(False, paper_block, effective_price=price),
+            )
 
         lease_acquired = await self._acquire_live_submission_lease()
         if self.router.mode == "live" and not lease_acquired:
@@ -225,16 +282,35 @@ class UnifiedOrderManager:
                             effective_price=price,
                         ),
                     )
-            risk_result = self._check_risk_gate(order, strategy_name)
+            risk_result = (
+                RiskGateResult(passed=True)
+                if protective
+                else self._check_risk_gate(order, strategy_name)
+            )
             if not risk_result.passed:
                 return await self._reject_order(order, strategy_name, risk_result)
-            if self.kill_switch_checker is not None and self.kill_switch_checker():
+            if (
+                not protective
+                and self.kill_switch_checker is not None
+                and self.kill_switch_checker()
+            ):
                 return await self._reject_order(
                     order,
                     strategy_name,
                     RiskGateResult(
                         False,
                         "Kill switch engaged",
+                        effective_price=price,
+                    ),
+                )
+
+            if self._unresolved_live_submission():
+                return await self._reject_order(
+                    order,
+                    strategy_name,
+                    RiskGateResult(
+                        False,
+                        "Unresolved live order requires reconciliation",
                         effective_price=price,
                     ),
                 )
@@ -708,6 +784,154 @@ class UnifiedOrderManager:
             return [] if position is None else [position]
         return []
 
+    def _unresolved_live_submission(self) -> bool:
+        if getattr(self.router, "mode", None) != "live" or self.repository is None:
+            return False
+        getter = getattr(self.repository, "get_risk_events", None)
+        if not callable(getter):
+            return False
+        try:
+            events = list(getter())
+        except Exception:
+            logger.exception("读取未知订单事件失败")
+            return True
+        clients: list[str] = []
+        missing_identity = False
+        for event in events:
+            reason, client = self._risk_event_identity(event)
+            if reason not in {
+                "live_order_submission_unknown",
+                "live_order_persistence_failed",
+            }:
+                continue
+            if client:
+                clients.append(client)
+            else:
+                missing_identity = True
+        if not clients and not missing_identity:
+            return False
+        try:
+            orders = list(self.repository.get_orders())
+        except Exception:
+            logger.exception("读取未决订单失败")
+            return True
+        status_by_client: dict[str, str] = {}
+        for existing in orders:
+            client = str(getattr(existing, "client_order_id", "") or "")
+            if client:
+                status_by_client[client] = self._order_status_value(existing)
+        if missing_identity:
+            return True
+        terminal = {"filled", "cancelled", "canceled", "rejected"}
+        return any(status_by_client.get(client) not in terminal for client in clients)
+
+    @staticmethod
+    def _risk_event_identity(event: object) -> tuple[str, str]:
+        if isinstance(event, dict):
+            payload = event
+            reason = str(event.get("reason_code") or "")
+        else:
+            payload = getattr(event, "payload", None)
+            reason = str(getattr(event, "reason_code", "") or "")
+            if not isinstance(payload, dict):
+                payload = {}
+        client = str(payload.get("client_order_id") or "")
+        if not client and isinstance(event, dict):
+            client = str(event.get("client_order_id") or "")
+        return reason, client
+
+    @staticmethod
+    def _order_status_value(order: object) -> str:
+        status = getattr(order, "status", "")
+        return str(getattr(status, "value", status) or "").strip().lower()
+
+    def _read_paper_scope(self) -> tuple[str, str | None]:
+        if self.paper_scope_id is None:
+            return "missing", None
+        try:
+            return "ok", self.paper_scope_id()
+        except Exception:
+            logger.exception("读取本地模拟资金范围失败")
+            return "failed", None
+
+    def _matched_reservation(self, strategy_name: str) -> Any | None:
+        if self.paper_book is None or getattr(self.router, "mode", None) != "demo":
+            return None
+        status, scope_id = self._read_paper_scope()
+        if status != "ok" or not scope_id:
+            return None
+        matches = [
+            item for item in self.paper_book.for_strategy(strategy_name)
+            if item.scope_id == scope_id
+        ]
+        return matches[0] if matches else None
+
+    def _paper_order_block(self, order: Order, strategy_name: str) -> str | None:
+        if self.paper_book is None or getattr(self.router, "mode", None) != "demo":
+            return None
+        status, scope_id = self._read_paper_scope()
+        reservations = self.paper_book.for_strategy(strategy_name)
+        if status == "failed" or not scope_id:
+            if reservations or self.paper_book.has_active():
+                return "Paper reservation scope is unavailable"
+            return None
+        if any(item.scope_id != scope_id for item in reservations):
+            return "Paper reservation does not match the configured account"
+        symbol = self._paper_symbol(order.symbol)
+        owner = self.paper_book.owner(scope_id, order.symbol) if symbol is not None else None
+        if owner is not None and owner.strategy != strategy_name:
+            return "Symbol is reserved by another strategy"
+        matched = [item for item in reservations if item.scope_id == scope_id]
+        if not matched:
+            if self.paper_book.scope_has_active(scope_id):
+                return "Activate a local paper budget before trading this symbol"
+            return None
+        reservation = matched[0]
+        if symbol is None or reservation.symbol != symbol:
+            return "Paper reservation does not include this symbol"
+        return self._paper_capacity_block(order, strategy_name)
+
+    @staticmethod
+    def _paper_symbol(symbol: str) -> str | None:
+        try:
+            return normalize_spot_symbol(symbol)
+        except ValueError:
+            return None
+
+    def _paper_capacity_block(self, order: Order, strategy_name: str) -> str | None:
+        try:
+            amount = float(order.amount)
+        except (TypeError, ValueError, OverflowError):
+            amount = 0.0
+        if not math.isfinite(amount) or amount <= 0.0:
+            return "Paper reservation requires a positive amount"
+        if order.side == OrderSide.SELL:
+            available = 0.0
+            for position in self.get_positions(strategy_name, order.symbol):
+                side = str(getattr(position, "side", "")).lower()
+                if side in {"long", "buy"}:
+                    available += position_order_quantity(position)
+            if amount > available + 1e-8:
+                return "Paper spot sell exceeds reserved holdings"
+            return None
+        if order.side != OrderSide.BUY:
+            return "Paper reservation supports spot buy and sell only"
+        price = order.price
+        if price is None and self.price_provider is not None:
+            price = self.price_provider(order.symbol)
+        try:
+            normalized_price = float(price)
+        except (TypeError, ValueError, OverflowError):
+            normalized_price = 0.0
+        if not math.isfinite(normalized_price) or normalized_price <= 0.0:
+            return "Paper reservation requires a positive price"
+        required = amount * normalized_price
+        if self.fee_rate > 0.0:
+            required += required * self.fee_rate
+        if self.get_balance(strategy_name) + 1e-8 < required:
+            return "Paper reservation cash is insufficient"
+        return None
+
     def get_balance(self, strategy_name: str) -> float:
         if self.repository is not None and hasattr(self.repository, "get_account"):
             source, runtime_mode = self._runtime_provenance()
@@ -719,6 +943,9 @@ class UnifiedOrderManager:
                 account = self.repository.get_account(strategy_name)
             if account is not None and self._position_matches_runtime(account):
                 return account.cash_balance
+        reserved = self._matched_reservation(strategy_name)
+        if reserved is not None:
+            return reserved.budget
         return self._balances.get(strategy_name, self.initial_equity)
 
     def set_balance(self, strategy_name: str, amount: float) -> None:
@@ -1087,6 +1314,12 @@ class UnifiedOrderManager:
         )
         if account is None:
             peak_equity = max(peak_equity, self._peak_equity)
+            reserved = self._matched_reservation(strategy_name)
+            if reserved is not None:
+                total_equity = reserved.budget
+                current_equity = reserved.budget
+                initial_equity = reserved.budget
+                peak_equity = max(peak_equity, reserved.budget)
         self._peak_equity = peak_equity
 
         result = self.risk_manager.check_order(
@@ -1460,6 +1693,61 @@ class UnifiedOrderManager:
         if client_order_id:
             order.client_order_id = client_order_id
 
+    def _opening_orders_paused(self) -> bool:
+        checker = self.opening_pause_checker
+        if checker is None:
+            return False
+        try:
+            return bool(checker())
+        except Exception:
+            logger.warning("读取暂停开仓状态失败", exc_info=True)
+            return True
+
+    def _stale_price_block(self, order: Order, strategy_name: str) -> str | None:
+        if self.price_observed_at_provider is None or self.max_price_age_ms <= 0:
+            return None
+        if self._order_only_reduces_exposure(order, strategy_name):
+            return None
+        try:
+            observed = self.price_observed_at_provider(order.symbol)
+        except Exception:
+            logger.warning("读取行情时间失败", exc_info=True)
+            return "Price freshness is unavailable"
+        if observed is None:
+            return "Price freshness is unavailable"
+        try:
+            age = int(self.timestamp_ms()) - int(observed)
+        except (TypeError, ValueError):
+            return "Price freshness is unavailable"
+        if age > self.max_price_age_ms:
+            return "Price is stale"
+        return None
+
+    def _opening_pause_blocks(self, order: Order, strategy_name: str) -> bool:
+        if not self._opening_orders_paused():
+            return False
+        return not self._order_only_reduces_exposure(order, strategy_name)
+
+    def _order_only_reduces_exposure(self, order: Order, strategy_name: str) -> bool:
+        try:
+            amount = float(order.amount)
+        except (TypeError, ValueError):
+            return False
+        if amount <= 0.0:
+            return False
+        reducing_side = "short" if order.side == OrderSide.BUY else "long"
+        try:
+            positions = self.get_positions(strategy_name, order.symbol)
+        except Exception:
+            logger.warning("读取持仓以判断暂停开仓失败", exc_info=True)
+            return False
+        available = 0.0
+        for position in positions:
+            if str(getattr(position, "side", "")).lower() != reducing_side:
+                continue
+            available += position_order_quantity(position)
+        return available + 1e-8 >= amount
+
     async def _reject_order(
         self,
         order: Order,
@@ -1591,9 +1879,13 @@ class UnifiedOrderManager:
             self.repository.upsert_order(order_record)
             return
 
+        initial_equity = self.initial_equity
+        reserved = self._matched_reservation(strategy_name)
+        if reserved is not None:
+            initial_equity = reserved.budget
         service = PaperAccountingService(
             repository=self.repository,
-            initial_equity=self.initial_equity,
+            initial_equity=initial_equity,
             fee_rate=self.fee_rate,
             runtime_mode=self._runtime_provenance()[1],
         )

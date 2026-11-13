@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
+import { ElMessage, ElMessageBox } from 'element-plus';
 import { CircleCheckFilled, CircleCloseFilled } from '@element-plus/icons-vue';
 
 import AccountOverview from '@/components/dashboard/AccountOverview.vue';
@@ -9,6 +10,14 @@ import StrategyPerformanceTable from '@/components/dashboard/StrategyPerformance
 import AppPageHeader from '@/components/ui/AppPageHeader.vue';
 import MetricCard from '@/components/ui/MetricCard.vue';
 import StatusBadge from '@/components/ui/StatusBadge.vue';
+import {
+  fetchKillSwitch,
+  fetchOpeningPause,
+  updateKillSwitch,
+  updateOpeningPause,
+  cancelOpenOrders,
+  flattenPositions,
+} from '@/services/ops';
 import { useDashboardStore } from '@/stores/dashboard';
 import { useStrategiesStore } from '@/stores/strategies';
 import { formatRuntimeCurrency, formatRuntimeTime } from '@/utils/dashboard';
@@ -122,8 +131,158 @@ function retryStrategyPerformance() {
   void dashboard.refreshStrategyPerformance();
 }
 
+const killSwitchEngaged = ref(false);
+const killSwitchSaving = ref(false);
+const killSwitchStatus = ref('');
+
+async function loadKillSwitch(): Promise<void> {
+  try {
+    const state = await fetchKillSwitch();
+    killSwitchEngaged.value = state.engaged;
+    killSwitchStatus.value = state.engaged ? t('dashboard.killSwitchEngaged') : '';
+  } catch {
+    killSwitchStatus.value = t('dashboard.killSwitchError');
+  }
+}
+
+async function toggleKillSwitch(): Promise<void> {
+  const nextEngaged = !killSwitchEngaged.value;
+  try {
+    await ElMessageBox.confirm(
+      nextEngaged ? t('dashboard.engageKillSwitchConfirm') : t('dashboard.releaseKillSwitchConfirm'),
+      t('dashboard.killSwitch'),
+      {
+        type: 'warning',
+        confirmButtonText: t('common.confirm'),
+        cancelButtonText: t('common.cancel'),
+      },
+    );
+  } catch {
+    return;
+  }
+
+  killSwitchSaving.value = true;
+  try {
+    const state = await updateKillSwitch(nextEngaged, t('dashboard.killSwitchReason'));
+    killSwitchEngaged.value = state.engaged;
+    killSwitchStatus.value = state.engaged ? t('dashboard.killSwitchEngaged') : '';
+  } catch {
+    ElMessage.error(t('dashboard.killSwitchError'));
+  } finally {
+    killSwitchSaving.value = false;
+  }
+}
+
+const openingPaused = ref(false);
+const openingPauseSaving = ref(false);
+const openingPauseStatus = ref('');
+
+async function loadOpeningPause(): Promise<void> {
+  try {
+    const state = await fetchOpeningPause();
+    openingPaused.value = state.paused;
+    openingPauseStatus.value = state.paused ? t('dashboard.openingPaused') : '';
+  } catch {
+    openingPauseStatus.value = t('dashboard.pauseOpeningError');
+  }
+}
+
+async function toggleOpeningPause(): Promise<void> {
+  const nextPaused = !openingPaused.value;
+  try {
+    await ElMessageBox.confirm(
+      nextPaused ? t('dashboard.pauseOpeningConfirm') : t('dashboard.resumeOpeningConfirm'),
+      t('dashboard.pauseOpening'),
+      {
+        type: 'warning',
+        confirmButtonText: t('common.confirm'),
+        cancelButtonText: t('common.cancel'),
+      },
+    );
+  } catch {
+    return;
+  }
+
+  openingPauseSaving.value = true;
+  try {
+    const state = await updateOpeningPause(nextPaused, t('dashboard.pauseOpeningReason'));
+    openingPaused.value = state.paused;
+    openingPauseStatus.value = state.paused ? t('dashboard.openingPaused') : '';
+  } catch {
+    ElMessage.error(t('dashboard.pauseOpeningError'));
+  } finally {
+    openingPauseSaving.value = false;
+  }
+}
+
+const emergencySaving = ref(false);
+
+function applyEmergencyState(result: { kill_switch: { engaged: boolean }; opening_pause: { paused: boolean } }): void {
+  killSwitchEngaged.value = result.kill_switch.engaged;
+  killSwitchStatus.value = result.kill_switch.engaged ? t('dashboard.killSwitchEngaged') : '';
+  openingPaused.value = result.opening_pause.paused;
+  openingPauseStatus.value = result.opening_pause.paused ? t('dashboard.openingPaused') : '';
+}
+
+async function confirmEmergency(messageKey: string, titleKey: string): Promise<boolean> {
+  try {
+    await ElMessageBox.confirm(t(messageKey), t(titleKey), {
+      type: 'warning',
+      confirmButtonText: t('common.confirm'),
+      cancelButtonText: t('common.cancel'),
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function cancelOrders(): Promise<void> {
+  if (!await confirmEmergency('dashboard.cancelOrdersConfirm', 'dashboard.cancelOrders')) {
+    return;
+  }
+  emergencySaving.value = true;
+  try {
+    const result = await cancelOpenOrders();
+    applyEmergencyState(result);
+    ElMessage.success(t('dashboard.cancelOrdersDone', { count: result.cancelled.length }));
+    if (result.failed.length > 0) {
+      ElMessage.warning(t('dashboard.cancelOrdersPartial', { count: result.failed.length }));
+    }
+  } catch {
+    ElMessage.error(t('dashboard.cancelOrdersError'));
+  } finally {
+    emergencySaving.value = false;
+  }
+}
+
+async function flatten(): Promise<void> {
+  if (!await confirmEmergency('dashboard.flattenPositionsConfirm', 'dashboard.flattenPositions')) {
+    return;
+  }
+  emergencySaving.value = true;
+  try {
+    const result = await flattenPositions();
+    applyEmergencyState(result);
+    ElMessage.success(t('dashboard.flattenPositionsDone', {
+      count: result.cancelled.length,
+      closed: result.closed?.length ?? 0,
+    }));
+    const failed = result.failed.length + (result.close_failed?.length ?? 0);
+    if (failed > 0) {
+      ElMessage.warning(t('dashboard.flattenPositionsPartial', { count: failed }));
+    }
+  } catch {
+    ElMessage.error(t('dashboard.flattenPositionsError'));
+  } finally {
+    emergencySaving.value = false;
+  }
+}
+
 onMounted(() => {
   refreshAll();
+  void loadKillSwitch();
+  void loadOpeningPause();
 });
 </script>
 
@@ -141,6 +300,41 @@ onMounted(() => {
         />
         <el-button :loading="headerLoading" @click="refreshAll">
           {{ t('common.refresh') }}
+        </el-button>
+        <el-button
+          class="dashboard-view__kill-switch"
+          :type="killSwitchEngaged ? 'danger' : 'warning'"
+          :loading="killSwitchSaving"
+          @click="toggleKillSwitch"
+        >
+          {{ killSwitchEngaged ? t('dashboard.releaseKillSwitch') : t('dashboard.engageKillSwitch') }}
+        </el-button>
+        <span v-if="killSwitchStatus" class="dashboard-view__kill-switch-status">{{ killSwitchStatus }}</span>
+        <el-button
+          class="dashboard-view__opening-pause"
+          :type="openingPaused ? 'danger' : 'warning'"
+          :loading="openingPauseSaving"
+          @click="toggleOpeningPause"
+        >
+          {{ openingPaused ? t('dashboard.resumeOpening') : t('dashboard.pauseOpening') }}
+        </el-button>
+        <span v-if="openingPauseStatus" class="dashboard-view__opening-pause-status">{{ openingPauseStatus }}</span>
+        <el-button
+          class="dashboard-view__cancel-orders"
+          type="danger"
+          plain
+          :loading="emergencySaving"
+          @click="cancelOrders"
+        >
+          {{ t('dashboard.cancelOrders') }}
+        </el-button>
+        <el-button
+          class="dashboard-view__flatten"
+          type="danger"
+          :loading="emergencySaving"
+          @click="flatten"
+        >
+          {{ t('dashboard.flattenPositions') }}
         </el-button>
       </template>
     </AppPageHeader>

@@ -1,4 +1,5 @@
 import asyncio
+import os
 import subprocess
 import sys
 from dataclasses import asdict
@@ -96,6 +97,21 @@ class FakeKillSwitchRepository:
 
     def get_strategy_configs(self):
         return []
+
+
+def test_login_accepts_only_the_configured_token(monkeypatch):
+    monkeypatch.delenv("OKX_BOT_API_TOKEN", raising=False)
+    open_client = TestClient(create_app())
+    assert open_client.get("/api/auth/session").json() == {"required": False}
+    assert open_client.post("/api/auth/login", json={"token": ""}).status_code == 200
+
+    monkeypatch.setenv("OKX_BOT_API_TOKEN", "secret-token")
+    client = TestClient(create_app())
+    assert client.get("/api/auth/session").json() == {"required": True}
+    assert client.post("/api/auth/login", json={"token": "wrong"}).status_code == 401
+    assert client.post("/api/auth/login", json={"token": "secret-token"}).json()["ok"] is True
+    assert client.get("/api/health").status_code == 200
+    assert client.get("/api/ops/kill-switch").status_code == 401
 
 
 def test_kill_switch_api_defaults_to_disengaged(monkeypatch):
@@ -4012,6 +4028,258 @@ async def test_start_strategy_rejects_live_missing_credentials_before_creating_r
 
 
 @pytest.mark.asyncio
+async def test_strategy_start_rejects_a_lease_held_by_another_process(monkeypatch):
+    class LeaseRepository:
+        def get_kill_switch(self):
+            return SimpleNamespace(engaged=False)
+
+        def acquire_strategy_lease(self, name, owner):
+            assert name == "ma_cross"
+            assert owner
+            return False
+
+    class Settings:
+        mode = "demo"
+
+    created_engines = 0
+
+    class SentinelBotEngine:
+        def __init__(self, *args, **kwargs):
+            nonlocal created_engines
+            created_engines += 1
+            raise AssertionError("leased strategy must not start an engine")
+
+    monkeypatch.setattr(strategy_api, "Repository", lambda: LeaseRepository())
+    monkeypatch.setattr(strategy_api, "load_runtime_settings", lambda: Settings())
+    monkeypatch.setattr(strategy_api, "BotEngine", SentinelBotEngine)
+    runtime = strategy_api.StrategyRuntimeState()
+    app = FastAPI()
+    app.include_router(strategy_api.create_router(runtime=runtime), prefix="/api/strategies")
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/api/strategies/ma_cross/start")
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "strategy_lease_held"
+    assert created_engines == 0
+
+
+@pytest.mark.asyncio
+async def test_strategy_stop_releases_the_execution_lease(monkeypatch):
+    released = []
+
+    class LeaseRepository:
+        def release_strategy_lease(self, name, owner):
+            released.append((name, owner))
+
+    monkeypatch.setattr(strategy_api, "Repository", lambda: LeaseRepository())
+    runtime = strategy_api.StrategyRuntimeState()
+    app = FastAPI()
+    app.include_router(strategy_api.create_router(runtime=runtime), prefix="/api/strategies")
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/api/strategies/ma_cross/stop")
+
+    assert response.status_code == 200
+    assert released == [("ma_cross", str(os.getpid()))]
+
+
+def test_opening_pause_api_round_trip(monkeypatch):
+    FakeKillSwitchRepository.pause = {"paused": False, "reason": "", "updated_at": 0}
+
+    def get_opening_pause(self):
+        class State:
+            paused = FakeKillSwitchRepository.pause["paused"]
+            reason = FakeKillSwitchRepository.pause["reason"]
+            updated_at = FakeKillSwitchRepository.pause["updated_at"]
+
+        return State()
+
+    def set_opening_pause(self, paused, reason, updated_at):
+        FakeKillSwitchRepository.pause = {
+            "paused": paused,
+            "reason": reason,
+            "updated_at": updated_at,
+        }
+        return get_opening_pause(self)
+
+    monkeypatch.setattr(
+        FakeKillSwitchRepository, "get_opening_pause", get_opening_pause, raising=False
+    )
+    monkeypatch.setattr(
+        FakeKillSwitchRepository, "set_opening_pause", set_opening_pause, raising=False
+    )
+    monkeypatch.setattr(ops_api, "Repository", FakeKillSwitchRepository, raising=False)
+    monkeypatch.setattr(ops_api, "current_timestamp_ms", lambda: 1700000000000, raising=False)
+
+    client = TestClient(create_app())
+    paused = client.put(
+        "/api/ops/opening-pause",
+        json={"paused": True, "reason": "stand aside"},
+    )
+
+    assert paused.status_code == 200
+    assert paused.json() == {
+        "paused": True,
+        "reason": "stand aside",
+        "updated_at": 1700000000000,
+    }
+    assert client.get("/api/ops/opening-pause").json()["paused"] is True
+
+
+def test_flatten_engages_protection_then_cancels_and_closes(monkeypatch):
+    from src.order.manager import UnifiedOrderManager
+    from src.order.router import OrderRouter
+    from tests.unit.test_order_router import FakeRepository, MockHandler
+
+    FakeKillSwitchRepository.state = {"engaged": False, "reason": "", "updated_at": 0}
+    FakeKillSwitchRepository.pause = {"paused": False, "reason": "", "updated_at": 0}
+
+    def get_opening_pause(self):
+        class State:
+            paused = FakeKillSwitchRepository.pause["paused"]
+            reason = FakeKillSwitchRepository.pause["reason"]
+            updated_at = FakeKillSwitchRepository.pause["updated_at"]
+
+        return State()
+
+    def set_opening_pause(self, paused, reason, updated_at):
+        FakeKillSwitchRepository.pause = {
+            "paused": paused,
+            "reason": reason,
+            "updated_at": updated_at,
+        }
+        return get_opening_pause(self)
+
+    repository = FakeRepository()
+    order = OrderRecord(
+        order_id="local-1",
+        exchange_order_id="exchange-1",
+        strategy="ma_cross",
+        symbol="BTC-USDT",
+        side="buy",
+        type="limit",
+        amount=0.1,
+        price=49000.0,
+        status="pending",
+        fill_price=0.0,
+        timestamp=1700000000000,
+        updated_at=1700000000000,
+        filled_amount=0.0,
+        remaining_amount=0.1,
+    )
+    repository.orders.append(order)
+    repository.upsert_position(
+        PositionRecord(
+            strategy="ma_cross",
+            symbol="BTC-USDT",
+            side="long",
+            amount=0.2,
+            entry_price=50000.0,
+            leverage=1,
+            timestamp=1700000000000,
+        )
+    )
+    handler = MockHandler()
+    manager = UnifiedOrderManager(
+        router=OrderRouter(backtest=handler, mode="backtest"),
+        repository=repository,
+        timestamp_ms=lambda: 1700000000000,
+        kill_switch_checker=lambda: True,
+    )
+    monkeypatch.setattr(
+        FakeKillSwitchRepository, "get_opening_pause", get_opening_pause, raising=False
+    )
+    monkeypatch.setattr(
+        FakeKillSwitchRepository, "set_opening_pause", set_opening_pause, raising=False
+    )
+    monkeypatch.setattr(ops_api, "Repository", FakeKillSwitchRepository, raising=False)
+    monkeypatch.setattr(ops_api, "current_timestamp_ms", lambda: 1700000000000, raising=False)
+    monkeypatch.setattr(ops_api, "emergency_order_manager", lambda: manager, raising=False)
+
+    client = TestClient(create_app())
+    response = client.post("/api/ops/flatten")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["cancelled"] == ["exchange-1"]
+    assert body["closed"][0]["side"] == "sell"
+    assert body["closed"][0]["amount"] == 0.2
+    assert body["kill_switch"]["engaged"] is True
+    assert body["opening_pause"]["paused"] is True
+    assert handler.submitted[0].side.value == "sell"
+    assert client.get("/api/ops/kill-switch").json()["engaged"] is True
+
+
+def test_cancel_orders_engages_protection_without_submitting(monkeypatch):
+    from src.order.manager import UnifiedOrderManager
+    from src.order.router import OrderRouter
+    from tests.unit.test_order_router import FakeRepository, MockHandler
+
+    FakeKillSwitchRepository.state = {"engaged": False, "reason": "", "updated_at": 0}
+    FakeKillSwitchRepository.pause = {"paused": False, "reason": "", "updated_at": 0}
+
+    def get_opening_pause(self):
+        class State:
+            paused = FakeKillSwitchRepository.pause["paused"]
+            reason = FakeKillSwitchRepository.pause["reason"]
+            updated_at = FakeKillSwitchRepository.pause["updated_at"]
+
+        return State()
+
+    def set_opening_pause(self, paused, reason, updated_at):
+        FakeKillSwitchRepository.pause = {
+            "paused": paused,
+            "reason": reason,
+            "updated_at": updated_at,
+        }
+        return get_opening_pause(self)
+
+    repository = FakeRepository()
+    repository.orders.append(
+        OrderRecord(
+            order_id="local-2",
+            exchange_order_id="exchange-2",
+            strategy="ma_cross",
+            symbol="ETH-USDT",
+            side="buy",
+            type="limit",
+            amount=1,
+            price=2000.0,
+            status="pending",
+            fill_price=0.0,
+            timestamp=1700000000000,
+            updated_at=1700000000000,
+            filled_amount=0.0,
+            remaining_amount=1,
+        )
+    )
+    handler = MockHandler()
+    manager = UnifiedOrderManager(
+        router=OrderRouter(backtest=handler, mode="backtest"),
+        repository=repository,
+        timestamp_ms=lambda: 1700000000000,
+    )
+    monkeypatch.setattr(
+        FakeKillSwitchRepository, "get_opening_pause", get_opening_pause, raising=False
+    )
+    monkeypatch.setattr(
+        FakeKillSwitchRepository, "set_opening_pause", set_opening_pause, raising=False
+    )
+    monkeypatch.setattr(ops_api, "Repository", FakeKillSwitchRepository, raising=False)
+    monkeypatch.setattr(ops_api, "emergency_order_manager", lambda: manager, raising=False)
+
+    response = TestClient(create_app()).post("/api/ops/cancel-orders")
+
+    assert response.status_code == 200
+    assert response.json()["cancelled"] == ["exchange-2"]
+    assert response.json()["kill_switch"]["engaged"] is True
+    assert handler.submitted == []
+
+
+@pytest.mark.asyncio
 async def test_start_strategy_rejects_unknown_runtime_mode(monkeypatch):
     monkeypatch.setattr(
         strategy_api,
@@ -6872,7 +7140,9 @@ async def test_get_backtest_result_detail_returns_result_klines_and_markers(monk
 
     assert resp.status_code == 200
     data = resp.json()
-    assert set(data) == {"result", "klines", "markers"}
+    assert set(data) == {"result", "klines", "markers", "equity_curve", "rejected_orders"}
+    assert data["equity_curve"] == []
+    assert data["rejected_orders"] == []
     assert data["result"]["id"] == "bt-detail"
     assert data["result"]["symbol"] == "BTC-USDT"
     assert data["klines"] == [

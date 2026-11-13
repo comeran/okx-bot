@@ -18,6 +18,18 @@ vi.mock('@/utils/backtest', async (importOriginal) => ({
   formatBacktestTime: backtestUtils.formatBacktestTime,
 }));
 
+vi.mock('@/components/backtest/EquityChart.vue', () => ({
+  default: defineComponent({
+    name: 'EquityChart',
+    props: ['points', 'height'],
+    setup(props) {
+      return () => h('equity-chart-stub', {
+        'data-points': (props.points as unknown[]).length,
+      });
+    },
+  }),
+}));
+
 vi.mock('@/components/charts/Candlestick.vue', () => ({
   default: defineComponent({
     name: 'Candlestick',
@@ -143,6 +155,38 @@ describe('BacktestResultDetail', () => {
     expect(wrapper.findAll((node) => node.type === 'section' && String(node.props.class).includes('backtest-result-detail__'))).toHaveLength(2);
     expect(wrapper.find((node) => node.type === 'div' && String(node.props.class).includes('backtest-result-detail__metrics'))).toBeTruthy();
     expect(wrapper.find((node) => node.type === 'dl' && String(node.props.class).includes('backtest-result-detail__fields'))).toBeTruthy();
+  });
+
+  it('shows the equity curve and rejected orders recorded for the run', async () => {
+    const wrapper = await mount(BacktestResultDetail, {
+      locale: 'en',
+      props: {
+        selectedDetail: {
+          ...detail,
+          equity_curve: [
+            { seq: 0, timestamp: 1, equity: 100, drawdown: 0 },
+            { seq: 1, timestamp: 2, equity: 80, drawdown: 0.2 },
+          ],
+          rejected_orders: [
+            {
+              symbol: 'BTC-USDT',
+              side: 'buy',
+              timestamp: 2,
+              amount: 2,
+              price: null,
+              reason: 'Order exceeds maximum position size',
+            },
+          ],
+        },
+        selectedResultId: 'result-a',
+        loading: false,
+        error: null,
+      },
+    });
+
+    expect(wrapper.find((node) => node.type === 'equity-chart-stub').props['data-points']).toBe(2);
+    expect(wrapper.text()).toContain('Order exceeds maximum position size');
+    expect(wrapper.text()).toContain('Rejected orders');
   });
 
   it('emits retry when the detail fails to load', async () => {

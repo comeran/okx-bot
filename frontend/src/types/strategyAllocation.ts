@@ -12,6 +12,17 @@ export interface AllocationContext {
   execution_ready: false;
 }
 
+export interface PaperReservation {
+  strategy: string;
+  symbol: string;
+  budget: number;
+  cash: number;
+  holdings: number;
+  revision: number;
+  scope_id: string;
+  status: 'active';
+}
+
 export interface StrategyAllocationDraft {
   strategy: string;
   symbol: string;
@@ -30,6 +41,8 @@ export interface StrategyAllocationDraft {
 export interface StrategyAllocationEnvelope {
   context: AllocationContext;
   draft: StrategyAllocationDraft | null;
+  reservation?: PaperReservation | null;
+  other_scope_reservation?: boolean;
   strategy: string;
   symbol: string;
   currency: string;

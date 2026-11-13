@@ -106,6 +106,7 @@ class MarketDataService:
         self._buffers: dict[str, deque[Bar]] = {}
         self._current_bars: dict[str, Bar] = {}
         self._last_bar_timestamps: dict[str, int] = {}
+        self._price_observed_at: dict[str, int] = {}
         self._required_bars: dict[str, int] = {}
         self._subscriber_last_bar_timestamps: dict[str, dict[int, int]] = {}
         self._subscriber_failures: dict[str, dict[int, int]] = {}
@@ -202,6 +203,13 @@ class MarketDataService:
         if state and bar.timestamp <= state[-1].timestamp:
             return
         state.append(bar)
+        self._remember_price_observation(key)
+
+    def _remember_price_observation(self, key: str) -> None:
+        self._price_observed_at[key] = int(time.time() * 1000)
+
+    def price_observed_at(self, symbol: str, timeframe: str) -> int | None:
+        return self._price_observed_at.get(self._health_key(symbol, timeframe))
 
     def _parse_ohlcv_rows(self, rows: object, key: str) -> list[Bar]:
         try:
@@ -635,6 +643,7 @@ class MarketDataService:
                 # delivery watermarks and the shared buffer only advance after
                 # subscribers accept the bar.
                 self._current_bars[key] = bar
+                self._remember_price_observation(key)
                 bar_callback_errors: list[Exception] = []
                 callbacks = list(self._subscriptions.get(key, []))
                 subscriber_state = self._subscriber_last_bar_timestamps.setdefault(key, {})

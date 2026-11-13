@@ -23,6 +23,7 @@ from src.exchange.base import canonical_symbol, is_supported_canonical_symbol
 from src.exchange.errors import MalformedProviderData
 from src.exchange.factory import create_okx_adapter
 from src.notify.telegram import RiskEventTelegramNotifier, TelegramNotifier
+from src.ops.flatten import cancel_open_orders, flatten_exposure
 from src.ops.private_sync import sync_private_state
 from src.web.api import settings as settings_api
 from src.web.api import trading
@@ -34,6 +35,11 @@ RuntimeBroadcaster = Callable[[dict[str, object]], Awaitable[None]]
 
 class KillSwitchRequest(BaseModel):
     engaged: bool
+    reason: str = ""
+
+
+class OpeningPauseRequest(BaseModel):
+    paused: bool
     reason: str = ""
 
 
@@ -63,6 +69,40 @@ def serialize_kill_switch(state) -> dict[str, object]:
         "engaged": state.engaged,
         "reason": state.reason,
         "updated_at": state.updated_at,
+    }
+
+
+def serialize_opening_pause(state) -> dict[str, object]:
+    return {
+        "paused": state.paused,
+        "reason": state.reason,
+        "updated_at": state.updated_at,
+    }
+
+
+def engage_emergency_stop(reason: str) -> tuple[object, object]:
+    repository = Repository()
+    now = current_timestamp_ms()
+    kill_switch = repository.set_kill_switch(True, reason, now)
+    opening_pause = repository.set_opening_pause(True, reason, now)
+    return kill_switch, opening_pause
+
+
+def emergency_order_manager():
+    from src.web.api.strategies import create_order_manager
+
+    repository = Repository()
+    return create_order_manager(
+        repository=repository,
+        kill_switch_checker=lambda: bool(repository.get_kill_switch().engaged),
+    )
+
+
+def _emergency_payload(result: dict[str, object], kill_switch, opening_pause) -> dict[str, object]:
+    return {
+        **result,
+        "kill_switch": serialize_kill_switch(kill_switch),
+        "opening_pause": serialize_opening_pause(opening_pause),
     }
 
 
@@ -165,6 +205,31 @@ def create_router(broadcast: RuntimeBroadcaster | None = None) -> APIRouter:
             current_timestamp_ms(),
         )
         return serialize_kill_switch(state)
+
+    @router.get("/opening-pause")
+    async def get_opening_pause() -> dict[str, object]:
+        return serialize_opening_pause(Repository().get_opening_pause())
+
+    @router.put("/opening-pause")
+    async def set_opening_pause(request: OpeningPauseRequest) -> dict[str, object]:
+        state = Repository().set_opening_pause(
+            request.paused,
+            request.reason,
+            current_timestamp_ms(),
+        )
+        return serialize_opening_pause(state)
+
+    @router.post("/cancel-orders")
+    async def cancel_orders() -> dict[str, object]:
+        kill_switch, opening_pause = engage_emergency_stop("Cancel open orders")
+        result = await cancel_open_orders(emergency_order_manager())
+        return _emergency_payload(result, kill_switch, opening_pause)
+
+    @router.post("/flatten")
+    async def flatten_positions() -> dict[str, object]:
+        kill_switch, opening_pause = engage_emergency_stop("Flatten positions")
+        result = await flatten_exposure(emergency_order_manager())
+        return _emergency_payload(result, kill_switch, opening_pause)
 
     @router.post("/sync/private")
     async def sync_private(request: PrivateSyncRequest) -> dict[str, object]:
