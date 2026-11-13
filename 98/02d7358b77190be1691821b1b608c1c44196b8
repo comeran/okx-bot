@@ -1,0 +1,442 @@
+frontend/src/composables/useWebSocket.ts
+  s_3e7081b93657e6::t_e52e3eb165152b 59
+  s_3e7081b93657e6::t_fc8b14b1019f14 57-58
+  s_3e7081b93657e6::t_de0cbf5ad85b86 9-10,21,39,71-72,83
+frontend/src/App.vue
+  s_3e7081b93657e6::t_d470bb833c8bc3 183
+  s_3e7081b93657e6::t_9f644655e23463 232
+  s_3e7081b93657e6::t_132d259dc5de69 184-186
+  s_3e7081b93657e6::t_bf97ae073237f9 5,15-16,19-20,44,48-86,88,93,96-121,123-127,143,147,164-167,176,187,193,215-216,220-223,226-227,229,238,240-255,259-263,266,274-275,281,284-292,295-305,308-313,327-330
+src/order/manager.py
+  s_3e7081b93657e6::t_a78389d78acf69 105-108
+  s_3e7081b93657e6::t_813a247f5906d2 1720-1721
+src/web/api/strategies.py
+  s_3e7081b93657e6::t_0cb6a2f364e0cf 538
+  s_3e7081b93657e6::t_75dd9c6338d458 542
+  s_3e7081b93657e6::t_353897435f6ddf 533
+  s_3e7081b93657e6::t_c34a3184f830fd 536
+  s_3e7081b93657e6::t_ba6820af1e8f7c 33
+  s_3e7081b93657e6::t_560535351bb2eb 694-695,697,710-711,724-725,730,732-733,735,740-741,749-750,766,777,825-827
+frontend/src/services/strategyAllocations.test.ts
+  s_3e7081b93657e6::t_39296446bf084c 4-9
+  s_3e7081b93657e6::t_b029ceef8a8d73 49
+  s_3e7081b93657e6::t_14f6753727e870 3
+  s_3e7081b93657e6::t_58fceccc42fd97 10-11
+  s_3e7081b93657e6::t_22d5af21c2653a 50-52
+  s_3e7081b93657e6::t_3f685f96cea57b 18-22,53-95
+tests/integration/test_web_api.py
+  s_3e7081b93657e6::t_b286d85e974642 3515
+  s_3e7081b93657e6::t_8198d10d522561 25,57,60-89,207,242,278,299,306,333,344-346,360,362-363,381,402,424,444,457,495,502,511,545,574,3663-3666,3687,3710,3721-3724,3728,3731,3745,3753-3754,3766,3774-3777,3788,3796-3799,3821-3823,3835,3848-3850,3862,3873,3891,3894-3895,3902-3904,3919-3922,4999-5000,5018-5019,5026-5027,5212-5213,5220-5221,6338-6339,6352-6353,7352-7353,7356-7358,7361,7363,7435-7436,7438-7440,7531-7534,7570-7573,7575,7589,7592,7595,7600-7601,7603-7605,7963-7964,7976,7999,8004,8009,8024,8026,8056,8059-8063,8167,8172,8176,8200-8201,8212,8253-8254,8265,8784-8785,8796,8848-8849,8857,8891-8892,8904,8956-8957,8968,9582,9585,9588,9595,9701,9711-9712,9718-9719,9721,9728-9729,9731,9737-9738,9740,9745,9748,9751,9754,9760,9765-9767,9822,9826,9834-9835,9861,9894-9896,9906,9980-9989,9991-9994,10044,10049,10057,10059
+src/data/repository.py
+  s_3e7081b93657e6::t_1ae87f3d3fa98d 2197
+  s_3e7081b93657e6::t_dc29b72c448766 2198-2200
+  s_3e7081b93657e6::t_ce35077acb61b9 6,8,18-26,43-45,51-58,66-67,69-90,330-593,596-600,938-1666,2201-2357
+frontend/src/components/strategy/StrategyAllocationPanel.test.ts
+  s_3e7081b93657e6::t_a63cb9db9f8131 7-13,21
+  s_3e7081b93657e6::t_7fea827e2fdacf 1-2,24-28,31,40-42,45-48,58,70,72-73,233-278,281-330
+frontend/src/views/Dashboard.vue
+  s_3e7081b93657e6::t_0b2d98f16ae36c 14,17
+  s_3e7081b93657e6::t_ea97473f55be09 7-8,28,41-61,63-66,360-362,376-400,403-440,477-490,509-529
+src/web/api/allocations.py
+  s_3e7081b93657e6::t_7a8efd3775b4fd 1
+  s_3e7081b93657e6::t_af31c419378e0c 7,13,15,17,21,27,29,32,35,55-58,129-131,136,182-271
+README.md
+  s_3e7081b93657e6::t_5812e048e2dba4 54-92
+docs/superpowers/plans/2026-11-11-account-config-facts-plan.md
+  s_3e7081b93657e6::t_677a215a2c0fa2 1-24
+docs/superpowers/plans/2026-11-11-account-isolation-plan.md
+  s_3e7081b93657e6::t_c5fab9e8653223 1-68
+docs/superpowers/plans/2026-11-11-account-isolation-progress.md
+  s_3e7081b93657e6::t_55e30cfe198b96 1-37
+docs/superpowers/plans/2026-11-11-exact-private-facts-plan.md
+  s_3e7081b93657e6::t_c39b549a073eb9 1-26
+docs/superpowers/plans/2026-11-11-exact-private-facts-store-plan.md
+  s_3e7081b93657e6::t_46fbaf0b64cf3d 1-26
+docs/superpowers/plans/2026-11-11-private-sync-receipts-plan.md
+  s_3e7081b93657e6::t_31c8b01f30dd59 1-26
+docs/superpowers/plans/2026-11-11-private-sync-receipts-progress.md
+  s_3e7081b93657e6::t_1f073c39db0d35 1-40
+docs/superpowers/plans/2026-11-11-quant-system-roadmap.md
+  s_3e7081b93657e6::t_de05924b6a8ab2 7,21-26,28-33,38-68,71-75,81-82
+docs/superpowers/plans/2026-11-11-spot-allocation-ledger-plan.md
+  s_3e7081b93657e6::t_aedaf5e5b6f80f 1-80
+docs/superpowers/plans/2026-11-11-spot-allocation-ledger-progress.md
+  s_3e7081b93657e6::t_5bbf57587df608 1-52
+docs/superpowers/plans/2026-11-12-account-balance-facts-plan.md
+  s_3e7081b93657e6::t_688038f4ad7f6c 1-38
+docs/superpowers/plans/2026-11-12-exact-fill-recovery-plan.md
+  s_3e7081b93657e6::t_9c8a6f2dd0035f 1-48
+docs/superpowers/plans/2026-11-12-exact-private-sync-orchestration-plan.md
+  s_3e7081b93657e6::t_054ed8bb772c09 1-66
+docs/superpowers/plans/2026-11-12-exact-sync-input-validation-plan.md
+  s_3e7081b93657e6::t_2992523c347220 1-13
+docs/superpowers/plans/2026-11-12-exact-sync-input-validation-progress.md
+  s_3e7081b93657e6::t_a176a43757ac87 1-4
+docs/superpowers/plans/2026-11-12-persisted-spot-preflight-plan.md
+  s_3e7081b93657e6::t_9fa1f9c4d01134 1-62
+docs/superpowers/plans/2026-11-12-spot-fee-diagnostics-plan.md
+  s_3e7081b93657e6::t_2242589a2dcdd2 1-58
+docs/superpowers/plans/2026-11-12-spot-instrument-facts-plan.md
+  s_3e7081b93657e6::t_87197f0459bc36 1-52
+docs/superpowers/plans/2026-11-12-spot-liability-diagnostics-plan.md
+  s_3e7081b93657e6::t_261e8b125fef52 1-47
+docs/superpowers/plans/2026-11-12-spot-order-fact-store-plan.md
+  s_3e7081b93657e6::t_4ade3addaa7311 1-15
+docs/superpowers/plans/2026-11-12-spot-order-fact-store-progress.md
+  s_3e7081b93657e6::t_77ebf8cc27aa6d 1-9
+docs/superpowers/plans/2026-11-12-spot-order-facts-plan.md
+  s_3e7081b93657e6::t_9e77095a9879b6 1-14
+docs/superpowers/plans/2026-11-12-spot-order-facts-progress.md
+  s_3e7081b93657e6::t_6cf8cf0bbac5e1 1-5
+docs/superpowers/plans/2026-11-12-spot-preflight-plan.md
+  s_3e7081b93657e6::t_653a2d87ed644e 1-34
+docs/superpowers/plans/2026-11-12-spot-sync-diagnostics-plan.md
+  s_3e7081b93657e6::t_184e6fc12f444d 1-15
+docs/superpowers/plans/2026-11-12-spot-sync-diagnostics-progress.md
+  s_3e7081b93657e6::t_db9e4fdcef6a41 1-6
+docs/superpowers/plans/2026-11-12-spot-trade-fee-facts-plan.md
+  s_3e7081b93657e6::t_5ea62071b0c1bb 1-61
+docs/superpowers/plans/2026-11-13-dashboard-account-sync.md
+  s_3e7081b93657e6::t_608d50efbeb4ed 1-46
+docs/superpowers/plans/2026-11-13-exchange-auth-status-plan.md
+  s_3e7081b93657e6::t_727b9d7726e1cf 1-54
+docs/superpowers/plans/2026-11-13-workspace-ui-refinement.md
+  s_3e7081b93657e6::t_4c52405434a9bd 1-81
+docs/superpowers/specs/2026-11-11-account-config-facts-design.md
+  s_3e7081b93657e6::t_33ea8f2ad0cd47 1-34
+docs/superpowers/specs/2026-11-11-account-isolation-design.md
+  s_3e7081b93657e6::t_502a480f62f762 1-37
+docs/superpowers/specs/2026-11-11-exact-private-facts-design.md
+  s_3e7081b93657e6::t_e847797040f14b 1-72
+docs/superpowers/specs/2026-11-11-exact-private-facts-store-design.md
+  s_3e7081b93657e6::t_3612a251219945 1-33
+docs/superpowers/specs/2026-11-11-private-sync-receipts-design.md
+  s_3e7081b93657e6::t_bff2fa127d0c68 1-74
+docs/superpowers/specs/2026-11-11-spot-allocation-ledger-design.md
+  s_3e7081b93657e6::t_a86ff72f22acee 1-48
+docs/superpowers/specs/2026-11-12-account-balance-facts-design.md
+  s_3e7081b93657e6::t_2c7a4c71d4f78e 1-43
+docs/superpowers/specs/2026-11-12-exact-fill-recovery-design.md
+  s_3e7081b93657e6::t_d60fc418fbab7e 1-25
+docs/superpowers/specs/2026-11-12-exact-sync-input-validation-design.md
+  s_3e7081b93657e6::t_afa8c8cd750326 1-17
+docs/superpowers/specs/2026-11-12-persisted-spot-preflight-design.md
+  s_3e7081b93657e6::t_6ecc1af403a72a 1-22
+docs/superpowers/specs/2026-11-12-spot-fee-diagnostics-design.md
+  s_3e7081b93657e6::t_456d0a2ca83265 1-25
+docs/superpowers/specs/2026-11-12-spot-instrument-facts-design.md
+  s_3e7081b93657e6::t_b8ee13276ba350 1-70
+docs/superpowers/specs/2026-11-12-spot-liability-diagnostics-design.md
+  s_3e7081b93657e6::t_0dfc15a1a468e7 1-23
+docs/superpowers/specs/2026-11-12-spot-order-fact-store-design.md
+  s_3e7081b93657e6::t_cc377bbe6f297f 1-35
+docs/superpowers/specs/2026-11-12-spot-order-facts-design.md
+  s_3e7081b93657e6::t_faaedc1f9ee656 1-35
+docs/superpowers/specs/2026-11-12-spot-preflight-design.md
+  s_3e7081b93657e6::t_aa25f01d6b07e5 1-70
+docs/superpowers/specs/2026-11-12-spot-sync-diagnostics-design.md
+  s_3e7081b93657e6::t_9342c7cb23e5fd 1-35
+docs/superpowers/specs/2026-11-12-spot-trade-fee-facts-design.md
+  s_3e7081b93657e6::t_23e4cccfbf4b9a 1-26
+docs/superpowers/specs/2026-11-13-exchange-auth-status-design.md
+  s_3e7081b93657e6::t_91df770168a056 1-23
+docs/superpowers/specs/2026-11-13-workspace-ui-refinement-design.md
+  s_3e7081b93657e6::t_751e6be3e4a4da 1-28
+frontend/src/App.test.ts
+  s_3e7081b93657e6::t_eb52e2934887f5 1-2,6,12,17-23,26-38,48-49,59-70,97-114,126-130,138,142-193,204,207-213,215-222,231,260-285,287,298,303,328-330,333,338
+frontend/src/components/backtest/BacktestForm.test.ts
+  s_3e7081b93657e6::t_83bd10df31a200 71
+frontend/src/components/backtest/BacktestForm.vue
+  s_3e7081b93657e6::t_552df5e22592a0 81-85,122-127,197,230,273-275,280-295,298-304,308,351-367,374-382
+frontend/src/components/backtest/BacktestMetrics.vue
+  s_3e7081b93657e6::t_aa7274c09ca8f9 107
+frontend/src/components/backtest/BacktestResultsTable.test.ts
+  s_3e7081b93657e6::t_7837ee53e200fd 159-202
+frontend/src/components/backtest/BacktestResultsTable.vue
+  s_3e7081b93657e6::t_a1e7f92dde4806 20-21,26-27,67-68,103,108,113,118,123
+frontend/src/components/dashboard/AccountContextNotice.test.ts
+  s_3e7081b93657e6::t_c79a590858543f 1-49
+frontend/src/components/dashboard/AccountContextNotice.vue
+  s_3e7081b93657e6::t_14dd15f2908a90 1-45
+frontend/src/components/dashboard/AccountOverview.vue
+  s_3e7081b93657e6::t_511401ce87c152 167,172,177,182,196-197,215,220-221,231-236
+frontend/src/components/dashboard/DashboardActivity.vue
+  s_3e7081b93657e6::t_ca05569e43563e 96,101,141,146,151,156,265-266
+frontend/src/components/dashboard/ExchangeAuthBadge.vue
+  s_3e7081b93657e6::t_07a3d62e6481ce 1-29
+frontend/src/components/dashboard/ExchangeAuthNotice.test.ts
+  s_3e7081b93657e6::t_90d1b94c9f9251 1-55
+frontend/src/components/dashboard/ExchangeAuthNotice.vue
+  s_3e7081b93657e6::t_96ca243b9ebde3 1-151
+frontend/src/components/dashboard/StrategyPerformanceTable.vue
+  s_3e7081b93657e6::t_9ea918b61185fe 148,153,158,163,195,200,244,249,254,259,264,269,274,297-298,303,311-312,314-315,328,333,359-360,362-364,368,370,373-384
+frontend/src/components/layout/AppHeader.test.ts
+  s_3e7081b93657e6::t_2c476354823e9c 16-38,54
+frontend/src/components/layout/AppHeader.vue
+  s_3e7081b93657e6::t_651ef6643568dc 11-12,15-18,52-53,63-65,70-72,99,114,120-122,124,127-129,131-134,138,140-142,149-150,156,173,176-180,184,191-213,218-219,225-226,229-246,249-251,254-256
+frontend/src/components/layout/AppSidebar.vue
+  s_3e7081b93657e6::t_9e3875f80870e5 5,8-13,37-40,54-55,63,65,72-74,76,78,81-98,101,110-123,131-154
+frontend/src/components/market/MarketQueryPanel.vue
+  s_3e7081b93657e6::t_f2e8a2ef667448 230,232-241,279-280,287,294,299-300,302,307,311,318-319,329,366
+frontend/src/components/settings/SecretField.vue
+  s_3e7081b93657e6::t_fe377cb73af284 90
+frontend/src/components/settings/SettingsSection.test.ts
+  s_3e7081b93657e6::t_3c5283bbf19d89 20
+frontend/src/components/strategy/StrategyAllocationReadiness.test.ts
+  s_3e7081b93657e6::t_f8665474d4dde8 1-186
+frontend/src/components/strategy/StrategyAllocationReadiness.vue
+  s_3e7081b93657e6::t_8bad109a434df9 1-136
+frontend/src/components/strategy/StrategyEditorPanel.vue
+  s_3e7081b93657e6::t_1a2c7d8435db2e 200-201,204-207,219-222
+frontend/src/components/strategy/StrategyList.vue
+  s_3e7081b93657e6::t_f600cdea8b6c41 241,244-254,338,340,365,386-389
+frontend/src/components/trades/TradeFilters.vue
+  s_3e7081b93657e6::t_fde1e28cc96064 134,145,153-158,166-169,176,191
+frontend/src/components/trades/TradeSummary.vue
+  s_3e7081b93657e6::t_4c330e370864a0 61,79-80,97
+frontend/src/components/ui/AppPageHeader.test.ts
+  s_3e7081b93657e6::t_ff9428dbeaf444 8,20
+frontend/src/components/ui/AppPageHeader.vue
+  s_3e7081b93657e6::t_8498b292093396 17,29,31-33,37,45,47-48,52-53,55,57,63,65-67,72,74-77,82
+frontend/src/components/ui/DataState.vue
+  s_3e7081b93657e6::t_8ca96671ac6f58 91,100,113-123,127-129,148-153,158-163,177,193-198
+frontend/src/components/ui/MetricCard.vue
+  s_3e7081b93657e6::t_ec9a9155ff3aa8 34-35,44-47,54-55,60,62,64-65,67-69,83,85-86,112-117
+frontend/src/components/ui/ResponsiveTable.vue
+  s_3e7081b93657e6::t_b8ff4084df8769 99-103,105-126,143-144
+frontend/src/components/ui/SectionCard.test.ts
+  s_3e7081b93657e6::t_313ad15df2496c 8,21
+frontend/src/components/ui/SectionCard.vue
+  s_3e7081b93657e6::t_457a579f2c3291 52,67,71,79-80,82,86,96-97,103,105,111,114-115,120-130
+frontend/src/components/ui/StatusBadge.vue
+  s_3e7081b93657e6::t_1cdb35d9b54da0 31-34,40-41,44-48,57-58
+frontend/src/composables/useWebSocket.test.ts
+  s_3e7081b93657e6::t_82b3c1c78b23f3 46-78
+frontend/src/services/settings.test.ts
+  s_3e7081b93657e6::t_aa761891a47da3 4,12-19
+frontend/src/services/settings.ts
+  s_3e7081b93657e6::t_a02bf68fb7d574 4,13-19
+frontend/src/services/strategyAllocations.ts
+  s_3e7081b93657e6::t_621d5a08ccbe9e 6-7,22-31
+frontend/src/services/trades.test.ts
+  s_3e7081b93657e6::t_f13a49131e5113 44,47,50,64-69
+frontend/src/services/trades.ts
+  s_3e7081b93657e6::t_00b854572de674 5-7,9,14,16
+frontend/src/services/trading.test.ts
+  s_3e7081b93657e6::t_c7972020ca6010 4,11-30
+frontend/src/services/trading.ts
+  s_3e7081b93657e6::t_1624062f18fcb5 4,6-37
+frontend/src/stores/accountAuthentication.test.ts
+  s_3e7081b93657e6::t_203c629b48e5c3 1-120
+frontend/src/stores/accountContext.ts
+  s_3e7081b93657e6::t_2b2fb429a86b6e 1-156
+frontend/src/stores/accountIsolation.test.ts
+  s_3e7081b93657e6::t_76abe4a0ed988e 1-314
+frontend/src/stores/dashboard.test.ts
+  s_3e7081b93657e6::t_d08853c5f898ba 4,6-7,11-13,16-27,29-37,88,94,136-166,171-423,549,590,603,616,621,636,657,675,698,721,751,828,869,905,917,1240,1252,1257,1359,1379,1399,1423,1465,1489,1527,1532,1548,1553,1558,1569
+frontend/src/stores/dashboard.ts
+  s_3e7081b93657e6::t_186607b72d84c2 2-11,37,80-85,126-128,146-149,164-176,179-186,212,215-234,238-239,271-274,277-370,372-374,381,396-406,439-441,449,458-463,469,489-493,499-503,509,563,580-582,588-592,598,606,623-624,626,631,633
+frontend/src/styles/global.css
+  s_3e7081b93657e6::t_b89c281b6e8471 18-20,35-132
+frontend/src/styles/tokens.css
+  s_3e7081b93657e6::t_5d57ef4824df98 2-12,14,21-22,24-30,48-49,54,69,75-78,80,107-110
+frontend/src/types/dashboard.ts
+  s_3e7081b93657e6::t_df4c48c546b43a 1-2,87-89
+frontend/src/types/executionContext.ts
+  s_3e7081b93657e6::t_bb2ec7964f51c5 1-41
+frontend/src/types/strategyAllocation.ts
+  s_3e7081b93657e6::t_1a75fc7b40cf8f 1-2,45,59-64,66,68-127
+frontend/src/views/Backtest.test.ts
+  s_3e7081b93657e6::t_92a1838d49e4eb 2,6-7,83,90-91,663-733
+frontend/src/views/Backtest.vue
+  s_3e7081b93657e6::t_f4e2351b6e9f0b 70-71,279,283,391-392
+frontend/src/views/Settings.test.ts
+  s_3e7081b93657e6::t_b79f2b9676cf0b 17-20,144-149,198-202,244,250,266-302,367,500,519
+frontend/src/views/Strategy.test.ts
+  s_3e7081b93657e6::t_837bb1b01733bc 69,325
+frontend/src/views/Strategy.vue
+  s_3e7081b93657e6::t_b4f18b3dee3e87 504,512-514,519
+frontend/src/views/Trades.test.ts
+  s_3e7081b93657e6::t_700bb6e8e173f3 1,60-71,104-106,265-267,269-299
+frontend/src/views/Trades.vue
+  s_3e7081b93657e6::t_f9e1a02c2a6447 2,11-12,24,38,44-45,50-54,59,62,67-77,79-80,82-84,96-97
+src/core/execution_scope.py
+  s_3e7081b93657e6::t_e6a6d23cb70aca 1-60
+src/core/private_facts.py
+  s_3e7081b93657e6::t_e9c9b59ec92ddd 1-154
+src/data/allocations.py
+  s_3e7081b93657e6::t_3d79bd248943dc 157-165
+src/data/exchange_store.py
+  s_3e7081b93657e6::t_0d7ca7d103d93e 1-115
+src/data/models.py
+  s_3e7081b93657e6::t_315decea71ead6 7,96-588
+src/data/private_sync_snapshot.py
+  s_3e7081b93657e6::t_59f45d83b6f84c 1-173
+src/data/spot_ledger.py
+  s_3e7081b93657e6::t_c9422e246c3a7f 1-761
+src/data/spot_preflight_evidence.py
+  s_3e7081b93657e6::t_e3fa859f3fa4dc 1-29
+src/exchange/base.py
+  s_3e7081b93657e6::t_94f76a45ac2995 43-44,53-67,69,1460,1479-1481
+src/exchange/okx_account_facts.py
+  s_3e7081b93657e6::t_64664f2eee4a8c 1-108
+src/exchange/okx_balance_facts.py
+  s_3e7081b93657e6::t_adb50a03953633 1-130
+src/exchange/okx_instrument_facts.py
+  s_3e7081b93657e6::t_7821ebe5935b43 1-149
+src/exchange/okx_order_facts.py
+  s_3e7081b93657e6::t_295105a003fa53 1-252
+src/exchange/okx_private_facts.py
+  s_3e7081b93657e6::t_4917304becab41 1-206
+src/exchange/okx_trade_fee_facts.py
+  s_3e7081b93657e6::t_49fe0ab5a9b061 1-123
+src/ops/allocation_readiness.py
+  s_3e7081b93657e6::t_7364c2859814a1 1-175
+src/ops/exact_private_sync.py
+  s_3e7081b93657e6::t_f6c50823ed1466 1-390
+src/ops/private_sync.py
+  s_3e7081b93657e6::t_a1282e08e3d1d2 17,40,156,159-286,288,297-303,305-306,308-314,316-317,319-321,332-333,338-341,383-387,415,429-431
+src/ops/spot_fee_diagnostic.py
+  s_3e7081b93657e6::t_2ee482bf9d84ca 1-162
+src/ops/spot_liability_diagnostic.py
+  s_3e7081b93657e6::t_21cef73a014b14 1-114
+src/ops/spot_preflight.py
+  s_3e7081b93657e6::t_4f7d24603ec396 1-238
+src/ops/spot_preflight_evidence.py
+  s_3e7081b93657e6::t_dd5c805c1a3cd5 1-103
+src/ops/spot_sync_diagnostic.py
+  s_3e7081b93657e6::t_0747be10e20726 1-107
+src/web/api/settings.py
+  s_3e7081b93657e6::t_2f4956a935eca5 17,189,197-204,231-232
+src/web/api/trading.py
+  s_3e7081b93657e6::t_6ee8f7190650cf 4,21,29,179-184,387-390,411-413,416-417,448,461,469-470,472-480,541,549-550,552-560,595,603-604,606-614,648,667-668,707,709-710,718-721,723-724,773-790
+src/web/app.py
+  s_3e7081b93657e6::t_1d1f73215b4a59 8,13,16,48-51,183-192,194,198,200-201,203,225-227
+src/web/exchange_auth.py
+  s_3e7081b93657e6::t_2731e1c9deac8f 1-127
+src/web/exchange_context.py
+  s_3e7081b93657e6::t_e0ed625861d976 1-51
+src/web/ws.py
+  s_3e7081b93657e6::t_d5c1b0417f1466 12-13,19,31-32,37-44,46-54,61-64,81-86,97-112,115-116,122-125
+tests/integration/test_allocation_readiness_api.py
+  s_3e7081b93657e6::t_b2d33cec8d1540 1-491
+tests/integration/test_exchange_auth_api.py
+  s_3e7081b93657e6::t_b2712613561bca 1-412
+tests/integration/test_exchange_context_api.py
+  s_3e7081b93657e6::t_ed4069322b08ae 1-284
+tests/integration/test_private_sync_receipt_api.py
+  s_3e7081b93657e6::t_ad6391ffed723c 1-291
+tests/integration/test_spot_fee_diagnostic_api.py
+  s_3e7081b93657e6::t_bb86198d6e8914 1-142
+tests/integration/test_spot_liability_diagnostic_api.py
+  s_3e7081b93657e6::t_19d683717ed2e2 1-110
+tests/integration/test_spot_preflight_api.py
+  s_3e7081b93657e6::t_7ad4f2ad3b6630 1-181
+tests/integration/test_spot_sync_diagnostic_api.py
+  s_3e7081b93657e6::t_556e9353d68697 1-204
+tests/unit/test_account_balance_store.py
+  s_3e7081b93657e6::t_b05b952dd3a2ea 1-184
+tests/unit/test_account_config_store.py
+  s_3e7081b93657e6::t_ee70f57c4ccd7c 1-146
+tests/unit/test_allocation_readiness.py
+  s_3e7081b93657e6::t_0bb1a17b24aeb7 1-313
+tests/unit/test_balance_liability_projection.py
+  s_3e7081b93657e6::t_7212a9b528c4d3 1-133
+tests/unit/test_exact_balance_sync.py
+  s_3e7081b93657e6::t_b1a7e284eea23d 1-102
+tests/unit/test_exact_facts_store.py
+  s_3e7081b93657e6::t_73d95f7e814669 1-282
+tests/unit/test_exact_fill_catchup.py
+  s_3e7081b93657e6::t_74e3551c1190a4 1-248
+tests/unit/test_exact_fill_recovery.py
+  s_3e7081b93657e6::t_8f9eeb268fabe7 1-138
+tests/unit/test_exact_fill_recovery_sync.py
+  s_3e7081b93657e6::t_1ce58bb784be75 1-121
+tests/unit/test_exact_private_sync.py
+  s_3e7081b93657e6::t_89db045285a88c 1-257
+tests/unit/test_exact_sync_input_validation.py
+  s_3e7081b93657e6::t_3d45355daf8b09 1-88
+tests/unit/test_exact_trade_fee_sync.py
+  s_3e7081b93657e6::t_7e82b2309cd1c9 1-151
+tests/unit/test_exchange_base.py
+  s_3e7081b93657e6::t_149469a6ca44bf 16,3074-3142,4391-4392,4394-4396
+tests/unit/test_exchange_store.py
+  s_3e7081b93657e6::t_652763b34e0c53 1-282
+tests/unit/test_execution_scope.py
+  s_3e7081b93657e6::t_6d8680b88e7522 1-105
+tests/unit/test_legacy_instrument_group.py
+  s_3e7081b93657e6::t_9c614fac8a3d12 1-50
+tests/unit/test_okx_account_facts.py
+  s_3e7081b93657e6::t_afe7a649a8b96b 1-130
+tests/unit/test_okx_balance_facts.py
+  s_3e7081b93657e6::t_f1a57970c5a1b9 1-151
+tests/unit/test_okx_instrument_facts.py
+  s_3e7081b93657e6::t_1e1b5c8b4e52c8 1-233
+tests/unit/test_okx_order_facts.py
+  s_3e7081b93657e6::t_361a29731a4fc6 1-232
+tests/unit/test_okx_private_facts.py
+  s_3e7081b93657e6::t_61e655cbf14dd0 1-218
+tests/unit/test_okx_trade_fee_facts.py
+  s_3e7081b93657e6::t_c9196ccca080d5 1-174
+tests/unit/test_private_facts.py
+  s_3e7081b93657e6::t_8d90260f558976 1-147
+tests/unit/test_private_sync_receipt_integration.py
+  s_3e7081b93657e6::t_bbdd9302581805 1-310
+tests/unit/test_private_sync_receipts.py
+  s_3e7081b93657e6::t_2acd495bcb55a7 1-334
+tests/unit/test_spot_fee_diagnostic.py
+  s_3e7081b93657e6::t_a03624a6d90a67 1-203
+tests/unit/test_spot_instrument_store.py
+  s_3e7081b93657e6::t_e6e6d430369888 1-290
+tests/unit/test_spot_ledger.py
+  s_3e7081b93657e6::t_de5312181f683f 1-594
+tests/unit/test_spot_liability_diagnostic.py
+  s_3e7081b93657e6::t_19fefb802e6c91 1-150
+tests/unit/test_spot_order_fact_store.py
+  s_3e7081b93657e6::t_3d611e2010748d 1-257
+tests/unit/test_spot_order_sync.py
+  s_3e7081b93657e6::t_3c904f13e5d8fb 1-212
+tests/unit/test_spot_preflight.py
+  s_3e7081b93657e6::t_eefd464a1b58b1 1-252
+tests/unit/test_spot_preflight_evidence.py
+  s_3e7081b93657e6::t_b84805b77a98ef 1-268
+tests/unit/test_spot_sync_diagnostic.py
+  s_3e7081b93657e6::t_840bc2244b5aef 1-194
+tests/unit/test_spot_trade_fee_store.py
+  s_3e7081b93657e6::t_d78739afa95402 1-216
+tests/unit/test_websocket.py
+  s_3e7081b93657e6::t_c8e25038626b73 1-2,6-7,40,99,115-116,122,127,135,141,144-179,181-194,196-203,205-300
+frontend/src/components/strategy/StrategyAllocationPanel.vue
+  s_3e7081b93657e6::t_87aa237da0e7ff 2,6-7,17,19,41,68-75,94,102,105,107,109,124,136,140,142,150,159,163,165,221-224,283-288
+frontend/src/locales/en.ts
+  s_3e7081b93657e6::t_11706c2d866b16 2-45,55-56,108-127,227,325-347,496
+frontend/src/locales/zh-CN.ts
+  s_3e7081b93657e6::t_019b97f13949be 2-45,55-56,108-127,227,325-346,495
+frontend/src/views/Dashboard.test.ts
+  s_3e7081b93657e6::t_39e94d5da975d6 10,22-23,97,130-133,152-213,216,246-247,252-272,274-298,466-467
+frontend/src/views/Settings.vue
+  s_3e7081b93657e6::t_211275cd09da63 13-14,19,136-137,337-341,343-352,358-363,411,437,497-508,725-738,740-802,805-809,853-862
+src/web/api/ops.py
+  s_3e7081b93657e6::t_bb6d1b13d5a9c6 6-9,22-23,25,34,37,54-68,72-80,156-157,159-161,165-170,176-181,185-195,197-198,200,202-203,206-207,229,231-242,246-268,308-328,330-333,347-349,353,365,367,373,397-408,416-419
+tests/integration/test_allocation_api.py
+  s_3e7081b93657e6::t_ab8f2c7be245c1 10,15,52-80
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "9802d7358b77190be1691821b1b608c1c44196b8",
+  "prompts": {},
+  "logical_commit_id": "9802d7358b77190be1691821b1b608c1c44196b8",
+  "sessions": {
+    "s_3e7081b93657e6": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "74e436f8-716d-49ee-b50c-aaff8b39f104",
+        "model": "grok-4.7"
+      },
+      "human_author": "Zane <zane@bigo.sg>",
+      "total_additions": 50,
+      "total_deletions": 101
+    }
+  }
+}
