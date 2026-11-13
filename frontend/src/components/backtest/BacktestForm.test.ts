@@ -68,7 +68,7 @@ describe('BacktestForm', () => {
 
     expect(grid).toBeTruthy();
     expect(groups).toHaveLength(4);
-    expect(titles).toEqual(['Strategy', 'Instrument', 'Period', 'Capital']);
+    expect(titles).toEqual(['Strategy', 'Instrument', 'Capital', 'Period']);
     expect(wrapper.find((node) => node.type === 'div' && String(node.props.class).includes('backtest-form__actions'))).toBeTruthy();
     expect(wrapper.find((node) => node.type === 'el-button' && String(node.props.class).includes('backtest-form__submit'))).toBeTruthy();
     expect(wrapper.text()).toContain('Configure the strategy, market data, time range, and capital before running a backtest.');

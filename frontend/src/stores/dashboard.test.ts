@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPinia, setActivePinia } from 'pinia';
 
-import { fetchExchangeSnapshot, fetchStrategyPerformance, fetchTradingContext } from '@/services/trading';
+import { fetchExchangeSnapshot, fetchStrategyPerformance, fetchTradingContext, syncExchangeAccount, type ExchangeAccountSyncResult } from '@/services/trading';
 import { useDashboardStore } from './dashboard';
 import { useAccountContextStore } from './accountContext';
 import type { ExecutionContext } from '@/types/executionContext';
@@ -10,6 +10,7 @@ vi.mock('@/services/trading', () => ({
   fetchStrategyPerformance: vi.fn(),
   fetchExchangeSnapshot: vi.fn(),
   fetchTradingContext: vi.fn(),
+  syncExchangeAccount: vi.fn(),
 }));
 
 const accountContext: ExecutionContext = {
@@ -25,6 +26,15 @@ const accountContext: ExecutionContext = {
 const mockedSnapshot = vi.mocked(fetchExchangeSnapshot);
 const mockedContext = vi.mocked(fetchTradingContext);
 const mockedFetchStrategyPerformance = vi.mocked(fetchStrategyPerformance);
+const mockedPrivateSync = vi.mocked(syncExchangeAccount);
+
+function privateSyncResult(context = accountContext): ExchangeAccountSyncResult {
+  return {
+    status: 'ok', context, account_upserted: 1, orders_upserted: 2,
+    trades_upserted: 3, trades_status: 'available', risk_events_saved: 0,
+    kill_switch_engaged: false, divergences: [],
+  };
+}
 
 const jsonResponse = (data: unknown) =>
   Promise.resolve({
@@ -123,6 +133,8 @@ describe('dashboard store', () => {
     vi.restoreAllMocks();
     mockedFetchStrategyPerformance.mockReset();
     mockedFetchStrategyPerformance.mockResolvedValue([]);
+    mockedPrivateSync.mockReset();
+    mockedPrivateSync.mockResolvedValue(privateSyncResult());
     const authority = useAccountContextStore();
     authority.context = accountContext;
     authority.epoch = 1;
@@ -156,6 +168,259 @@ describe('dashboard store', () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  describe('manual private synchronization', () => {
+    function authenticate(context = accountContext) {
+      const authority = useAccountContextStore();
+      authority.context = context;
+      authority.authentication = {
+        account_scope_id: context.account_scope_id, environment: context.environment,
+        status: 'authenticated', reason: null, provider_code: null, checked_at: 1,
+      };
+      return authority;
+    }
+
+    function savedSnapshot(equity = 200, context = accountContext) {
+      return {
+        type: 'snapshot' as const, scope: 'exchange' as const, context,
+        data: {
+          scope: 'exchange' as const, strategy: '__exchange__' as const,
+          account: { equity, daily_pnl: 0, assets: [usdtAsset] },
+          positions: [{ symbol: 'BTC-USDT', amount: 1 }],
+          orders: [{ order_id: 'synced-order' }],
+        },
+      };
+    }
+
+    beforeEach(() => {
+      vi.stubGlobal('fetch', vi.fn().mockImplementation(() => jsonResponse([])));
+    });
+
+    it('waits for an explicit successful sync before reloading its snapshot and performance', async () => {
+      authenticate();
+      const sync = deferred<ExchangeAccountSyncResult>();
+      mockedPrivateSync.mockReturnValueOnce(sync.promise);
+      mockedSnapshot.mockResolvedValue(savedSnapshot());
+      const dashboard = useDashboardStore();
+      expect(mockedPrivateSync).not.toHaveBeenCalled();
+
+      const pending = dashboard.syncExchangeAccount();
+      expect(dashboard.privateSyncLoading).toBe(true);
+      expect(mockedPrivateSync).toHaveBeenCalledWith('scope-A');
+      expect(mockedSnapshot).not.toHaveBeenCalled();
+
+      sync.resolve(privateSyncResult());
+      await pending;
+      expect(mockedSnapshot).toHaveBeenCalledWith('scope-A');
+      expect(mockedFetchStrategyPerformance).toHaveBeenCalledWith('scope-A');
+      expect(dashboard.account?.equity).toBe(200);
+      expect(dashboard.account?.assets).toEqual([usdtAsset]);
+      expect(dashboard.privateSyncResult).toEqual(privateSyncResult());
+      expect(dashboard.privateSyncError).toBeNull();
+      expect(dashboard.privateSyncLoading).toBe(false);
+    });
+
+    it('does not run private sync from ordinary snapshot refreshes', async () => {
+      authenticate();
+      mockedSnapshot.mockResolvedValue(savedSnapshot());
+      await useDashboardStore().loadInitialData();
+      expect(mockedPrivateSync).not.toHaveBeenCalled();
+    });
+
+    it('runs automatic synchronization once per verified authentication check', async () => {
+      authenticate();
+      mockedSnapshot.mockResolvedValue(savedSnapshot());
+      const dashboard = useDashboardStore();
+
+      await dashboard.autoSyncExchangeAccount();
+      await dashboard.autoSyncExchangeAccount();
+
+      expect(mockedPrivateSync).toHaveBeenCalledTimes(1);
+      expect(dashboard.privateSyncResult?.status).toBe('ok');
+    });
+
+    it.each(['unconfigured', 'failed', 'unchecked', 'wrong-scope', 'live', 'context-loading', 'auth-checking'] as const)(
+      'blocks a private sync for %s context or authentication', async (condition) => {
+        const authority = authenticate();
+        if (condition === 'unconfigured') authority.context = null;
+        if (condition === 'failed') authority.authentication!.status = 'failed';
+        if (condition === 'unchecked') authority.authentication = null;
+        if (condition === 'wrong-scope') authority.authentication!.account_scope_id = 'scope-B';
+        if (condition === 'live') authority.context = { ...accountContext, environment: 'live' };
+        if (condition === 'context-loading') authority.loading = true;
+        if (condition === 'auth-checking') authority.authenticationChecking = true;
+        const dashboard = useDashboardStore();
+
+        await dashboard.syncExchangeAccount();
+
+        expect(mockedPrivateSync).not.toHaveBeenCalled();
+        expect(mockedSnapshot).not.toHaveBeenCalled();
+        expect(dashboard.privateSyncError).toBe(condition === 'live' ? 'demo_only'
+          : condition === 'wrong-scope' ? 'scope_changed' : 'authentication_required');
+        expect(dashboard.privateSyncLoading).toBe(false);
+      },
+    );
+
+    it('does not send duplicate requests while synchronization or its refresh is pending', async () => {
+      authenticate();
+      const sync = deferred<ExchangeAccountSyncResult>();
+      const snapshot = deferred<ReturnType<typeof savedSnapshot>>();
+      mockedPrivateSync.mockReturnValueOnce(sync.promise);
+      mockedSnapshot.mockReturnValueOnce(snapshot.promise);
+      const dashboard = useDashboardStore();
+      const first = dashboard.syncExchangeAccount();
+      await dashboard.syncExchangeAccount();
+      expect(mockedPrivateSync).toHaveBeenCalledTimes(1);
+      sync.resolve(privateSyncResult());
+      await Promise.resolve();
+      await Promise.resolve();
+      await dashboard.syncExchangeAccount();
+      expect(mockedPrivateSync).toHaveBeenCalledTimes(1);
+      snapshot.resolve(savedSnapshot());
+      await first;
+      expect(dashboard.privateSyncLoading).toBe(false);
+    });
+
+    it.each([
+      ['raw exception', new Error('secret-provider-response'), 'sync_unavailable'],
+      ['account conflict', { response: { status: 409, data: { detail: { code: 'account_scope_changed', message: 'secret' } } } }, 'scope_changed'],
+      ['live rejection', { response: { status: 403, data: { detail: 'secret' } } }, 'demo_only'],
+    ])('preserves valid data and exposes a safe code after %s', async (_name, error, expectedCode) => {
+      const authority = authenticate();
+      mockedPrivateSync.mockRejectedValueOnce(error);
+      const dashboard = useDashboardStore();
+      dashboard.account = { equity: 77, daily_pnl: 0 };
+      dashboard.positions = [{ symbol: 'OLD' }];
+      dashboard.orders = [{ order_id: 'old-order' }];
+      dashboard.privateSyncResult = privateSyncResult();
+
+      await dashboard.syncExchangeAccount();
+
+      expect(dashboard.account?.equity).toBe(77);
+      expect(dashboard.positions).toEqual([{ symbol: 'OLD' }]);
+      expect(dashboard.orders).toEqual([{ order_id: 'old-order' }]);
+      expect(dashboard.privateSyncResult).toBeNull();
+      expect(dashboard.privateSyncError).toBe(expectedCode);
+      expect(authority.authentication?.status).toBe('authenticated');
+      expect(mockedSnapshot).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['foreign context', { context: { ...accountContext, account_scope_id: 'scope-B' } }, 'scope_changed'],
+      ['wrong environment', { context: { ...accountContext, environment: 'live' } }, 'scope_changed'],
+      ['malformed context', { context: { ...accountContext, execution_ready: true } }, 'invalid_response'],
+      ['negative count', { account_upserted: -1 }, 'invalid_response'],
+      ['invalid status', { status: 'failed' }, 'invalid_response'],
+      ['invalid trades status', { trades_status: 'complete' }, 'invalid_response'],
+      ['array trades status', { trades_status: ['available'] }, 'invalid_response'],
+      ['invalid risk flag', { kill_switch_engaged: 'yes' }, 'invalid_response'],
+      ['invalid divergences', { divergences: 'raw-provider-data' }, 'invalid_response'],
+    ])('rejects a successful HTTP response with %s', async (_name, fields, expectedCode) => {
+      authenticate();
+      mockedPrivateSync.mockResolvedValueOnce({ ...privateSyncResult(), ...fields } as ExchangeAccountSyncResult);
+      const dashboard = useDashboardStore();
+      dashboard.account = { equity: 77, daily_pnl: 0 };
+
+      await dashboard.syncExchangeAccount();
+
+      expect(dashboard.privateSyncError).toBe(expectedCode);
+      expect(dashboard.privateSyncResult).toBeNull();
+      expect(dashboard.account?.equity).toBe(77);
+      expect(mockedSnapshot).not.toHaveBeenCalled();
+    });
+
+    it('clears the previous completion summary when a second sync fails without clearing saved account data', async () => {
+      authenticate();
+      mockedSnapshot.mockResolvedValue(savedSnapshot());
+      const dashboard = useDashboardStore();
+      await dashboard.syncExchangeAccount();
+      expect(dashboard.privateSyncResult?.status).toBe('ok');
+      mockedPrivateSync.mockRejectedValueOnce(new Error('second sync failed'));
+
+      await dashboard.syncExchangeAccount();
+
+      expect(dashboard.privateSyncResult).toBeNull();
+      expect(dashboard.privateSyncError).toBe('sync_unavailable');
+      expect(dashboard.account?.equity).toBe(200);
+      expect(dashboard.orders).toEqual([{ order_id: 'synced-order' }]);
+    });
+
+    it('keeps successful sync evidence separate from a later snapshot refresh failure', async () => {
+      authenticate();
+      mockedSnapshot.mockRejectedValueOnce(new Error('snapshot unavailable'));
+      const dashboard = useDashboardStore();
+      dashboard.account = { equity: 77, daily_pnl: 0 };
+
+      await dashboard.syncExchangeAccount();
+
+      expect(dashboard.privateSyncResult).toEqual(privateSyncResult());
+      expect(dashboard.privateSyncError).toBeNull();
+      expect(dashboard.error).toBe('snapshot unavailable');
+      expect(dashboard.account?.equity).toBe(77);
+      expect(dashboard.privateSyncLoading).toBe(false);
+    });
+
+    it.each(['success', 'error'] as const)('ignores an old %s and finally after A to B to A', async (outcome) => {
+      const authority = authenticate();
+      const old = deferred<ExchangeAccountSyncResult>();
+      const current = deferred<ExchangeAccountSyncResult>();
+      mockedPrivateSync.mockReturnValueOnce(old.promise).mockReturnValueOnce(current.promise);
+      mockedSnapshot.mockResolvedValue(savedSnapshot());
+      const dashboard = useDashboardStore();
+      const first = dashboard.syncExchangeAccount();
+
+      authority.invalidate();
+      authenticate({ ...accountContext, account_scope_id: 'scope-B' });
+      authority.invalidate();
+      authenticate();
+      const second = dashboard.syncExchangeAccount();
+      if (outcome === 'success') old.resolve(privateSyncResult());
+      else old.reject(new Error('old secret error'));
+      await first;
+
+      expect(dashboard.privateSyncLoading).toBe(true);
+      expect(dashboard.privateSyncError).toBeNull();
+      expect(dashboard.privateSyncResult).toBeNull();
+      expect(mockedSnapshot).not.toHaveBeenCalled();
+      current.resolve(privateSyncResult());
+      await second;
+      expect(dashboard.privateSyncLoading).toBe(false);
+      expect(dashboard.account?.equity).toBe(200);
+    });
+
+    it('preserves newer websocket fields while its post-sync snapshot is pending', async () => {
+      authenticate();
+      const snapshot = deferred<ReturnType<typeof savedSnapshot>>();
+      mockedSnapshot.mockReturnValueOnce(snapshot.promise);
+      const dashboard = useDashboardStore();
+      const pending = dashboard.syncExchangeAccount();
+      await Promise.resolve();
+      await Promise.resolve();
+      dashboard.applyWebSocketMessage({
+        type: 'account', scope: 'exchange', context: accountContext,
+        account: { equity: 999, daily_pnl: 9 },
+      });
+      snapshot.resolve(savedSnapshot(200));
+      await pending;
+
+      expect(dashboard.account?.equity).toBe(999);
+      expect(dashboard.orders).toEqual([{ order_id: 'synced-order' }]);
+    });
+
+    it('invalidates pending synchronization when the store is disposed', async () => {
+      authenticate();
+      const sync = deferred<ExchangeAccountSyncResult>();
+      mockedPrivateSync.mockReturnValueOnce(sync.promise);
+      const dashboard = useDashboardStore();
+      const pending = dashboard.syncExchangeAccount();
+      dashboard.$dispose();
+      sync.resolve(privateSyncResult());
+      await pending;
+      expect(dashboard.privateSyncLoading).toBe(false);
+      expect(dashboard.privateSyncResult).toBeNull();
+      expect(mockedSnapshot).not.toHaveBeenCalled();
+    });
   });
 
   it('loads core dashboard data when public market tickers fail', async () => {

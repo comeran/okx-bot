@@ -145,22 +145,22 @@ function formatStrategyStatus(status: string): string {
                         {{ formatRuntimeText(position.side) }}
                       </template>
                     </el-table-column>
-                    <el-table-column :label="t('dashboard.size')" min-width="100">
+                    <el-table-column align="right" :label="t('dashboard.size')" min-width="100">
                       <template #default="{ row: position }">
                         {{ formatNullableNumber(position.amount) }}
                       </template>
                     </el-table-column>
-                    <el-table-column :label="t('dashboard.entryPrice')" min-width="120">
+                    <el-table-column align="right" :label="t('dashboard.entryPrice')" min-width="120">
                       <template #default="{ row: position }">
                         {{ formatNullableNumber(position.entry_price) }}
                       </template>
                     </el-table-column>
-                    <el-table-column :label="t('dashboard.markPrice')" min-width="120">
+                    <el-table-column align="right" :label="t('dashboard.markPrice')" min-width="120">
                       <template #default="{ row: position }">
                         {{ formatNullableNumber(position.mark_price) }}
                       </template>
                     </el-table-column>
-                    <el-table-column :label="t('dashboard.unrealizedPnl')" min-width="120">
+                    <el-table-column align="right" :label="t('dashboard.unrealizedPnl')" min-width="120">
                       <template #default="{ row: position }">
                         {{ formatNullableCurrency(position.unrealized_pnl) }}
                       </template>
@@ -192,12 +192,12 @@ function formatStrategyStatus(status: string): string {
                         {{ formatRuntimeText(order.type) }}
                       </template>
                     </el-table-column>
-                    <el-table-column :label="t('dashboard.price')" min-width="110">
+                    <el-table-column align="right" :label="t('dashboard.price')" min-width="110">
                       <template #default="{ row: order }">
                         {{ formatNullableNumber(order.price) }}
                       </template>
                     </el-table-column>
-                    <el-table-column :label="t('dashboard.amount')" min-width="100">
+                    <el-table-column align="right" :label="t('dashboard.amount')" min-width="100">
                       <template #default="{ row: order }">
                         {{ formatNullableNumber(order.amount) }}
                       </template>
@@ -241,37 +241,37 @@ function formatStrategyStatus(status: string): string {
             </div>
           </template>
         </el-table-column>
-        <el-table-column :label="t('dashboard.equity')" min-width="130">
+        <el-table-column align="right" :label="t('dashboard.equity')" min-width="130">
           <template #default="{ row }">
             {{ formatNullableCurrency(row.equity) }}
           </template>
         </el-table-column>
-        <el-table-column :label="t('dashboard.returnPct')" min-width="130">
+        <el-table-column align="right" :label="t('dashboard.returnPct')" min-width="130">
           <template #default="{ row }">
             {{ formatPercent(row.return_pct) }}
           </template>
         </el-table-column>
-        <el-table-column :label="t('dashboard.realizedPnl')" min-width="140">
+        <el-table-column align="right" :label="t('dashboard.realizedPnl')" min-width="140">
           <template #default="{ row }">
             {{ formatNullableCurrency(row.realized_pnl) }}
           </template>
         </el-table-column>
-        <el-table-column :label="t('dashboard.unrealizedPnl')" min-width="140">
+        <el-table-column align="right" :label="t('dashboard.unrealizedPnl')" min-width="140">
           <template #default="{ row }">
             {{ formatNullableCurrency(row.unrealized_pnl) }}
           </template>
         </el-table-column>
-        <el-table-column :label="t('dashboard.positionExposure')" min-width="140">
+        <el-table-column align="right" :label="t('dashboard.positionExposure')" min-width="140">
           <template #default="{ row }">
             {{ formatNullableCurrency(row.position_notional) }}
           </template>
         </el-table-column>
-        <el-table-column :label="t('dashboard.closedTradeCount')" min-width="140">
+        <el-table-column align="right" :label="t('dashboard.closedTradeCount')" min-width="140">
           <template #default="{ row }">
             {{ formatNullableNumber(row.closed_trade_count) }}
           </template>
         </el-table-column>
-        <el-table-column :label="t('dashboard.winRate')" min-width="120">
+        <el-table-column align="right" :label="t('dashboard.winRate')" min-width="120">
           <template #default="{ row }">
             {{ formatPercent(row.win_rate) }}
           </template>
@@ -294,12 +294,13 @@ function formatStrategyStatus(status: string): string {
   display: flex;
   flex-direction: column;
   gap: var(--ui-space-16);
-  padding: var(--ui-space-16);
+  padding: var(--ui-space-16) var(--ui-space-12);
+  background: var(--ui-color-canvas);
 }
 
 .strategy-performance-table__summary-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr));
   gap: var(--ui-space-12);
 }
 
@@ -307,10 +308,11 @@ function formatStrategyStatus(status: string): string {
   display: flex;
   flex-direction: column;
   gap: var(--ui-space-4);
-  padding: var(--ui-space-12) var(--ui-space-12);
-  border: var(--ui-border-width-thin) solid var(--ui-color-border);
+  min-width: 0;
+  padding: var(--ui-space-12);
   border-radius: var(--ui-radius-8);
-  background: var(--ui-color-info-soft);
+  background: var(--ui-color-surface);
+  overflow-wrap: anywhere;
 }
 
 .strategy-performance-table__summary-item span {
@@ -323,11 +325,12 @@ function formatStrategyStatus(status: string): string {
   color: var(--ui-color-text);
   font-size: var(--ui-font-size-14);
   line-height: 1.5;
+  font-variant-numeric: tabular-nums lining-nums;
 }
 
 .strategy-performance-table__nested-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
   gap: var(--ui-space-16);
 }
 
@@ -353,14 +356,31 @@ function formatStrategyStatus(status: string): string {
 
 .strategy-performance-table__expand-button {
   flex: 0 0 auto;
-  min-width: 0;
+  min-width: var(--ui-space-24);
+  min-height: var(--ui-space-24);
   padding: 0;
+  border-radius: var(--ui-radius-4);
+  background: var(--ui-color-primary-soft);
+  color: var(--ui-color-primary);
 }
 
 .strategy-performance-table__strategy-name {
-  flex: 1 1 auto;
+  flex: 1 1 110px;
   min-width: 0;
+  overflow-wrap: anywhere;
   font-weight: 600;
   color: var(--ui-color-text);
+}
+
+.strategy-performance-table__nested-section :deep(.el-empty) {
+  padding: var(--ui-space-24) var(--ui-space-12);
+}
+
+.strategy-performance-table__nested-section :deep(.el-empty__image) {
+  width: 72px;
+}
+
+.strategy-performance-table__nested-section :deep(.el-empty__description) {
+  margin-top: var(--ui-space-12);
 }
 </style>

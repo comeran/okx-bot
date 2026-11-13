@@ -1,9 +1,14 @@
 import { defineStore } from 'pinia';
 import { watch } from 'vue';
 
-import { fetchExchangeSnapshot, fetchStrategyPerformance } from '@/services/trading';
+import {
+  fetchExchangeSnapshot,
+  fetchStrategyPerformance,
+  syncExchangeAccount as synchronizeExchangeAccount,
+  type ExchangeAccountSyncResult,
+} from '@/services/trading';
 import { matchesExecutionContext, useAccountContextStore } from './accountContext';
-import type { ExchangeSnapshot } from '@/types/executionContext';
+import type { ExchangeSnapshot, ExecutionContext } from '@/types/executionContext';
 import type { StrategyPerformance } from '@/types/strategyPerformance';
 import type {
   AccountSummary,
@@ -29,6 +34,7 @@ const dashboardLoadPendingRequests = new WeakMap<object, number>();
 const accountOverviewRequestSequences = new WeakMap<object, number>();
 const accountOverviewRequestGenerations = new WeakMap<object, number>();
 const accountOverviewPendingRequests = new WeakMap<object, number>();
+const privateSyncRequestSequences = new WeakMap<object, number>();
 type TradingStateField = 'account' | 'positions' | 'orders';
 const webSocketStateVersions = new WeakMap<object, Record<TradingStateField, number>>();
 
@@ -73,6 +79,12 @@ function invalidateAccountOverviewRequests(store: object) {
   accountOverviewPendingRequests.delete(store);
 }
 
+function nextPrivateSyncRequestId(store: object): number {
+  const requestId = (privateSyncRequestSequences.get(store) ?? 0) + 1;
+  privateSyncRequestSequences.set(store, requestId);
+  return requestId;
+}
+
 function hasPendingAccountRequest(store: object, loadGeneration: number): boolean {
   return (
     accountOverviewPendingRequests.has(store)
@@ -112,6 +124,9 @@ function invalidateStrategyPerformanceRequests(store: object) {
   nextStrategyPerformanceRequestGeneration(store);
 }
 
+export type PrivateSyncError = 'authentication_required' | 'demo_only' | 'scope_changed'
+  | 'sync_unavailable' | 'invalid_response';
+
 interface DashboardState {
   account: AccountSummary | null;
   positions: Position[];
@@ -128,6 +143,10 @@ interface DashboardState {
   accountError: string | null;
   tickerError: string | null;
   lastUpdatedAt: number | null;
+  privateSyncLoading: boolean;
+  privateSyncError: PrivateSyncError | null;
+  privateSyncResult: ExchangeAccountSyncResult | null;
+  privateSyncAutomaticKey: string | null;
 }
 
 async function fetchJson<T>(url: string): Promise<T> {
@@ -142,6 +161,27 @@ async function fetchJson<T>(url: string): Promise<T> {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function privateSyncResponseError(value: unknown, context: ExecutionContext): PrivateSyncError | null {
+  if (!isRecord(value) || !isRecord(value.context)) return 'invalid_response';
+  if (!matchesExecutionContext(context, value.context)) return 'scope_changed';
+  if (value.context.identity_verified !== false || value.context.execution_ready !== false
+    || value.context.reason !== null || value.status !== 'ok'
+    || (value.trades_status !== 'available' && value.trades_status !== 'unavailable')
+    || typeof value.kill_switch_engaged !== 'boolean' || !Array.isArray(value.divergences)
+    || !['account_upserted', 'orders_upserted', 'trades_upserted', 'risk_events_saved'].every((field) => (
+      typeof value[field] === 'number' && Number.isSafeInteger(value[field]) && value[field] >= 0
+    ))) return 'invalid_response';
+  return null;
+}
+
+function privateSyncFailureCode(error: unknown): PrivateSyncError {
+  if (!isRecord(error) || !isRecord(error.response)) return 'sync_unavailable';
+  const { response } = error;
+  if (isRecord(response.data) && isRecord(response.data.detail)
+    && response.data.detail.code === 'account_scope_changed') return 'scope_changed';
+  return response.status === 403 ? 'demo_only' : 'sync_unavailable';
 }
 
 function isAccountSummary(value: unknown): value is AccountSummary {
@@ -228,6 +268,10 @@ const useDashboardStoreBase = defineStore('dashboard', {
     accountError: null,
     tickerError: null,
     lastUpdatedAt: null,
+    privateSyncLoading: false,
+    privateSyncError: null,
+    privateSyncResult: null,
+    privateSyncAutomaticKey: null,
   }),
   actions: {
     resetAccountState() {
@@ -236,6 +280,7 @@ const useDashboardStoreBase = defineStore('dashboard', {
       invalidateAccountOverviewRequests(this);
       invalidateStrategyPerformanceRequests(this);
       clearStrategyPerformanceRefreshTimer(this);
+      nextPrivateSyncRequestId(this);
       this.account = null;
       this.positions = [];
       this.orders = [];
@@ -248,6 +293,80 @@ const useDashboardStoreBase = defineStore('dashboard', {
       this.accountError = null;
       this.strategyPerformanceError = null;
       this.lastUpdatedAt = null;
+      this.privateSyncLoading = false;
+      this.privateSyncError = null;
+      this.privateSyncResult = null;
+      this.privateSyncAutomaticKey = null;
+    },
+    autoSyncExchangeAccount(): Promise<void> {
+      const authority = useAccountContextStore();
+      const context = authority.context;
+      const authentication = authority.authentication;
+      if (authority.loading || authority.authenticationChecking || !context?.available
+        || !context.account_scope_id || context.environment !== 'sandbox'
+        || authentication?.status !== 'authenticated'
+        || authentication.account_scope_id !== context.account_scope_id
+        || authentication.environment !== context.environment) {
+        return Promise.resolve();
+      }
+      const key = `${authority.epoch}:${context.account_scope_id}:${authentication.checked_at}`;
+      if (this.privateSyncAutomaticKey === key) return Promise.resolve();
+      this.privateSyncAutomaticKey = key;
+      return this.syncExchangeAccount();
+    },
+    async syncExchangeAccount(): Promise<void> {
+      if (this.privateSyncLoading) return;
+      const authority = useAccountContextStore();
+      const context = authority.context ? { ...authority.context } : null;
+      const authentication = authority.authentication;
+      if (authority.loading || authority.authenticationChecking
+        || !context?.available || !context.account_scope_id) {
+        this.privateSyncError = 'authentication_required';
+        return;
+      }
+      if (context.environment !== 'sandbox') {
+        this.privateSyncError = 'demo_only';
+        return;
+      }
+      if (!authentication || authentication.status !== 'authenticated') {
+        this.privateSyncError = 'authentication_required';
+        return;
+      }
+      if (authentication.account_scope_id !== context.account_scope_id
+        || authentication.environment !== context.environment) {
+        this.privateSyncError = 'scope_changed';
+        return;
+      }
+
+      const accountEpoch = authority.epoch;
+      const requestId = nextPrivateSyncRequestId(this);
+      const isCurrentSync = () => privateSyncRequestSequences.get(this) === requestId
+        && authority.epoch === accountEpoch && matchesExecutionContext(context, authority.context);
+      this.privateSyncLoading = true;
+      this.privateSyncError = null;
+      this.privateSyncResult = null;
+
+      try {
+        let result: ExchangeAccountSyncResult;
+        try {
+          result = await synchronizeExchangeAccount(context.account_scope_id);
+        } catch (error) {
+          if (isCurrentSync()) this.privateSyncError = privateSyncFailureCode(error);
+          return;
+        }
+        if (!isCurrentSync()) return;
+        const responseError = privateSyncResponseError(result, context);
+        if (responseError) {
+          this.privateSyncError = responseError;
+          return;
+        }
+        this.privateSyncResult = result;
+        // A successful sync and a failed subsequent cache read are separate outcomes.
+        // The existing loader retains valid rows and records its own refresh error.
+        await this.loadInitialData();
+      } finally {
+        if (isCurrentSync()) this.privateSyncLoading = false;
+      }
     },
     async loadInitialData() {
       const authority = useAccountContextStore();
@@ -509,7 +628,9 @@ export const useDashboardStore = (): DashboardStore => {
       invalidateDashboardLoads(store);
       invalidateAccountOverviewRequests(store);
       invalidateStrategyPerformanceRequests(store);
+      nextPrivateSyncRequestId(store);
       store.strategyPerformanceLoading = false;
+      store.privateSyncLoading = false;
       originalDispose();
     };
     patchedDashboardStores.add(store);

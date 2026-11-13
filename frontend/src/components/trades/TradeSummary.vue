@@ -58,7 +58,7 @@ const currentLocale = computed(() => locale.value);
   padding: var(--ui-space-12) var(--ui-space-12);
   border: var(--ui-border-width-thin) solid var(--ui-color-border);
   border-radius: var(--ui-radius-8);
-  background: var(--ui-color-surface-soft, var(--ui-color-info-soft));
+  background: var(--ui-color-surface);
   min-width: 0;
 }
 
@@ -76,6 +76,8 @@ const currentLocale = computed(() => locale.value);
   line-height: 1.4;
   font-weight: 700;
   text-align: right;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
 }
 
 .trade-summary__item--positive {
@@ -92,7 +94,7 @@ const currentLocale = computed(() => locale.value);
   }
 }
 
-@media (max-width: 767px) {
+@media (max-width: 359px) {
   .trade-summary {
     grid-template-columns: minmax(0, 1fr);
   }

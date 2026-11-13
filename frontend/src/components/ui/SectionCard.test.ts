@@ -5,7 +5,7 @@ import { mount, textContent } from '../../test-utils/mount';
 import SectionCard from './SectionCard.vue';
 
 describe('SectionCard', () => {
-  it('renders prop fallback content and the default body slot', async () => {
+  it('renders the section heading at level two with prop content and the default body slot', async () => {
     const wrapper = await mount(defineComponent({
       setup() {
         return () => h(SectionCard, {
@@ -18,7 +18,7 @@ describe('SectionCard', () => {
     }));
 
     expect(wrapper.find((node) => node.type === 'article').props.class).toBe('section-card');
-    expect(textContent(wrapper.find((node) => node.type === 'h3' && node.props.class === 'section-card__title'))).toBe('Strategy settings');
+    expect(textContent(wrapper.find((node) => node.type === 'h2' && node.props.class === 'section-card__title'))).toBe('Strategy settings');
     expect(textContent(wrapper.find((node) => node.type === 'p' && node.props.class === 'section-card__description'))).toBe('Shared configuration for runtime strategy cards.');
     expect(textContent(wrapper.find((node) => node.props.id === 'section-card-body'))).toBe('Body content');
     expect(wrapper.find((node) => node.props.class === 'section-card__header').children.length).toBeGreaterThan(0);

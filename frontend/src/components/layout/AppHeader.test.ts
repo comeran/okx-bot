@@ -13,6 +13,29 @@ const components = {
 const availableLocales = ['en', 'zh-CN'] as const satisfies readonly Locale[];
 
 describe('AppHeader', () => {
+  it('announces whether its controlled navigation drawer is expanded', async () => {
+    const wrapper = await mount(AppHeader, {
+      props: {
+        pageTitle: 'Dashboard',
+        locale: 'en',
+        availableLocales,
+        menuExpanded: false,
+        mobileNavigationId: 'workspace-navigation',
+      },
+      components,
+      locale: 'en',
+    });
+    const menuButton = wrapper.find((node) => node.type === 'button' && node.props.class === 'app-header__menu-button');
+
+    expect(menuButton.props['aria-controls']).toBe('workspace-navigation');
+    expect(menuButton.props['aria-expanded']).toBe(false);
+
+    await wrapper.updateProps({ menuExpanded: true });
+    expect(menuButton.props['aria-expanded']).toBe(true);
+
+    wrapper.unmount();
+  });
+
   it('renders a localized mobile menu aria-label and status slot', async () => {
     const wrapper = await mount(AppHeader, {
       props: {
@@ -28,7 +51,7 @@ describe('AppHeader', () => {
 
     expect(menuButton.props['aria-label']).toBe('打开导航菜单');
     expect(wrapper.find((node) => node.type === 'el-select').props['aria-label']).toBe('语言');
-    expect(wrapper.text()).toContain('量化交易控制台');
+    expect(wrapper.text()).toContain('工作空间');
     expect(wrapper.text()).toContain('仪表盘');
 
     wrapper.unmount();

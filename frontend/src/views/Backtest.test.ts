@@ -1,7 +1,10 @@
 import { defineComponent, h } from 'vue';
+import { createI18n } from 'vue-i18n';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { defineHostComponent, mount } from '@/test-utils/mount';
+import en from '@/locales/en';
+import zhCN from '@/locales/zh-CN';
 import type { BacktestMetrics, BacktestResult, BacktestResultDetail } from '@/types/backtest';
 import type { StrategyConfig, StrategyDefinition, StrategyRuntimeSummary } from '@/types/strategy';
 
@@ -77,13 +80,15 @@ vi.mock('@/components/backtest/BacktestMetrics.vue', () => ({
 vi.mock('@/components/backtest/BacktestResultsTable.vue', () => ({
   default: defineComponent({
     name: 'BacktestResultsTable',
-    props: ['results', 'selectedResultId', 'loading'],
+    props: ['results', 'selectedResultId', 'loading', 'error', 'stale'],
     emits: ['select-result', 'refresh'],
     setup(props, { emit }) {
       return () => h('backtest-results-table-stub', {
         'data-results': (props.results as unknown[]).length,
         'data-selected-result-id': props.selectedResultId ?? '',
         'data-loading': props.loading,
+        'data-error': props.error ?? '',
+        'data-stale': props.stale,
         onSelectResult: (resultId: string) => emit('select-result', resultId),
         onRefresh: () => emit('refresh'),
       });
@@ -655,6 +660,77 @@ describe('Backtest view', () => {
     expect(services.runBacktest).toHaveBeenCalledTimes(1);
     expect(services.fetchBacktestResults).toHaveBeenCalledTimes(2);
     expect(services.messageSuccess).toHaveBeenCalledWith('Backtest completed');
+  });
+
+  it('keeps a failed history load visible until a local retry succeeds', async () => {
+    services.fetchBacktestResults
+      .mockRejectedValueOnce(new Error('history unavailable'))
+      .mockResolvedValueOnce([createResult('recovered-result', 1)]);
+    const wrapper = await mount(Backtest, { locale: 'en' });
+    await wrapper.flush();
+
+    let table = wrapper.find((node) => node.type === 'backtest-results-table-stub');
+    expect(table.props['data-error']).toBe('Could not load backtest history. Retry to refresh.');
+    expect(table.props['data-stale']).toBe(false);
+    expect(table.props['data-results']).toBe(0);
+
+    await wrapper.flush();
+    expect(wrapper.find((node) => node.type === 'backtest-results-table-stub').props['data-error']).toBe(table.props['data-error']);
+    await wrapper.invoke(table, 'onRefresh');
+
+    table = wrapper.find((node) => node.type === 'backtest-results-table-stub');
+    expect(services.fetchBacktestResults).toHaveBeenCalledTimes(2);
+    expect(services.listStrategyTypes).toHaveBeenCalledTimes(1);
+    expect(table.props['data-error']).toBe('');
+    expect(table.props['data-stale']).toBe(false);
+    expect(table.props['data-results']).toBe(1);
+  });
+
+  it('translates a persistent history error immediately when the locale changes', async () => {
+    services.fetchBacktestResults.mockRejectedValueOnce(new Error('history unavailable'));
+    const i18n = createI18n({
+      legacy: false,
+      locale: 'en',
+      fallbackLocale: 'en',
+      messages: { en, 'zh-CN': zhCN },
+    });
+    const wrapper = await mount(Backtest, { plugins: [i18n] });
+    await wrapper.flush();
+    expect(wrapper.find((node) => node.type === 'backtest-results-table-stub').props['data-error'])
+      .toBe('Could not load backtest history. Retry to refresh.');
+
+    i18n.global.locale.value = 'zh-CN';
+    await wrapper.flush();
+    expect(wrapper.find((node) => node.type === 'backtest-results-table-stub').props['data-error'])
+      .toBe('回测历史加载失败，请重试。');
+
+    i18n.global.locale.value = 'en';
+    await wrapper.flush();
+    expect(wrapper.find((node) => node.type === 'backtest-results-table-stub').props['data-error'])
+      .toBe('Could not load backtest history. Retry to refresh.');
+    expect(services.fetchBacktestResults).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+  });
+
+  it('retains selected history and detail as stale after a refresh failure', async () => {
+    const result = createResult('retained-result', 1);
+    services.fetchBacktestResults
+      .mockResolvedValueOnce([result])
+      .mockRejectedValueOnce(new Error('history unavailable'));
+    services.fetchBacktestResultDetail.mockResolvedValueOnce(createDetail(result));
+    const wrapper = await mount(Backtest, { locale: 'en' });
+    await wrapper.flush();
+
+    const table = wrapper.find((node) => node.type === 'backtest-results-table-stub');
+    await wrapper.invoke(table, 'onSelectResult', result.id);
+    await wrapper.invoke(table, 'onRefresh');
+
+    const staleTable = wrapper.find((node) => node.type === 'backtest-results-table-stub');
+    expect(staleTable.props['data-error']).toBe('Could not load backtest history. Retry to refresh.');
+    expect(staleTable.props['data-stale']).toBe(true);
+    expect(staleTable.props['data-results']).toBe(1);
+    expect(staleTable.props['data-selected-result-id']).toBe(result.id);
+    expect(wrapper.find((node) => node.type === 'backtest-result-detail-stub').props['data-detail-result-id']).toBe(result.id);
   });
 
   it('keeps the latest history request in control of loading state', async () => {

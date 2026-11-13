@@ -75,14 +75,14 @@ const groupCards = computed(() => ([
     description: t('backtest.form.instrumentDescription'),
   },
   {
-    key: 'period',
-    title: t('backtest.form.periodGroup'),
-    description: t('backtest.form.periodDescription'),
-  },
-  {
     key: 'capital',
     title: t('backtest.form.capitalGroup'),
     description: t('backtest.form.capitalDescription'),
+  },
+  {
+    key: 'period',
+    title: t('backtest.form.periodGroup'),
+    description: t('backtest.form.periodDescription'),
   },
 ] as const));
 
@@ -119,7 +119,12 @@ function retryStrategies(): void {
   <SectionCard :title="t('backtest.runBacktest')" :description="t('backtest.form.description')">
     <el-form :model="props.form" label-position="top" class="backtest-form" @submit.prevent="submit">
       <div class="backtest-form__grid">
-        <section v-for="group in groupCards" :key="group.key" class="backtest-form__group">
+        <section
+          v-for="group in groupCards"
+          :key="group.key"
+          class="backtest-form__group"
+          :class="`backtest-form__group--${group.key}`"
+        >
           <h3 class="backtest-form__group-title">{{ group.title }}</h3>
           <p class="backtest-form__group-description">{{ group.description }}</p>
           <p
@@ -189,7 +194,7 @@ function retryStrategies(): void {
             </el-form-item>
           </template>
 
-          <template v-else-if="group.key === 'period'">
+          <div v-else-if="group.key === 'period'" class="backtest-form__period-fields">
             <el-form-item :label="t('common.timeframe')">
               <el-select
                 v-model="props.form.timeframe"
@@ -222,7 +227,7 @@ function retryStrategies(): void {
                 :aria-label="t('backtest.endTime')"
               />
             </el-form-item>
-          </template>
+          </div>
 
           <template v-else>
             <el-form-item :label="t('backtest.initialCapital')">
@@ -265,22 +270,42 @@ function retryStrategies(): void {
 
 .backtest-form__grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: var(--ui-space-16);
+  grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--ui-space-16) var(--ui-space-24);
+  align-items: start;
 }
 
 .backtest-form__group {
   min-width: 0;
-  padding: var(--ui-space-16);
-  border: var(--ui-border-width-thin) solid var(--ui-color-border);
-  border-radius: var(--ui-radius-8);
-  background: var(--ui-color-info-soft);
+}
+
+.backtest-form__group--period {
+  grid-column: 1 / -1;
+  padding-top: var(--ui-space-16);
+  border-top: var(--ui-border-width-thin) solid var(--ui-color-border);
+}
+
+.backtest-form__period-fields {
+  display: grid;
+  grid-template-columns: minmax(140px, 0.65fr) repeat(2, minmax(0, 1fr));
+  gap: var(--ui-space-16);
+}
+
+.backtest-form :deep(.el-form-item) {
+  margin-bottom: 0;
+}
+
+.backtest-form :deep(.el-form-item__label) {
+  height: auto;
+  margin-bottom: 0;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
 }
 
 .backtest-form__group-title {
   margin: 0 0 var(--ui-space-4);
   color: var(--ui-color-text);
-  font-size: var(--ui-font-size-16);
+  font-size: var(--ui-font-size-14);
   line-height: 1.5;
 }
 
@@ -324,11 +349,37 @@ function retryStrategies(): void {
   .backtest-form__grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .backtest-form__group--capital {
+    grid-column: 1 / -1;
+  }
+
+  .backtest-form__group--capital .backtest-form__control {
+    max-width: 300px;
+  }
+
+  .backtest-form__period-fields {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .backtest-form__period-fields > :first-child {
+    grid-column: 1 / -1;
+    max-width: 300px;
+  }
 }
 
 @media (max-width: 767px) {
   .backtest-form__grid {
     grid-template-columns: 1fr;
+  }
+
+  .backtest-form__period-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .backtest-form__group--capital .backtest-form__control,
+  .backtest-form__period-fields > :first-child {
+    max-width: none;
   }
 
   .backtest-form__actions {

@@ -87,7 +87,6 @@ const viewportLoadingAttrs = computed(() => (props.loading
 .responsive-table__scroll-region {
   position: relative;
   overflow-x: auto;
-  border: var(--ui-border-width-thin) solid var(--ui-color-border);
   border-radius: var(--ui-radius-8);
   background: var(--ui-color-surface);
 }
@@ -96,9 +95,35 @@ const viewportLoadingAttrs = computed(() => (props.loading
   min-width: 100%;
 }
 
-
 .responsive-table__table {
+  --el-table-border-color: var(--ui-color-border-subtle);
+  --el-table-header-bg-color: var(--ui-color-table-header, var(--ui-color-canvas));
+  --el-table-header-text-color: var(--ui-color-text-secondary);
+  --el-table-row-hover-bg-color: var(--ui-color-primary-soft);
+  --el-table-text-color: var(--ui-color-text);
   min-width: 100%;
+  font-size: var(--ui-font-size-13);
+  font-variant-numeric: tabular-nums lining-nums;
+}
+
+.responsive-table__table :deep(.el-table__cell) {
+  padding: var(--ui-space-10) 0;
+}
+
+.responsive-table__table :deep(.cell) {
+  padding: 0 var(--ui-space-12);
+  line-height: 1.5;
+  word-break: normal;
+  overflow-wrap: anywhere;
+}
+
+.responsive-table__table :deep(th.el-table__cell .cell) {
+  font-size: var(--ui-font-size-12);
+  font-weight: 600;
+}
+
+.responsive-table__table :deep(.el-table__empty-block) {
+  min-height: 112px;
 }
 
 .responsive-table__loading-overlay {
@@ -115,6 +140,8 @@ const viewportLoadingAttrs = computed(() => (props.loading
 .responsive-table__state {
   padding: var(--ui-space-16);
   color: var(--ui-color-text-secondary);
+  font-size: var(--ui-font-size-13);
+  line-height: 1.6;
 }
 
 .responsive-table__state--loading {

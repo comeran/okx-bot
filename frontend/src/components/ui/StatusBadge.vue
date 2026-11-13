@@ -28,14 +28,22 @@ const props = withDefaults(defineProps<Props>(), {
 .status-badge {
   display: inline-flex;
   align-items: center;
-  gap: var(--ui-space-8);
-  padding: var(--ui-space-4) var(--ui-space-10);
+  gap: var(--ui-space-6);
+  min-width: 0;
+  max-width: 100%;
+  padding: var(--ui-space-4) var(--ui-space-8);
   border: var(--ui-border-width-thin) solid transparent;
   border-radius: var(--ui-radius-pill);
   font-size: var(--ui-font-size-12);
   line-height: 1.4;
   font-weight: 600;
-  white-space: nowrap;
+  white-space: normal;
+  vertical-align: middle;
+}
+
+.status-badge__text {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .status-badge__indicator {
@@ -46,8 +54,8 @@ const props = withDefaults(defineProps<Props>(), {
 }
 
 .status-badge__indicator--dot {
-  width: var(--ui-space-8);
-  height: var(--ui-space-8);
+  width: var(--ui-space-6);
+  height: var(--ui-space-6);
   border-radius: var(--ui-radius-pill);
 }
 

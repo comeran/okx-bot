@@ -15,6 +15,8 @@ const mocks = vi.hoisted(() => ({
   getSettings: vi.fn(),
   updateSettings: vi.fn(),
   reloadContext: vi.fn(),
+  checkAuthentication: vi.fn(),
+  ensureContext: vi.fn(),
   loadData: vi.fn(),
   routeGuard: null as null | (() => Promise<boolean>),
 }));
@@ -139,7 +141,10 @@ const tokensSource = readFileSync(fileURLToPath(new URL('../styles/tokens.css', 
 const enLocaleSource = readFileSync(fileURLToPath(new URL('../locales/en.ts', import.meta.url)), 'utf8');
 const zhLocaleSource = readFileSync(fileURLToPath(new URL('../locales/zh-CN.ts', import.meta.url)), 'utf8');
 
-vi.mock('@/stores/accountContext', () => ({ useAccountContextStore: () => ({ reload: mocks.reloadContext, epoch: 1 }) }));
+vi.mock('@/stores/accountContext', () => ({ useAccountContextStore: () => ({
+  reload: mocks.reloadContext, ensure: mocks.ensureContext, epoch: 1,
+  loading: false, authenticationChecking: false, checkAuthentication: mocks.checkAuthentication,
+}) }));
 vi.mock('@/stores/dashboard', () => ({ useDashboardStore: () => ({ loadInitialData: mocks.loadData }) }));
 
 vi.mock('@/services/settings', () => ({
@@ -192,6 +197,8 @@ describe('Settings view', () => {
   beforeEach(() => {
     mocks.reloadContext.mockReset(); mocks.loadData.mockReset();
     mocks.reloadContext.mockResolvedValue({ available: true });
+    mocks.ensureContext.mockReset().mockResolvedValue({ available: true });
+    mocks.checkAuthentication.mockReset().mockResolvedValue({ status: 'authenticated' });
     mocks.loadData.mockResolvedValue(undefined);
     mocks.confirm.mockReset();
     mocks.confirm.mockResolvedValue(undefined);
@@ -234,13 +241,13 @@ describe('Settings view', () => {
     await wrapper.flush();
 
     expect(mocks.getSettings).toHaveBeenCalledTimes(1);
-    expect(wrapper.findAll((node) => node.type === 'h2')).toHaveLength(1);
+    expect(wrapper.findAll((node) => node.type === 'h1')).toHaveLength(1);
     expect(wrapper.find((node) => node.type === 'header' && String(node.props.class).includes('settings-page__header')).props.style).toBeUndefined();
     expect(wrapper.find((node) => node.props.class === 'settings-page__mobile-actions').props.style).toMatchObject({
       position: 'fixed',
       bottom: '0',
     });
-    expect(textNodes(wrapper, 'h3')).toEqual([
+    expect(textNodes(wrapper, 'h2')).toEqual([
       'settings.runtime',
       'settings.okxExchange',
       'settings.backtestDefaults',
@@ -265,6 +272,33 @@ describe('Settings view', () => {
     expect(mocks.updateSettings).toHaveBeenCalledTimes(1);
     expect(mocks.reloadContext).toHaveBeenCalledTimes(1);
     expect(mocks.loadData).toHaveBeenCalledTimes(1);
+    expect(mocks.checkAuthentication).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+  });
+
+  it('reports settings saved but authentication failed instead of a generic successful connection', async () => {
+    mocks.checkAuthentication.mockResolvedValueOnce({ status: 'failed', reason: 'invalid_credentials', provider_code: '50119' });
+    const wrapper = await mount(Settings, { components }); await wrapper.flush();
+    await wrapper.invoke(control(wrapper, 'el-input', 0), 'onUpdate:modelValue', 'bad-key');
+    await wrapper.trigger(control(wrapper, 'el-button', 1), 'click'); await wrapper.flush();
+    expect(mocks.updateSettings).toHaveBeenCalledTimes(1);
+    expect(mocks.success).not.toHaveBeenCalled();
+    expect(mocks.error).toHaveBeenCalledWith('exchangeAuth.savedButFailed');
+    wrapper.unmount();
+  });
+
+  it('manually retries only saved credentials and requires saving dirty form values first', async () => {
+    const wrapper = await mount(Settings, { components }); await wrapper.flush();
+    const check = () => wrapper.getByTestId('exchange-auth-check');
+    expect(check().props.disabled).toBe(false);
+    await wrapper.trigger(check(), 'click');
+    expect(mocks.checkAuthentication).toHaveBeenCalledWith(true);
+    await wrapper.invoke(control(wrapper, 'el-input', 0), 'onUpdate:modelValue', 'unsaved-secret');
+    expect(check().props.disabled).toBe(true);
+    expect(wrapper.text()).toContain('exchangeAuth.saveFirst');
+    await wrapper.trigger(check(), 'click');
+    expect(mocks.checkAuthentication).toHaveBeenCalledTimes(1);
+    expect(mocks.updateSettings).not.toHaveBeenCalled();
     wrapper.unmount();
   });
 
@@ -330,7 +364,7 @@ describe('Settings view', () => {
     expect(mocks.confirm).toHaveBeenCalledTimes(0);
     expect(mocks.error).toHaveBeenCalledWith('settings.loadError');
     expect(wrapper.text()).toContain('common.stale');
-    expect(textNodes(wrapper, 'h3')).toHaveLength(6);
+    expect(textNodes(wrapper, 'h2')).toHaveLength(6);
 
     mocks.getSettings.mockResolvedValueOnce(createSettingsView({ mode: 'live' }));
     const retryButton = wrapper.find((node) => node.props.class === 'data-state__retry');
@@ -463,7 +497,7 @@ describe('Settings view', () => {
     await wrapper.flush();
 
     expect(wrapper.text()).toContain(expected);
-    expect(textNodes(wrapper, 'h3')).toHaveLength(6);
+    expect(textNodes(wrapper, 'h2')).toHaveLength(6);
     expect(control(wrapper, 'el-button', 1).props.disabled).toBe(true);
 
     await wrapper.trigger(control(wrapper, 'el-button', 1), 'click');
@@ -482,7 +516,7 @@ describe('Settings view', () => {
     const portError = validationText('settings.validation.portRange', 'settings.port');
     expect(wrapper.text()).toContain(runtimeError);
     expect(wrapper.text()).toContain(portError);
-    expect(textNodes(wrapper, 'h3')).toHaveLength(6);
+    expect(textNodes(wrapper, 'h2')).toHaveLength(6);
     expect(control(wrapper, 'el-button', 1).props.disabled).toBe(true);
 
     await wrapper.invoke(control(wrapper, 'el-select', 0), 'onUpdate:modelValue', 'backtest');
