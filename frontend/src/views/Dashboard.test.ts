@@ -17,6 +17,14 @@ vi.mock('@/services/ops', () => ({
   updateOpeningPause: vi.fn(),
   cancelOpenOrders: vi.fn(),
   flattenPositions: vi.fn(),
+  fetchDesk: vi.fn().mockResolvedValue({
+    unresolved_live_orders: 0,
+    price_age_ms: null,
+    fill_cursor_ms: null,
+    opening_pause: { paused: false, reason: '', updated_at: 0 },
+    kill_switch: { engaged: false, reason: '', updated_at: 0 },
+    actions: [],
+  }),
 }));
 
 vi.mock('@/stores/accountContext', () => ({ useAccountContextStore: () => storeMocks.accountContext }));

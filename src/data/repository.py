@@ -1997,6 +1997,10 @@ class Repository:
             self._ensure_strategy_lease_table(engine)
             self._ensure_opening_pause_table(engine)
             self._ensure_strategy_ownership_table(engine)
+            from src.data.funded_allocation import ensure_funded_tables
+
+            ensure_funded_tables(engine)
+            self._ensure_runtime_tables(engine)
             if migration_key is not None:
                 Repository._MIGRATED_SQLITE_DATABASES.add(migration_key)
         self.engine = engine
@@ -2194,6 +2198,201 @@ class Repository:
             session.commit()
             session.refresh(state)
             return state
+
+    def sum_other_ownership_budgets(self, scope: str, strategy: str, environment: str) -> float:
+        with self.engine.connect() as connection:
+            row = connection.execute(text(
+                "SELECT COALESCE(SUM(quote_budget), 0) FROM strategy_ownership "
+                "WHERE scope = :scope AND strategy != :strategy AND environment = :environment"
+            ), {"scope": scope, "strategy": strategy, "environment": environment}).first()
+        if row is None or row[0] is None:
+            return 0.0
+        return float(row[0])
+
+    def get_daily_ledger_day(self) -> str | None:
+        with self.engine.connect() as connection:
+            row = connection.execute(text(
+                "SELECT day FROM daily_ledger_day WHERE id = 1"
+            )).first()
+        if row is None:
+            return None
+        return str(row[0])
+
+    def set_daily_ledger_day(self, day: str, updated_at: int) -> None:
+        with self.engine.begin() as connection:
+            connection.execute(text(
+                "INSERT INTO daily_ledger_day(id, day, updated_at) VALUES (1, :day, :updated_at) "
+                "ON CONFLICT(id) DO UPDATE SET day = excluded.day, updated_at = excluded.updated_at"
+            ), {"day": day, "updated_at": int(updated_at)})
+
+    def reset_account_daily_pnl(self) -> None:
+        with Session(self.engine) as session:
+            accounts = list(session.exec(select(AccountRecord)).all())
+            for account in accounts:
+                account.daily_pnl = 0
+                session.add(account)
+            session.commit()
+
+    def release_strategy_leases_for_owner(self, owner: str) -> None:
+        with self.engine.begin() as connection:
+            connection.execute(text(
+                "DELETE FROM strategy_runtime_lease WHERE owner = :owner"
+            ), {"owner": owner})
+
+    def write_runtime_checkpoint(self, state: str, updated_at: int) -> None:
+        with self.engine.begin() as connection:
+            connection.execute(text(
+                "INSERT INTO runtime_checkpoint(id, state, updated_at) "
+                "VALUES (1, :state, :updated_at) "
+                "ON CONFLICT(id) DO UPDATE SET "
+                "state = excluded.state, updated_at = excluded.updated_at"
+            ), {"state": state, "updated_at": int(updated_at)})
+
+    def record_operator_action(self, action: str, result: dict, timestamp: int) -> None:
+        with self.engine.begin() as connection:
+            connection.execute(text(
+                "INSERT INTO operator_action(action, result_json, created_at) "
+                "VALUES (:action, :result_json, :created_at)"
+            ), {
+                "action": action,
+                "result_json": json.dumps(result, default=str),
+                "created_at": int(timestamp),
+            })
+
+    def list_operator_actions(self, limit: int = 20) -> list[dict[str, object]]:
+        with self.engine.connect() as connection:
+            rows = connection.execute(text(
+                "SELECT action, result_json, created_at FROM operator_action "
+                "ORDER BY id DESC LIMIT :limit"
+            ), {"limit": int(limit)}).all()
+        actions = []
+        for action, result_json, created_at in rows:
+            try:
+                result = json.loads(result_json)
+            except (TypeError, ValueError):
+                result = {}
+            actions.append({
+                "action": action,
+                "result": result if isinstance(result, dict) else {"value": result},
+                "created_at": int(created_at),
+            })
+        return actions
+
+    def replace_journal(self, environment: str, entries: list[object]) -> None:
+        from src.data.journal import ENVIRONMENTS, JournalError, insert_entry
+
+        if environment not in ENVIRONMENTS:
+            raise JournalError("环境无效")
+        with self.engine.begin() as connection:
+            connection.execute(text(
+                "DELETE FROM journal_posting WHERE environment = :environment"
+            ), {"environment": environment})
+            for seq, entry in enumerate(entries):
+                insert_entry(connection, environment, seq, entry)
+
+    def load_journal(self, environment: str):
+        from decimal import Decimal
+
+        from src.data.journal import ENVIRONMENTS, Journal, JournalEntry, JournalError, Posting
+
+        if environment not in ENVIRONMENTS:
+            raise JournalError("环境无效")
+        with self.engine.connect() as connection:
+            rows = connection.execute(text(
+                "SELECT entry_seq, kind, entry_ref, account, currency, debit, credit, created_at "
+                "FROM journal_posting WHERE environment = :environment "
+                "ORDER BY entry_seq, id"
+            ), {"environment": environment}).all()
+        grouped: dict[int, list[object]] = {}
+        order: list[int] = []
+        for row in rows:
+            seq = int(row[0])
+            if seq not in grouped:
+                order.append(seq)
+                grouped[seq] = []
+            grouped[seq].append(row)
+        entries = []
+        for seq in order:
+            chunk = grouped[seq]
+            first = chunk[0]
+            entries.append(JournalEntry(
+                kind=str(first[1]),
+                ref=str(first[2]),
+                timestamp=int(first[7]),
+                postings=tuple(
+                    Posting(
+                        account=str(item[3]),
+                        currency=str(item[4]),
+                        debit=Decimal(str(item[5])),
+                        credit=Decimal(str(item[6])),
+                    )
+                    for item in chunk
+                ),
+            ))
+        return Journal.from_entries(environment, entries)
+
+    def get_schema_version(self) -> int:
+        with self.engine.connect() as connection:
+            row = connection.execute(text(
+                "SELECT version FROM schema_version WHERE id = 1"
+            )).first()
+        if row is None:
+            return 0
+        return int(row[0])
+
+    def latest_market_timestamp(self) -> int | None:
+        with self.engine.connect() as connection:
+            row = connection.execute(text("SELECT MAX(timestamp) FROM klinecache")).first()
+        if row is None or row[0] is None:
+            return None
+        return int(row[0])
+
+    def save_backtest_manifest(
+        self,
+        result_id: str,
+        digest: str,
+        annualized_return: float,
+        oos_ratio: float | None,
+        oos_start: int | None,
+        oos_return: float | None,
+        created_at: int,
+    ) -> None:
+        with self.engine.begin() as connection:
+            connection.execute(text(
+                "INSERT INTO backtest_run_manifest("
+                "result_id, digest, annualized_return, oos_ratio, oos_start, oos_return, created_at"
+                ") VALUES ("
+                ":result_id, :digest, :annualized_return, :oos_ratio, :oos_start, :oos_return, "
+                ":created_at) "
+                "ON CONFLICT(result_id) DO UPDATE SET "
+                "digest = excluded.digest, annualized_return = excluded.annualized_return, "
+                "oos_ratio = excluded.oos_ratio, oos_start = excluded.oos_start, "
+                "oos_return = excluded.oos_return, created_at = excluded.created_at"
+            ), {
+                "result_id": result_id,
+                "digest": digest,
+                "annualized_return": float(annualized_return),
+                "oos_ratio": oos_ratio,
+                "oos_start": oos_start,
+                "oos_return": oos_return,
+                "created_at": int(created_at),
+            })
+
+    def get_backtest_manifest(self, result_id: str) -> dict[str, object] | None:
+        with self.engine.connect() as connection:
+            row = connection.execute(text(
+                "SELECT digest, annualized_return, oos_ratio, oos_start, oos_return "
+                "FROM backtest_run_manifest WHERE result_id = :result_id"
+            ), {"result_id": result_id}).first()
+        if row is None:
+            return None
+        return {
+            "digest": row[0],
+            "annualized_return": row[1],
+            "oos_ratio": row[2],
+            "oos_start": row[3],
+            "oos_return": row[4],
+        }
 
     def get_private_uid(self) -> str | None:
         with Session(self.engine) as session:
@@ -3537,6 +3736,47 @@ class Repository:
                 "CREATE TABLE IF NOT EXISTS opening_pause ("
                 "id INTEGER PRIMARY KEY, paused BOOLEAN NOT NULL, "
                 "reason VARCHAR NOT NULL, updated_at INTEGER NOT NULL)"
+            ))
+
+    @staticmethod
+    def _ensure_runtime_tables(engine: Engine) -> None:
+        if engine.dialect.name != "sqlite":
+            return
+        with engine.begin() as connection:
+            connection.execute(text(
+                "CREATE TABLE IF NOT EXISTS schema_version ("
+                "id INTEGER PRIMARY KEY, version INTEGER NOT NULL)"
+            ))
+            connection.execute(text(
+                "INSERT INTO schema_version(id, version) VALUES (1, 2) "
+                "ON CONFLICT(id) DO UPDATE SET version = excluded.version "
+                "WHERE excluded.version > schema_version.version"
+            ))
+            connection.execute(text(
+                "CREATE TABLE IF NOT EXISTS daily_ledger_day ("
+                "id INTEGER PRIMARY KEY, day VARCHAR NOT NULL, updated_at INTEGER NOT NULL)"
+            ))
+            connection.execute(text(
+                "CREATE TABLE IF NOT EXISTS runtime_checkpoint ("
+                "id INTEGER PRIMARY KEY, state VARCHAR NOT NULL, updated_at INTEGER NOT NULL)"
+            ))
+            connection.execute(text(
+                "CREATE TABLE IF NOT EXISTS operator_action ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, action VARCHAR NOT NULL, "
+                "result_json VARCHAR NOT NULL, created_at INTEGER NOT NULL)"
+            ))
+            connection.execute(text(
+                "CREATE TABLE IF NOT EXISTS backtest_run_manifest ("
+                "result_id VARCHAR PRIMARY KEY, digest VARCHAR NOT NULL, "
+                "annualized_return FLOAT NOT NULL, oos_ratio FLOAT, "
+                "oos_start INTEGER, oos_return FLOAT, created_at INTEGER NOT NULL)"
+            ))
+            connection.execute(text(
+                "CREATE TABLE IF NOT EXISTS journal_posting ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, environment VARCHAR NOT NULL, "
+                "entry_seq INTEGER NOT NULL, kind VARCHAR NOT NULL, entry_ref VARCHAR NOT NULL, "
+                "account VARCHAR NOT NULL, currency VARCHAR NOT NULL, debit VARCHAR NOT NULL, "
+                "credit VARCHAR NOT NULL, created_at INTEGER NOT NULL)"
             ))
 
     @staticmethod

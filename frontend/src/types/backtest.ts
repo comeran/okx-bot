@@ -48,10 +48,19 @@ export interface BacktestRejectedOrder {
   reason: string;
 }
 
+export interface BacktestRunManifest {
+  digest: string;
+  annualized_return: number;
+  oos_ratio?: number | null;
+  oos_start?: number | null;
+  oos_return?: number | null;
+}
+
 export interface BacktestResultDetail {
   result: BacktestResult;
   klines: Kline[];
   markers: BacktestMarker[];
   equity_curve?: BacktestEquityPoint[];
   rejected_orders?: BacktestRejectedOrder[];
+  manifest?: BacktestRunManifest | null;
 }

@@ -83,3 +83,16 @@ async def test_backtest_still_fills_an_affordable_order_inside_the_position_limi
 
     assert len(report.trades) == 1
     assert report.rejected_orders == []
+
+
+async def test_backtest_buy_cannot_exceed_the_allocation_budget() -> None:
+    strategy = BuyOnce()
+
+    report = await BacktestEngine(
+        100,
+        OrderMatcher(slippage=0, fee_rate=0),
+        allocation_budget=15,
+    ).run(strategy, [candle(0), candle(1)])
+
+    assert report.trades == []
+    assert report.rejected_orders[0]["reason"] == "Allocation budget exceeded"

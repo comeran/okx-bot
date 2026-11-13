@@ -32,6 +32,14 @@ def grant_ownership_from_balance(
             "balance_insufficient",
             "Exchange quote balance does not cover the draft budget",
         )
+    others = getattr(repository, "sum_other_ownership_budgets", None)
+    if callable(others):
+        already = float(others(scope_id, strategy, environment))
+        if already + budget > available + 1e-8:
+            raise OwnershipError(
+                "budget_overlap",
+                "Existing strategy budgets already use this exchange balance",
+            )
     try:
         normalized = canonical_symbol(symbol, market_type="spot")
     except ValueError as exc:

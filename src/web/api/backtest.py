@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import logging
 import math
 import time
 from typing import Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from src.backtest.engine import BacktestEngine, spot_backtest_symbol
 from src.backtest.historical_data import (
@@ -15,6 +16,7 @@ from src.backtest.historical_data import (
     UnsupportedTimeframeError,
     ensure_historical_bars,
 )
+from src.backtest.manifest import data_digest, split_oos
 from src.backtest.matcher import OrderMatcher
 from src.backtest.report import drawdown_series
 from src.core.config import BacktestConfig
@@ -32,6 +34,7 @@ from src.risk.manager import RiskManager
 from src.web.api.strategies import create_strategy_registry
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 MAX_BACKTEST_BARS = 200_000
 
@@ -44,6 +47,7 @@ class BacktestRequest(BaseModel):
     end_time: int
     initial_capital: float
     market_type: Literal["spot"] = "spot"
+    oos_ratio: float | None = Field(default=None, ge=0, le=0.5)
 
 
 @router.post("/run")
@@ -72,25 +76,26 @@ async def run_backtest(req: BacktestRequest) -> dict[str, float | int]:
     if get_strategy_config is not None:
         strategy_config = get_strategy_config(req.strategy)
 
-    if strategy_config is not None:
-        if strategy_config.strategy_type not in registry.list_strategies():
+    def build_strategy():
+        if strategy_config is not None:
+            if strategy_config.strategy_type not in registry.list_strategies():
+                raise HTTPException(status_code=404, detail="Strategy not found")
+            created = registry.create_instance(
+                strategy_config.name,
+                strategy_config.strategy_type,
+                strategy_config.symbol,
+                strategy_config.timeframe,
+                strategy_config.params,
+            )
+        elif req.strategy in registry.list_strategies():
+            created = registry.create(req.strategy)
+        else:
             raise HTTPException(status_code=404, detail="Strategy not found")
-        strategy = registry.create_instance(
-            strategy_config.name,
-            strategy_config.strategy_type,
-            strategy_config.symbol,
-            strategy_config.timeframe,
-            strategy_config.params,
-        )
-    elif req.strategy in registry.list_strategies():
-        strategy = registry.create(req.strategy)
-    else:
-        raise HTTPException(status_code=404, detail="Strategy not found")
+        created.symbol = symbol
+        created.timeframe = req.timeframe
+        return created
 
-    # Research requests may override a saved strategy's instrument and timeframe.
-    # Apply both before loading data so the strategy and account share one context.
-    strategy.symbol = symbol
-    strategy.timeframe = req.timeframe
+    strategy = build_strategy()
 
     try:
         bars = await ensure_historical_bars(
@@ -133,16 +138,29 @@ async def run_backtest(req: BacktestRequest) -> dict[str, float | int]:
         )
 
     backtest_config = load_backtest_config()
-    report = await BacktestEngine(
-        initial_capital=req.initial_capital,
-        matcher=OrderMatcher(
+    engine_kwargs = {
+        "initial_capital": req.initial_capital,
+        "matcher": OrderMatcher(
             slippage=backtest_config.slippage,
             fee_rate=backtest_config.fee_rate,
         ),
-        market_type=req.market_type,
-        symbol=symbol,
-        risk_manager=research_risk_manager(),
-    ).run(strategy, bars)
+        "market_type": req.market_type,
+        "symbol": symbol,
+        "risk_manager": research_risk_manager(),
+        "allocation_budget": _draft_allocation_budget(repository, req.strategy),
+    }
+    report = await BacktestEngine(**engine_kwargs).run(strategy, bars)
+    oos_start = None
+    oos_return = None
+    if req.oos_ratio:
+        _insample, held = split_oos(bars, req.oos_ratio)
+        oos_start = getattr(held[0], "timestamp", None) if held else None
+        if len(held) >= 2:
+            try:
+                oos_report = await BacktestEngine(**engine_kwargs).run(build_strategy(), held)
+                oos_return = oos_report.total_return
+            except Exception:
+                logger.exception("样本外回测没有完成")
     metrics = {
         "total_return": report.total_return,
         "sharpe_ratio": report.sharpe_ratio,
@@ -210,7 +228,21 @@ async def run_backtest(req: BacktestRequest) -> dict[str, float | int]:
                 for rejected in report.rejected_orders
             ],
         )
-    return metrics
+    save_manifest = getattr(repository, "save_backtest_manifest", None)
+    if callable(save_manifest):
+        save_manifest(
+            result_id=result_id,
+            digest=data_digest(bars),
+                annualized_return=float(getattr(report, "annualized_return", 0.0) or 0.0),
+            oos_ratio=req.oos_ratio,
+            oos_start=oos_start,
+            oos_return=oos_return,
+            created_at=created_at,
+        )
+    return {
+        **metrics,
+        "annualized_return": float(getattr(report, "annualized_return", 0.0) or 0.0),
+    }
 
 
 @router.get("/results")
@@ -218,8 +250,8 @@ async def list_results() -> list[dict[str, float | int | str]]:
     return [result.model_dump() for result in Repository().get_backtest_results()]
 
 
-@router.get("/results/{result_id}")
-async def get_result_detail(result_id: str) -> dict[str, list[dict] | dict]:
+@router.get("/results/{result_id}", response_model=None)
+async def get_result_detail(result_id: str) -> dict[str, object]:
     repository = Repository()
     result = repository.get_backtest_result(result_id)
     if result is None:
@@ -252,6 +284,8 @@ async def get_result_detail(result_id: str) -> dict[str, list[dict] | dict]:
     rejected_getter = getattr(repository, "get_backtest_rejected_orders", None)
     equity_curve = equity_getter(result_id) if callable(equity_getter) else []
     rejected_orders = rejected_getter(result_id) if callable(rejected_getter) else []
+    manifest_getter = getattr(repository, "get_backtest_manifest", None)
+    manifest = manifest_getter(result_id) if callable(manifest_getter) else None
     return {
         "result": result.model_dump(),
         "klines": [
@@ -271,6 +305,7 @@ async def get_result_detail(result_id: str) -> dict[str, list[dict] | dict]:
         "markers": [marker.model_dump() for marker in markers],
         "equity_curve": [point.model_dump() for point in equity_curve],
         "rejected_orders": [order.model_dump() for order in rejected_orders],
+        "manifest": manifest,
     }
 
 
@@ -280,6 +315,25 @@ def current_timestamp_ms() -> int:
 
 def load_backtest_config() -> BacktestConfig:
     return load_runtime_settings().backtest
+
+
+def _draft_allocation_budget(repository: Repository, strategy_name: str) -> float | None:
+    if getattr(repository, "engine", None) is None:
+        return None
+    try:
+        from src.data.allocations import AllocationStore
+        from src.web.api.allocations import allocation_context
+
+        _context, scope = allocation_context()
+        if scope is None:
+            return None
+        draft = AllocationStore(repository.engine).get_draft(scope, strategy_name)
+    except Exception:
+        logger.exception("读取回测资金预算失败")
+        return None
+    if draft is None:
+        return None
+    return float(draft.budget)
 
 
 def research_risk_manager() -> RiskManager:
