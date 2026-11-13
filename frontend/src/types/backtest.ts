@@ -32,8 +32,26 @@ export interface BacktestMarker {
   pnl: number;
 }
 
+export interface BacktestEquityPoint {
+  seq: number;
+  timestamp: number;
+  equity: number;
+  drawdown: number;
+}
+
+export interface BacktestRejectedOrder {
+  symbol: string;
+  side: string;
+  timestamp: number;
+  amount: number;
+  price: number | null;
+  reason: string;
+}
+
 export interface BacktestResultDetail {
   result: BacktestResult;
   klines: Kline[];
   markers: BacktestMarker[];
+  equity_curve?: BacktestEquityPoint[];
+  rejected_orders?: BacktestRejectedOrder[];
 }

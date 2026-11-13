@@ -2,6 +2,7 @@
 import { computed } from 'vue';
 import { useI18n } from 'vue-i18n';
 
+import EquityChart from '@/components/backtest/EquityChart.vue';
 import Candlestick from '@/components/charts/Candlestick.vue';
 import MetricCard from '@/components/ui/MetricCard.vue';
 import DataState from '@/components/ui/DataState.vue';
@@ -33,6 +34,8 @@ const emit = defineEmits<{
 const { t, locale } = useI18n();
 const currentLocale = computed(() => locale.value);
 
+const equityPoints = computed(() => props.selectedDetail?.equity_curve ?? []);
+const rejectedOrders = computed(() => props.selectedDetail?.rejected_orders ?? []);
 const hasSelection = computed(() => Boolean(props.selectedResultId));
 const hasVisibleDetail = computed(() => Boolean(
   props.selectedResultId
@@ -139,6 +142,33 @@ function retry(): void {
             </div>
           </section>
         </div>
+
+        <section v-if="equityPoints.length" class="backtest-result-detail__equity">
+          <h3 class="backtest-result-detail__section-title">{{ t('backtest.equityCurve') }}</h3>
+          <EquityChart :points="equityPoints" />
+        </section>
+
+        <section v-if="rejectedOrders.length" class="backtest-result-detail__rejections">
+          <h3 class="backtest-result-detail__section-title">{{ t('backtest.rejectedOrders') }}</h3>
+          <table class="backtest-result-detail__rejection-table">
+            <thead>
+              <tr>
+                <th>{{ t('common.timestamp') }}</th>
+                <th>{{ t('common.symbol') }}</th>
+                <th>{{ t('dashboard.side') }}</th>
+                <th>{{ t('backtest.rejectionReason') }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(order, index) in rejectedOrders" :key="`${order.timestamp}-${index}`">
+                <td>{{ formatBacktestTime(order.timestamp, currentLocale) }}</td>
+                <td>{{ order.symbol }}</td>
+                <td>{{ order.side }}</td>
+                <td>{{ order.reason }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
       </div>
     </DataState>
   </SectionCard>
@@ -169,6 +199,27 @@ function retry(): void {
   color: var(--ui-color-text);
   font-size: var(--ui-font-size-16);
   line-height: 1.5;
+}
+
+.backtest-result-detail__equity,
+.backtest-result-detail__rejections {
+  margin-top: var(--ui-space-16);
+  padding: var(--ui-space-16);
+  border: var(--ui-border-width-thin) solid var(--ui-color-border);
+  border-radius: var(--ui-radius-8);
+  background: var(--ui-color-surface);
+}
+
+.backtest-result-detail__rejection-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.backtest-result-detail__rejection-table th,
+.backtest-result-detail__rejection-table td {
+  padding: var(--ui-space-8) var(--ui-space-12);
+  text-align: left;
+  border-bottom: var(--ui-border-width-thin) solid var(--ui-color-border);
 }
 
 .backtest-result-detail__metrics {

@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 import weakref
 from collections.abc import Awaitable, Callable
+from dataclasses import is_dataclass, replace
 from typing import Any, Protocol
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
@@ -13,9 +15,11 @@ from sqlalchemy.exc import IntegrityError
 
 from src.core.config import BacktestConfig
 from src.core.engine import BotEngine
+from src.core.execution_mode import adapter_uses_sandbox
 from src.core.runtime_settings import load_runtime_settings
 from src.core.types import Order, OrderStatus, OrderType
 from src.data.models import StrategyConfigRecord
+from src.data.paper_book import PaperBook
 from src.data.repository import Repository
 from src.exchange.factory import create_okx_adapter
 from src.exchange.live_sync import refresh_okx_live_state
@@ -26,7 +30,7 @@ from src.exchange.okx_swap import OKXSwapAdapter
 from src.market.service import MarketDataService
 from src.notify.telegram import RiskEventTelegramNotifier, TelegramNotifier
 from src.ops.private_sync import sync_private_state
-from src.order.manager import UnifiedOrderManager
+from src.order.manager import PRICE_FRESHNESS_UNTRACKED, UnifiedOrderManager
 from src.order.mark_to_market import PaperMarkToMarketService
 from src.order.router import OrderHandler, OrderRouter
 from src.risk.manager import RiskManager
@@ -180,9 +184,42 @@ def current_order_router_mode() -> str:
     return resolve_order_router_mode(load_runtime_settings().mode)
 
 
+def _opening_orders_paused(repository) -> Callable[[], bool]:
+    def paused() -> bool:
+        getter = getattr(repository, "get_opening_pause", None)
+        if not callable(getter):
+            return False
+        try:
+            return bool(getattr(getter(), "paused", False))
+        except Exception:
+            logger.warning("读取暂停开仓状态失败", exc_info=True)
+            return True
+
+    return paused
+
+
+def _release_strategy_execution_lease(name: str) -> None:
+    try:
+        repository = Repository()
+    except Exception:
+        logger.exception("读取策略运行租约失败")
+        return
+    release_lease = getattr(repository, "release_strategy_lease", None)
+    if not callable(release_lease):
+        return
+    try:
+        release_lease(name, str(os.getpid()))
+    except Exception:
+        logger.exception("释放策略运行租约失败")
+
+
 def create_live_order_handler(settings: object) -> OrderHandler:
+    exchange = settings.exchange
+    demo = adapter_uses_sandbox(getattr(settings, "mode", ""), getattr(exchange, "demo", True))
+    if is_dataclass(exchange) and getattr(exchange, "demo", None) is not demo:
+        exchange = replace(exchange, demo=demo)
     return create_okx_adapter(
-        settings.exchange,
+        exchange,
         adapter_classes={
             "spot": OKXSpotAdapter,
             "swap": OKXSwapAdapter,
@@ -201,6 +238,7 @@ def create_order_manager(
     on_risk_event: RiskEventCallback | None = None,
     kill_switch_checker: KillSwitchChecker | None = None,
     order_router_mode: object = _UNSET_ORDER_ROUTER_MODE,
+    price_observed_at: Callable[[str], int | None] | None = None,
 ) -> UnifiedOrderManager:
     settings = load_runtime_settings()
     resolved_mode = (
@@ -215,6 +253,19 @@ def create_order_manager(
         live_handler = None
         handler = LocalPaperOrderHandler(latest_price=latest_price)
     order_repository = repository if repository is not None else Repository()
+    paper_book = None
+    read_paper_scope = None
+    if resolved_mode == "demo" and getattr(order_repository, "engine", None) is not None:
+        paper_book = PaperBook(order_repository.engine)
+
+        def read_paper_scope() -> str | None:
+            from src.web.api.allocations import allocation_context
+
+            _context, scope = allocation_context()
+            if scope is None:
+                return None
+            return scope.scope_id
+
     router = OrderRouter(
         backtest=handler if resolved_mode == "backtest" else None,
         demo=handler if resolved_mode == "demo" else None,
@@ -265,6 +316,11 @@ def create_order_manager(
         live_max_order_notional=(
             risk_config.live_max_order_notional if resolved_mode == "live" else 0.0
         ),
+        paper_book=paper_book,
+        paper_scope_id=read_paper_scope,
+        opening_pause_checker=_opening_orders_paused(order_repository),
+        price_observed_at_provider=price_observed_at,
+        max_price_age_ms=risk_config.max_price_age_ms,
     )
 
 
@@ -473,6 +529,21 @@ def create_router(
             return bars[-1].close
 
         return latest_price
+
+    def price_observed_at_for_strategy(strategy) -> Callable[[str], int | None | object]:
+        timeframe = getattr(strategy, "timeframe", None)
+
+        def observed_at(symbol: str) -> int | None | object:
+            if timeframe is None:
+                return PRICE_FRESHNESS_UNTRACKED
+            service = get_market_data_service()
+            getter = getattr(service, "price_observed_at", None)
+            if not callable(getter):
+                return PRICE_FRESHNESS_UNTRACKED
+            value = getter(symbol, timeframe)
+            return None if value is None else int(value)
+
+        return observed_at
 
     async def broadcast_status(name: str) -> None:
         if broadcast is None:
@@ -1260,11 +1331,25 @@ def create_router(
             startup_finalized = False
             if name not in runtime.engines and name not in runtime.starting_engines:
                 engine: BotEngine | None = None
+                lease_owner = str(os.getpid())
+                lease_acquired = False
                 try:
                     runtime.strategy_errors.pop(name, None)
                     repository = Repository()
                     if kill_switch_engaged(repository):
                         raise HTTPException(status_code=423, detail="Kill switch engaged")
+                    acquire_lease = getattr(repository, "acquire_strategy_lease", None)
+                    if callable(acquire_lease):
+                        if not acquire_lease(name, lease_owner):
+                            raise HTTPException(
+                                status_code=409,
+                                detail={
+                                    "code": "strategy_lease_held",
+                                    "message": "Strategy is already running in another process",
+                                    "reason_code": "strategy_lease_held",
+                                },
+                            )
+                        lease_acquired = True
                     strategy = create_strategy(name)
                     if order_router_mode == "live" and not has_live_strategy_ownership_mapping(
                         repository, name, strategy.symbol
@@ -1320,6 +1405,7 @@ def create_router(
                                 ),
                                 kill_switch_checker=lambda: kill_switch_engaged(repository),
                                 order_router_mode=order_router_mode,
+                                price_observed_at=price_observed_at_for_strategy(strategy),
                             )
                         )
                     transferred = False
@@ -1459,6 +1545,14 @@ def create_router(
                 except Exception as exc:
                     await handle_strategy_error(name, exc, engine)
                     raise HTTPException(status_code=400, detail=str(exc)) from None
+                finally:
+                    if lease_acquired and not startup_finalized:
+                        release_lease = getattr(repository, "release_strategy_lease", None)
+                        if callable(release_lease):
+                            try:
+                                release_lease(name, lease_owner)
+                            except Exception:
+                                logger.exception("释放策略运行租约失败")
             if not startup_finalized:
                 runtime.strategy_status[name] = "running"
                 runtime.strategy_errors.pop(name, None)
@@ -1478,6 +1572,7 @@ def create_router(
                 await release_market_data_service_if_idle()
             runtime.strategy_status[name] = "stopped"
             await broadcast_status(name)
+            _release_strategy_execution_lease(name)
         return {"status": "stopped", "strategy": name}
 
     return router

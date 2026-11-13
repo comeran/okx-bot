@@ -2,6 +2,7 @@ import { createRouter, createWebHistory } from 'vue-router';
 
 import Backtest from '@/views/Backtest.vue';
 import Dashboard from '@/views/Dashboard.vue';
+import Login from '@/views/Login.vue';
 import Market from '@/views/Market.vue';
 import Settings from '@/views/Settings.vue';
 import Strategy from '@/views/Strategy.vue';
@@ -39,6 +40,11 @@ const router = createRouter({
       path: '/settings',
       name: 'settings',
       component: Settings,
+    },
+    {
+      path: '/login',
+      name: 'login',
+      component: Login,
     },
   ],
 });

@@ -1,6 +1,7 @@
 import { getCurrentInstance, onBeforeUnmount, ref } from 'vue';
 
 import type { DashboardWebSocketMessage } from '@/types/dashboard';
+import { withApiToken } from '@/services/apiToken';
 
 interface UseWebSocketOptions {
   onMessage?: (message: DashboardWebSocketMessage) => void;
@@ -55,7 +56,7 @@ export function useWebSocket(path: string | (() => string | null) = '/ws', optio
 
     const currentPath = typeof path === 'function' ? path() : path;
     if (!currentPath) return;
-    const currentSocket = new WebSocket(resolveWebSocketUrl(currentPath));
+    const currentSocket = new WebSocket(resolveWebSocketUrl(withApiToken(currentPath)));
     socket = currentSocket;
 
     currentSocket.onopen = () => {

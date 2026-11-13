@@ -9,6 +9,7 @@ import DataState from '@/components/ui/DataState.vue';
 import SettingsSection from '@/components/settings/SettingsSection.vue';
 import SecretField from '@/components/settings/SecretField.vue';
 import { useDirtyGuard } from '@/composables/useDirtyGuard';
+import { getApiToken, setApiToken } from '@/services/apiToken';
 import { useAccountContextStore } from '@/stores/accountContext';
 import { useDashboardStore } from '@/stores/dashboard';
 import { getSettings, updateSettings } from '@/services/settings';
@@ -17,6 +18,7 @@ import type { AppSettingsUpdate, AppSettingsView } from '@/types/settings';
 const { t, locale } = useI18n();
 const accountContext = useAccountContextStore();
 
+const apiToken = ref(getApiToken());
 const loading = ref(false);
 const saving = ref(false);
 const hasLoadedSettings = ref(false);
@@ -319,6 +321,11 @@ async function loadSettings(): Promise<void> {
       loading.value = false;
     }
   }
+}
+
+function saveApiToken(): void {
+  setApiToken(apiToken.value);
+  ElMessage.success(t('settings.apiTokenSaved'));
 }
 
 async function saveSettings(): Promise<void> {
@@ -634,6 +641,21 @@ onBeforeRouteLeave(async () => confirmIfDirty());
                   <el-form-item :label="t('settings.port')">
                     <el-input-number v-model="form.web.port" :min="1" :max="65535" class="settings-form__control" />
                   </el-form-item>
+                </el-col>
+                <el-col :xs="24">
+                  <el-form-item :label="t('settings.apiToken')">
+                    <el-input
+                      v-model="apiToken"
+                      type="password"
+                      show-password
+                      autocomplete="off"
+                      :placeholder="t('settings.apiTokenPlaceholder')"
+                    />
+                  </el-form-item>
+                  <p class="settings-page__hint">{{ t('settings.apiTokenDescription') }}</p>
+                  <el-button type="button" @click="saveApiToken">
+                    {{ t('settings.saveApiToken') }}
+                  </el-button>
                 </el-col>
               </el-row>
             </template>

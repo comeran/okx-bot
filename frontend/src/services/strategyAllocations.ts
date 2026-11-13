@@ -51,3 +51,25 @@ export async function deleteStrategyAllocation(
   });
   return response.data;
 }
+
+export async function activateStrategyAllocation(
+  strategy: string,
+  update: Omit<StrategyAllocationUpdate, 'budget'>,
+): Promise<StrategyAllocationEnvelope> {
+  const response = await axios.post<StrategyAllocationEnvelope>(
+    `${allocationUrl(strategy)}/activate`,
+    update,
+  );
+  return response.data;
+}
+
+export async function releaseStrategyAllocation(
+  strategy: string,
+  update: Omit<StrategyAllocationUpdate, 'budget'>,
+): Promise<StrategyAllocationEnvelope> {
+  const response = await axios.post<StrategyAllocationEnvelope>(
+    `${allocationUrl(strategy)}/release`,
+    update,
+  );
+  return response.data;
+}

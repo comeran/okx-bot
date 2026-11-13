@@ -3299,6 +3299,126 @@ async def test_live_submit_timeout_persists_stable_client_anchor_and_unknown_ris
 
 
 @pytest.mark.asyncio
+async def test_unknown_live_submission_blocks_another_order_until_reconciled():
+    class ScriptedHandler(OrderHandler):
+        def __init__(self):
+            self.calls = 0
+
+        async def submit(self, order: Order) -> Order:
+            self.calls += 1
+            if self.calls == 1:
+                raise AcceptedUnknownOrderResultError("accepted unknown")
+            order.status = OrderStatus.FILLED
+            order.fill_price = 100.0
+            return order
+
+        async def cancel(self, order_id: str, symbol: str | None = None) -> bool:
+            return True
+
+    class RecordingRepository(FakeRepository):
+        def __init__(self):
+            super().__init__()
+            self.risk_events = []
+
+        def save_risk_event(self, event, **_kwargs):
+            self.risk_events.append(event)
+            return event
+
+        def get_risk_events(self):
+            return list(self.risk_events)
+
+    repository = RecordingRepository()
+    grant_live_position_ownership(repository)
+    handler = ScriptedHandler()
+    events = []
+    manager = UnifiedOrderManager(
+        router=OrderRouter(backtest=None, live=handler, mode="live"),
+        repository=repository,
+        timestamp_ms=lambda: 1700000000000,
+        on_risk_event=lambda payload: events.append(payload),
+    )
+
+    with pytest.raises(AcceptedUnknownOrderResultError, match="accepted unknown"):
+        await manager.submit(
+            symbol="BTC-USDT-SWAP", side=OrderSide.BUY, order_type=OrderType.MARKET,
+            amount=0.1, strategy_name="ma_cross",
+        )
+    blocked = await manager.submit(
+        symbol="BTC-USDT-SWAP", side=OrderSide.BUY, order_type=OrderType.MARKET,
+        amount=0.1, strategy_name="ma_cross",
+    )
+
+    assert blocked.status == OrderStatus.REJECTED
+    assert events[-1]["reason"] == "Unresolved live order requires reconciliation"
+    assert handler.calls == 1
+    repository.orders[0].status = OrderStatus.FILLED.value
+    resumed = await manager.submit(
+        symbol="BTC-USDT-SWAP", side=OrderSide.BUY, order_type=OrderType.MARKET,
+        amount=0.1, strategy_name="ma_cross",
+    )
+    assert resumed.status == OrderStatus.FILLED
+    assert handler.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_stored_unknown_risk_record_blocks_live_submission():
+    class StoredEvent:
+        reason_code = "live_order_submission_unknown"
+        payload = {"client_order_id": "cid-1"}
+
+    class QuietHandler(OrderHandler):
+        def __init__(self):
+            self.calls = 0
+
+        async def submit(self, order: Order) -> Order:
+            self.calls += 1
+            order.status = OrderStatus.FILLED
+            return order
+
+        async def cancel(self, order_id: str, symbol: str | None = None) -> bool:
+            return True
+
+    class RecordingRepository(FakeRepository):
+        def get_risk_events(self):
+            return [StoredEvent()]
+
+        def get_orders(self, order_id=None):
+            return [OrderRecord(
+                order_id="local-1",
+                client_order_id="cid-1",
+                strategy="ma_cross",
+                symbol="BTC-USDT-SWAP",
+                side="buy",
+                type="market",
+                amount=0.1,
+                price=0.0,
+                status="pending",
+                fill_price=0.0,
+                timestamp=1,
+            )]
+
+    repository = RecordingRepository()
+    grant_live_position_ownership(repository)
+    handler = QuietHandler()
+    events = []
+    manager = UnifiedOrderManager(
+        router=OrderRouter(backtest=None, live=handler, mode="live"),
+        repository=repository,
+        timestamp_ms=lambda: 1700000000000,
+        on_risk_event=lambda payload: events.append(payload),
+    )
+
+    blocked = await manager.submit(
+        symbol="BTC-USDT-SWAP", side=OrderSide.BUY, order_type=OrderType.MARKET,
+        amount=0.1, strategy_name="ma_cross",
+    )
+
+    assert blocked.status == OrderStatus.REJECTED
+    assert events[-1]["reason"] == "Unresolved live order requires reconciliation"
+    assert handler.calls == 0
+
+
+@pytest.mark.asyncio
 async def test_live_submit_malformed_accepted_response_keeps_exchange_anchor_for_reconciliation():
     class MalformedAcceptedHandler(OrderHandler):
         async def submit(self, order: Order) -> Order:
@@ -4284,3 +4404,49 @@ async def test_live_submit_rejects_when_submission_lease_is_unavailable():
     assert order.status == OrderStatus.REJECTED
     assert len(repository.acquire_calls) == 1
     assert risk_events[0]["reason"] == "Live submission lock unavailable"
+
+
+@pytest.mark.asyncio
+async def test_opening_pause_blocks_new_exposure_and_still_allows_a_full_reduce():
+    handler = MockHandler()
+    repository = FakeRepository()
+    repository.upsert_position(PositionRecord(
+        strategy="ma_cross",
+        symbol="BTC-USDT",
+        side="long",
+        amount=0.2,
+        entry_price=50000.0,
+        leverage=1,
+        timestamp=1700000000000,
+    ))
+    risk_events = []
+
+    async def on_risk_event(payload):
+        risk_events.append(payload)
+
+    manager = UnifiedOrderManager(
+        router=OrderRouter(backtest=handler, mode="backtest"),
+        repository=repository,
+        timestamp_ms=lambda: 1700000000000,
+        on_risk_event=on_risk_event,
+        opening_pause_checker=lambda: True,
+    )
+
+    blocked = await manager.submit(
+        "BTC-USDT", OrderSide.BUY, OrderType.MARKET, 0.1, strategy_name="ma_cross",
+    )
+    oversized = await manager.submit(
+        "BTC-USDT", OrderSide.SELL, OrderType.MARKET, 0.3, strategy_name="ma_cross",
+    )
+    reduced = await manager.submit(
+        "BTC-USDT", OrderSide.SELL, OrderType.MARKET, 0.2, strategy_name="ma_cross",
+    )
+
+    assert blocked.status == OrderStatus.REJECTED
+    assert oversized.status == OrderStatus.REJECTED
+    assert reduced.status == OrderStatus.FILLED
+    assert [event["reason"] for event in risk_events] == [
+        "Opening orders are paused",
+        "Opening orders are paused",
+    ]
+    assert [order.side for order in handler.submitted] == [OrderSide.SELL]

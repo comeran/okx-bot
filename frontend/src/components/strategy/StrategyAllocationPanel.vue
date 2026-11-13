@@ -6,8 +6,10 @@ import SectionCard from '@/components/ui/SectionCard.vue';
 import StrategyAllocationReadiness from './StrategyAllocationReadiness.vue';
 import { matchesExecutionContext, useAccountContextStore } from '@/stores/accountContext';
 import {
+  activateStrategyAllocation,
   deleteStrategyAllocation,
   getStrategyAllocation,
+  releaseStrategyAllocation,
   saveStrategyAllocation,
 } from '@/services/strategyAllocations';
 import type { StrategyAllocationEnvelope } from '@/types/strategyAllocation';
@@ -27,12 +29,26 @@ let requestSequence = 0;
 const stopped = computed(() => (
   (props.status ?? allocation.value?.lifecycle_status) === 'stopped'
 ));
-const canEdit = computed(() => Boolean(
+const reservation = computed(() => allocation.value?.reservation ?? null);
+const localPaper = computed(() => {
+  const mode = allocation.value?.context.execution_mode;
+  return mode === 'paper' || mode === 'demo';
+});
+const baseEditable = computed(() => Boolean(
   allocation.value?.context.available
   && allocation.value.context.scope_id
   && allocation.value.can_edit
   && matchesExecutionContext(accountContext.context, allocation.value.execution_context)
   && stopped.value
+  && !loading.value && !busy.value && !needsRefresh.value
+  && !allocation.value?.other_scope_reservation,
+));
+const canEdit = computed(() => baseEditable.value && reservation.value == null);
+const canActivate = computed(() => Boolean(
+  localPaper.value && canEdit.value && allocation.value?.draft,
+));
+const canRelease = computed(() => Boolean(
+  localPaper.value && reservation.value && stopped.value
   && !loading.value && !busy.value && !needsRefresh.value,
 ));
 const executionLabel = computed(() => {
@@ -150,6 +166,58 @@ async function remove(): Promise<void> {
   }
 }
 
+async function activate(): Promise<void> {
+  if (!canActivate.value || !allocation.value?.draft || !allocation.value.context.scope_id) return;
+  const sequence = ++requestSequence;
+  const strategy = props.strategyName;
+  const revision = allocation.value.draft.revision;
+  const scopeId = allocation.value.context.scope_id;
+  const symbol = allocation.value.symbol;
+  busy.value = true;
+  error.value = '';
+  notice.value = '';
+  try {
+    const result = await activateStrategyAllocation(strategy, {
+      expected_revision: revision,
+      expected_scope_id: scopeId,
+      expected_symbol: symbol,
+    });
+    if (sequence !== requestSequence) return;
+    applyEnvelope(result);
+    notice.value = t('strategies.allocation.activated');
+  } catch (cause) {
+    if (sequence === requestSequence) showFailure(cause, t('strategies.allocation.activateFailed'));
+  } finally {
+    if (sequence === requestSequence) busy.value = false;
+  }
+}
+
+async function release(): Promise<void> {
+  if (!canRelease.value || !reservation.value || !allocation.value?.context.scope_id) return;
+  const sequence = ++requestSequence;
+  const strategy = props.strategyName;
+  const revision = reservation.value.revision;
+  const scopeId = allocation.value.context.scope_id;
+  const symbol = allocation.value.symbol;
+  busy.value = true;
+  error.value = '';
+  notice.value = '';
+  try {
+    const result = await releaseStrategyAllocation(strategy, {
+      expected_revision: revision,
+      expected_scope_id: scopeId,
+      expected_symbol: symbol,
+    });
+    if (sequence !== requestSequence) return;
+    applyEnvelope(result);
+    notice.value = t('strategies.allocation.released');
+  } catch (cause) {
+    if (sequence === requestSequence) showFailure(cause, t('strategies.allocation.releaseFailed'));
+  } finally {
+    if (sequence === requestSequence) busy.value = false;
+  }
+}
+
 watch(() => [props.strategyName, props.status, props.strategySymbol, accountContext.epoch, accountContext.context], () => {
   void load();
 }, { immediate: true, flush: 'sync' });
@@ -161,6 +229,10 @@ onBeforeUnmount(() => { requestSequence += 1; });
   <SectionCard :title="t('strategies.allocation.title')" :description="strategyName" class="allocation-panel">
     <p class="allocation-panel__warning">{{ t('strategies.allocation.draftOnly') }}</p>
     <p class="allocation-panel__warning">{{ t('strategies.allocation.pending') }}</p>
+    <p v-if="allocation?.context.execution_mode === 'live'" class="allocation-panel__warning">
+      {{ t('strategies.allocation.liveStillClosed') }}
+    </p>
+    <p v-if="reservation" class="allocation-panel__warning">{{ t('strategies.allocation.reservedHint') }}</p>
     <p v-if="loading" role="status">{{ t('common.loading') }}</p>
     <p v-if="error" role="alert" class="allocation-panel__error">{{ error }}</p>
     <p v-if="needsRefresh" role="status">{{ t('strategies.allocation.conflict') }}</p>
@@ -176,11 +248,18 @@ onBeforeUnmount(() => { requestSequence += 1; });
         <dt>{{ t('strategies.allocation.market') }}</dt>
         <dd>{{ allocation.context.market_type }} · {{ allocation.symbol }} · {{ allocation.currency }}</dd>
         <dt>{{ t('common.status') }}</dt>
-        <dd>{{ allocation.draft ? t('strategies.allocation.draft') : t('strategies.allocation.noDraft') }}</dd>
+        <dd>{{ reservation ? t('strategies.allocation.reserved') : allocation.draft ? t('strategies.allocation.draft') : t('strategies.allocation.noDraft') }}</dd>
         <dt>{{ t('strategies.allocation.revision') }}</dt>
         <dd>{{ allocation.draft?.revision ?? '—' }}</dd>
+        <template v-if="reservation">
+          <dt>{{ t('strategies.allocation.availableCash') }}</dt>
+          <dd>{{ reservation.cash }}</dd>
+          <dt>{{ t('strategies.allocation.holdings') }}</dt>
+          <dd>{{ reservation.holdings }}</dd>
+        </template>
       </dl>
-      <p v-if="!allocation.context.available" role="status">{{ unavailableMessage }}</p>
+      <p v-if="allocation.other_scope_reservation" role="status">{{ t('strategies.allocation.otherScope') }}</p>
+      <p v-else-if="!allocation.context.available" role="status">{{ unavailableMessage }}</p>
       <p v-else-if="!stopped || !allocation.can_edit" role="status">{{ t('strategies.allocation.stoppedOnly') }}</p>
       <form data-testid="allocation-form" @submit.prevent="save">
         <label class="allocation-panel__budget-label">
@@ -197,6 +276,8 @@ onBeforeUnmount(() => { requestSequence += 1; });
         <div class="allocation-panel__actions">
           <button type="submit" data-testid="allocation-save" :disabled="!canEdit">{{ t('strategies.allocation.save') }}</button>
           <button type="button" data-testid="allocation-delete" :disabled="!canEdit || !allocation.draft" @click="remove">{{ t('strategies.allocation.remove') }}</button>
+          <button v-if="localPaper && allocation.draft && !reservation" type="button" data-testid="allocation-activate" :disabled="!canActivate" @click="activate">{{ t('strategies.allocation.activate') }}</button>
+          <button v-if="localPaper && reservation" type="button" data-testid="allocation-release" :disabled="!canRelease" @click="release">{{ t('strategies.allocation.release') }}</button>
         </div>
       </form>
       <StrategyAllocationReadiness

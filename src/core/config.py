@@ -30,6 +30,7 @@ class RiskConfig:
     max_total_position_pct: float = 0.8
     allow_live_open_orders: bool = False
     live_max_order_notional: float = 0.0
+    max_price_age_ms: int = 15000
 
 
 @dataclass
@@ -167,6 +168,11 @@ def load_config(path: str) -> AppConfig:
                 risk.get("live_max_order_notional"),
                 0.0,
                 "risk.live_max_order_notional",
+            ),
+            max_price_age_ms=_parse_int(
+                risk.get("max_price_age_ms"),
+                15000,
+                "risk.max_price_age_ms",
             ),
         ),
         notify=NotifyConfig(

@@ -35,6 +35,8 @@ from src.data.allocations import release_strategy_drafts
 from src.data.models import (
     EXCHANGE_STRATEGY,
     AccountRecord,
+    BacktestEquityPointRecord,
+    BacktestRejectedOrderRecord,
     BacktestResultRecord,
     BacktestTradeRecord,
     CashLedgerRecord,
@@ -43,6 +45,7 @@ from src.data.models import (
     ExactSpotFillRecord,
     KillSwitchRecord,
     KlineCache,
+    OpeningPauseRecord,
     OrderRecord,
     PositionRecord,
     PrivateAccountBalanceRecord,
@@ -1990,6 +1993,10 @@ class Repository:
             self._ensure_sqlite_order_external_id_indexes(engine)
             self._ensure_sqlite_current_state_indexes(engine)
             self._ensure_live_submission_lease_table(engine)
+            self._ensure_fill_cursor_table(engine)
+            self._ensure_strategy_lease_table(engine)
+            self._ensure_opening_pause_table(engine)
+            self._ensure_strategy_ownership_table(engine)
             if migration_key is not None:
                 Repository._MIGRATED_SQLITE_DATABASES.add(migration_key)
         self.engine = engine
@@ -2069,6 +2076,124 @@ class Repository:
             connection.execute(text(
                 "DELETE FROM live_submission_lease WHERE name = 'live' AND owner = :owner"
             ), {"owner": owner})
+
+    def upsert_strategy_ownership(
+        self,
+        *,
+        scope: str,
+        strategy: str,
+        symbol: str,
+        environment: str,
+        budget: float,
+        available: float,
+        updated_at: int,
+    ) -> None:
+        with self.engine.begin() as connection:
+            connection.execute(text(
+                "INSERT INTO strategy_ownership("
+                "scope, strategy, symbol, environment, quote_budget, "
+                "quote_available, updated_at) "
+                "VALUES (:scope, :strategy, :symbol, :environment, :budget, "
+                ":available, :updated_at) "
+                "ON CONFLICT(scope, strategy) DO UPDATE SET "
+                "symbol = excluded.symbol, environment = excluded.environment, "
+                "quote_budget = excluded.quote_budget, "
+                "quote_available = excluded.quote_available, "
+                "updated_at = excluded.updated_at"
+            ), {
+                "scope": scope,
+                "strategy": strategy,
+                "symbol": symbol,
+                "environment": environment,
+                "budget": float(budget),
+                "available": float(available),
+                "updated_at": int(updated_at),
+            })
+
+    def is_strategy_ownership_configured(self, strategy: str, symbol: str | None = None) -> bool:
+        """只有实盘环境的归属记录才能打开实盘启动。"""
+        statement = (
+            "SELECT 1 FROM strategy_ownership "
+            "WHERE strategy = :strategy AND environment = 'live'"
+        )
+        parameters: dict[str, object] = {"strategy": strategy}
+        if symbol is not None:
+            statement += " AND symbol = :symbol"
+            parameters["symbol"] = symbol
+        with self.engine.connect() as connection:
+            return connection.execute(text(statement), parameters).first() is not None
+
+    def get_fill_cursor(self, scope: str) -> int | None:
+        with self.engine.connect() as connection:
+            row = connection.execute(text(
+                "SELECT cursor_ms FROM fill_cursor WHERE scope = :scope"
+            ), {"scope": scope}).first()
+        if row is None:
+            return None
+        return int(row[0])
+
+    def advance_fill_cursor(self, scope: str, cursor_ms: int) -> None:
+        cursor = int(cursor_ms)
+        updated_at = time.time()
+        with self.engine.begin() as connection:
+            connection.execute(text(
+                "INSERT INTO fill_cursor(scope, cursor_ms, updated_at) "
+                "VALUES (:scope, :cursor_ms, :updated_at) "
+                "ON CONFLICT(scope) DO UPDATE SET "
+                "cursor_ms = excluded.cursor_ms, updated_at = excluded.updated_at "
+                "WHERE excluded.cursor_ms > fill_cursor.cursor_ms"
+            ), {"scope": scope, "cursor_ms": cursor, "updated_at": updated_at})
+
+    def acquire_strategy_lease(
+        self,
+        name: str,
+        owner: str,
+        *,
+        alive: Callable[[str], bool] | None = None,
+    ) -> bool:
+        checker = alive or _process_owner_alive
+        with self.engine.begin() as connection:
+            row = connection.execute(text(
+                "SELECT owner FROM strategy_runtime_lease WHERE name = :name"
+            ), {"name": name}).first()
+            if row is not None and row[0] != owner and checker(str(row[0])):
+                return False
+            connection.execute(text(
+                "INSERT INTO strategy_runtime_lease(name, owner, updated_at) "
+                "VALUES (:name, :owner, :updated_at) "
+                "ON CONFLICT(name) DO UPDATE SET "
+                "owner = excluded.owner, updated_at = excluded.updated_at"
+            ), {"name": name, "owner": owner, "updated_at": time.time()})
+        return True
+
+    def release_strategy_lease(self, name: str, owner: str) -> None:
+        with self.engine.begin() as connection:
+            connection.execute(text(
+                "DELETE FROM strategy_runtime_lease WHERE name = :name AND owner = :owner"
+            ), {"name": name, "owner": owner})
+
+    def get_opening_pause(self) -> OpeningPauseRecord:
+        with Session(self.engine) as session:
+            state = session.exec(select(OpeningPauseRecord)).first()
+            if state is None:
+                return OpeningPauseRecord(paused=False, reason="", updated_at=0)
+            return state
+
+    def set_opening_pause(self, paused: bool, reason: str, updated_at: int) -> OpeningPauseRecord:
+        with Session(self.engine) as session:
+            state = session.exec(select(OpeningPauseRecord)).first()
+            if state is None:
+                state = OpeningPauseRecord(
+                    paused=paused, reason=reason, updated_at=_safe_timestamp(updated_at)
+                )
+            else:
+                state.paused = paused
+                state.reason = reason
+                state.updated_at = _safe_timestamp(updated_at)
+            session.add(state)
+            session.commit()
+            session.refresh(state)
+            return state
 
     def get_private_uid(self) -> str | None:
         with Session(self.engine) as session:
@@ -3308,6 +3433,47 @@ class Repository:
                 session.refresh(trade)
             return trades
 
+    def save_backtest_details(
+        self,
+        result_id: str,
+        points: list[BacktestEquityPointRecord],
+        rejected_orders: list[BacktestRejectedOrderRecord],
+    ) -> None:
+        with Session(self.engine) as session:
+            for point in points:
+                point.result_id = result_id
+                session.add(point)
+            for rejected in rejected_orders:
+                rejected.result_id = result_id
+                session.add(rejected)
+            session.commit()
+
+    def get_backtest_equity_points(self, result_id: str) -> list[BacktestEquityPointRecord]:
+        statement = (
+            select(BacktestEquityPointRecord)
+            .where(BacktestEquityPointRecord.result_id == result_id)
+            .order_by(BacktestEquityPointRecord.seq, BacktestEquityPointRecord.id)
+        )
+        with Session(self.engine) as session:
+            return list(session.exec(statement).all())
+
+    def get_backtest_rejected_orders(self, result_id: str) -> list[BacktestRejectedOrderRecord]:
+        statement = (
+            select(BacktestRejectedOrderRecord)
+            .where(BacktestRejectedOrderRecord.result_id == result_id)
+            .order_by(BacktestRejectedOrderRecord.timestamp, BacktestRejectedOrderRecord.id)
+        )
+        with Session(self.engine) as session:
+            return list(session.exec(statement).all())
+
+    def probe_database(self) -> None:
+        with self.engine.begin() as connection:
+            connection.execute(text("SELECT 1"))
+            connection.execute(text(
+                "CREATE TEMP TABLE IF NOT EXISTS health_write_probe (id INTEGER)"
+            ))
+            connection.execute(text("INSERT INTO health_write_probe (id) VALUES (1)"))
+
     def get_backtest_trades(self, result_id: str) -> list[BacktestTradeRecord]:
         statement = (
             select(BacktestTradeRecord)
@@ -3325,6 +3491,52 @@ class Repository:
             connection.execute(text(
                 "CREATE TABLE IF NOT EXISTS live_submission_lease ("
                 "name VARCHAR PRIMARY KEY, owner VARCHAR NOT NULL, expires_at FLOAT NOT NULL)"
+            ))
+
+    @staticmethod
+    def _ensure_fill_cursor_table(engine: Engine) -> None:
+        if engine.dialect.name != "sqlite":
+            return
+        with engine.begin() as connection:
+            connection.execute(text(
+                "CREATE TABLE IF NOT EXISTS fill_cursor ("
+                "scope VARCHAR PRIMARY KEY, cursor_ms INTEGER NOT NULL, "
+                "updated_at FLOAT NOT NULL)"
+            ))
+
+    @staticmethod
+    def _ensure_strategy_lease_table(engine: Engine) -> None:
+        if engine.dialect.name != "sqlite":
+            return
+        with engine.begin() as connection:
+            connection.execute(text(
+                "CREATE TABLE IF NOT EXISTS strategy_runtime_lease ("
+                "name VARCHAR PRIMARY KEY, owner VARCHAR NOT NULL, updated_at FLOAT NOT NULL)"
+            ))
+
+    @staticmethod
+    def _ensure_strategy_ownership_table(engine: Engine) -> None:
+        if engine.dialect.name != "sqlite":
+            return
+        with engine.begin() as connection:
+            connection.execute(text(
+                "CREATE TABLE IF NOT EXISTS strategy_ownership ("
+                "scope VARCHAR NOT NULL, strategy VARCHAR NOT NULL, "
+                "symbol VARCHAR NOT NULL, environment VARCHAR NOT NULL, "
+                "quote_budget FLOAT NOT NULL, quote_available FLOAT NOT NULL, "
+                "updated_at INTEGER NOT NULL, "
+                "PRIMARY KEY (scope, strategy))"
+            ))
+
+    @staticmethod
+    def _ensure_opening_pause_table(engine: Engine) -> None:
+        if engine.dialect.name != "sqlite":
+            return
+        with engine.begin() as connection:
+            connection.execute(text(
+                "CREATE TABLE IF NOT EXISTS opening_pause ("
+                "id INTEGER PRIMARY KEY, paused BOOLEAN NOT NULL, "
+                "reason VARCHAR NOT NULL, updated_at INTEGER NOT NULL)"
             ))
 
     @staticmethod
@@ -4334,3 +4546,19 @@ class Repository:
                     "SELECT 1 FROM riskeventrecord WHERE event_key = NEW.event_key) "
                     "BEGIN SELECT RAISE(ABORT, 'duplicate risk event key'); END"
                 ))
+
+
+def _process_owner_alive(owner: str) -> bool:
+    try:
+        pid = int(str(owner))
+    except (TypeError, ValueError):
+        return True
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True

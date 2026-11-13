@@ -179,6 +179,8 @@ onMounted(() => {
 </script>
 
 <template>
+  <router-view v-if="route.name === 'login'" />
+  <template v-else>
   <a class="app-shell__skip-link" href="#main-content" @click.prevent="focusMainContent">
     {{ t('app.skipToContent') }}
   </a>
@@ -227,6 +229,7 @@ onMounted(() => {
       </main>
     </el-container>
   </el-container>
+  </template>
 </template>
 
 <style scoped>

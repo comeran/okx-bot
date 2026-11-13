@@ -4276,3 +4276,78 @@ async def test_private_sync_detects_foreign_trade_identity_even_when_old_row_is_
         event["divergence_type"] == "live_source_identity_conflict"
         for event in result.divergences
     )
+
+
+class _CursorRepository(FakeRepository):
+    def __init__(self):
+        super().__init__()
+        self.cursors: dict[str, int] = {}
+
+    def get_fill_cursor(self, scope: str) -> int | None:
+        return self.cursors.get(scope)
+
+    def advance_fill_cursor(self, scope: str, cursor_ms: int) -> None:
+        current = self.cursors.get(scope)
+        if current is None or cursor_ms > current:
+            self.cursors[scope] = cursor_ms
+
+
+class _PagedTradeAdapter(FakeAdapter):
+    def __init__(self, trades, limit_cap: int | None = None):
+        super().__init__(trades=trades)
+        self.limit_cap = limit_cap
+
+    async def fetch_recent_trade_snapshots(self, symbols=None, since=None, limit=100):
+        self.trade_calls.append({"symbols": symbols, "since": since, "limit": limit})
+        visible = [
+            trade for trade in self.trades
+            if since is None or trade.timestamp >= since
+        ]
+        page_limit = limit if self.limit_cap is None else min(limit, self.limit_cap)
+        page = visible[:page_limit]
+        return RecentTradePage(
+            page,
+            since=since,
+            complete=len(visible) <= page_limit,
+            mode="since" if since is not None else "cumulative",
+        )
+
+
+@pytest.mark.asyncio
+async def test_fill_cursor_advances_only_after_a_complete_page_and_replay_is_idempotent():
+    older = exchange_trade(exchange_trade_id="trade-old", timestamp=100)
+    newer = exchange_trade(exchange_trade_id="trade-new", timestamp=300)
+    repository = _CursorRepository()
+    incomplete = _PagedTradeAdapter([older, newer], limit_cap=1)
+
+    await sync_private_state(repository, incomplete, timestamp_ms=lambda: 1)
+
+    assert repository.cursors == {}
+    assert incomplete.trade_calls[-1]["since"] is None
+    assert len(repository.trades) == 1
+
+    complete = _PagedTradeAdapter([older, newer])
+    await sync_private_state(repository, complete, timestamp_ms=lambda: 2)
+
+    assert repository.get_fill_cursor("live:*") == 300
+    assert len(repository.trades) == 2
+
+    replay = _PagedTradeAdapter([older, newer])
+    await sync_private_state(repository, replay, timestamp_ms=lambda: 3)
+
+    assert replay.trade_calls[-1]["since"] == 300
+    assert len(repository.trades) == 2
+    assert repository.get_fill_cursor("live:*") == 300
+
+
+def test_fill_cursor_survives_a_new_repository(tmp_path):
+    from src.data.repository import Repository
+
+    database = tmp_path / "cursor.db"
+    first = Repository(db_path=str(database))
+    first.advance_fill_cursor("live:*", 300)
+    first.advance_fill_cursor("live:*", 100)
+
+    second = Repository(db_path=str(database))
+
+    assert second.get_fill_cursor("live:*") == 300

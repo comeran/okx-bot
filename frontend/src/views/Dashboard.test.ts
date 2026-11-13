@@ -10,6 +10,15 @@ const storeMocks = vi.hoisted(() => ({
   accountContext: {} as Record<string, unknown>,
 }));
 
+vi.mock('@/services/ops', () => ({
+  fetchKillSwitch: vi.fn().mockResolvedValue({ engaged: false, reason: '', updated_at: 0 }),
+  updateKillSwitch: vi.fn(),
+  fetchOpeningPause: vi.fn().mockResolvedValue({ paused: false, reason: '', updated_at: 0 }),
+  updateOpeningPause: vi.fn(),
+  cancelOpenOrders: vi.fn(),
+  flattenPositions: vi.fn(),
+}));
+
 vi.mock('@/stores/accountContext', () => ({ useAccountContextStore: () => storeMocks.accountContext }));
 
 vi.mock('@/stores/dashboard', () => ({

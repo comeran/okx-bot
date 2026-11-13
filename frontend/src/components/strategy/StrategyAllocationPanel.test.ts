@@ -3,8 +3,23 @@ import { useAccountContextStore } from '@/stores/accountContext';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mount } from '@/test-utils/mount';
 import StrategyAllocationPanel from './StrategyAllocationPanel.vue';
-const api = vi.hoisted(() => ({ get: vi.fn(), save: vi.fn(), remove: vi.fn(), start: vi.fn(), readiness: vi.fn() }));
-vi.mock('@/services/strategyAllocations', () => ({ getStrategyAllocation: api.get, saveStrategyAllocation: api.save, deleteStrategyAllocation: api.remove, getStrategyAllocationReadiness: api.readiness }));
+const api = vi.hoisted(() => ({
+  get: vi.fn(),
+  save: vi.fn(),
+  remove: vi.fn(),
+  start: vi.fn(),
+  activate: vi.fn(),
+  release: vi.fn(),
+  readiness: vi.fn(),
+}));
+vi.mock('@/services/strategyAllocations', () => ({
+  getStrategyAllocation: api.get,
+  saveStrategyAllocation: api.save,
+  deleteStrategyAllocation: api.remove,
+  activateStrategyAllocation: api.activate,
+  releaseStrategyAllocation: api.release,
+  getStrategyAllocationReadiness: api.readiness,
+}));
 vi.mock('@/services/strategies', () => ({ startStrategy: api.start }));
 function executionContext(id = 'execution-a') {
   return { account_scope_id: id, exchange: 'okx' as const, environment: 'sandbox' as const,
@@ -58,7 +73,9 @@ describe('StrategyAllocationPanel', () => {
     for (let i = 0; i < 4; i += 1) await wrapper.flush();
     expect(wrapper.text()).toContain('OKX live');
     expect(wrapper.text()).toContain('Exchange routing');
+    expect(wrapper.text()).toContain('Live activation stays closed');
     expect(wrapper.text()).not.toContain('Local paper');
+    expect(wrapper.text()).not.toContain('Activate local budget');
     wrapper.unmount();
   });
   it('shows unavailable context without inventing an account or enabling mutations', async () => {
@@ -187,6 +204,32 @@ describe('StrategyAllocationPanel', () => {
     expect(wrapper.text()).toContain('Only a stopped strategy');
     expect(wrapper.getByTestId('allocation-save').props.disabled).toBe(true);
     expect(wrapper.getByTestId('allocation-delete').props.disabled).toBe(true);
+    expect(wrapper.getByTestId('allocation-activate').props.disabled).toBe(true);
+    wrapper.unmount();
+  });
+  it('activates and releases a local budget without starting the strategy', async () => {
+    const reserved = envelope('alpha', {
+      reservation: {
+        strategy: 'alpha', symbol: 'BTC-USDT', budget: 100, cash: 100, holdings: 0,
+        revision: 4, scope_id: 'sandbox-account', status: 'active',
+      },
+    });
+    api.activate.mockResolvedValue(reserved);
+    api.release.mockResolvedValue(envelope());
+    const wrapper = await mounted();
+    await wrapper.trigger(wrapper.getByTestId('allocation-activate'), 'click');
+    expect(api.activate).toHaveBeenCalledWith('alpha', {
+      expected_revision: 2, expected_scope_id: 'sandbox-account', expected_symbol: 'BTC-USDT',
+    });
+    expect(api.start).not.toHaveBeenCalled();
+    expect(wrapper.text()).toContain('Local budget active');
+    expect(wrapper.text()).toContain('100');
+    await wrapper.trigger(wrapper.getByTestId('allocation-release'), 'click');
+    expect(api.release).toHaveBeenCalledWith('alpha', {
+      expected_revision: 4, expected_scope_id: 'sandbox-account', expected_symbol: 'BTC-USDT',
+    });
+    expect(api.start).not.toHaveBeenCalled();
+    expect(wrapper.text()).toContain('Local budget released');
     wrapper.unmount();
   });
   it('evaluates only the saved budget while the input has unsaved edits', async () => {

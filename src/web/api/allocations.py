@@ -1,4 +1,4 @@
-"""Configure drafts and inspect cached evidence without granting live ownership."""
+"""Configure drafts, paper reservations, and cached evidence without granting live ownership."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.exc import SQLAlchemyError
 
 from src.core.config import AppConfig
+from src.core.execution_mode import account_environment
 from src.core.execution_scope import build_execution_context
 from src.core.runtime_settings import load_runtime_settings
 from src.data.allocations import (
@@ -24,7 +25,9 @@ from src.data.allocations import (
     spot_symbol,
 )
 from src.data.exchange_store import ExchangeStoreError
+from src.data.live_ownership import OwnershipError, grant_ownership_from_balance
 from src.data.models import EXCHANGE_STRATEGY
+from src.data.paper_book import PaperBook, PaperBookError, PaperBookNotFound
 from src.data.repository import Repository
 from src.ops.allocation_readiness import build_allocation_readiness
 from src.strategy.definitions import StrategyConfigValidationError
@@ -41,12 +44,20 @@ class DraftRequest(BaseModel):
     expected_symbol: Annotated[str, Field(strict=True, min_length=1, max_length=128)]
 
 
+class ReservationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_revision: Annotated[int, Field(strict=True, ge=0)]
+    expected_scope_id: Annotated[str, Field(strict=True, min_length=1, max_length=128)]
+    expected_symbol: Annotated[str, Field(strict=True, min_length=1, max_length=128)]
+
+
 def allocation_context(
     settings: AppConfig | None = None,
 ) -> tuple[dict[str, object], AllocationScope | None]:
     settings = settings if settings is not None else load_runtime_settings()
     exchange = settings.exchange
-    environment = "sandbox" if exchange.demo else "live"
+    environment = account_environment(settings.mode, exchange.demo)
     market_type = exchange.market_type.strip().lower()
     configured = all(
         isinstance(value, str) and value.strip()
@@ -88,6 +99,7 @@ def create_router(runtime: StrategyRuntimeState) -> APIRouter:
     router = APIRouter()
     repository = Repository()
     store = AllocationStore(repository.engine)
+    book = PaperBook(repository.engine)
 
     def strategy_symbol(name: str) -> tuple[str, str]:
         config = repository.get_strategy_config(name)
@@ -123,6 +135,8 @@ def create_router(runtime: StrategyRuntimeState) -> APIRouter:
             "context": context,
             "execution_context": execution_context,
             "draft": asdict(draft) if draft is not None else None,
+            "reservation": _reservation_view(book, repository, scope, name),
+            "other_scope_reservation": _other_scope_reservation(book, scope, name),
             "strategy": name,
             "symbol": symbol,
             "currency": currency,
@@ -153,6 +167,14 @@ def create_router(runtime: StrategyRuntimeState) -> APIRouter:
                 409, "allocation_symbol_changed", "Strategy symbol changed; reload the draft",
             )
         return scope
+
+    def _reject_active_reservation(name: str, scope: AllocationScope) -> None:
+        if book.get(scope.scope_id, name) is not None:
+            raise _error(
+                409,
+                "reservation_active",
+                "Release the local paper reservation before editing the draft",
+            )
 
     @router.get("/context")
     def context() -> dict[str, object]:
@@ -260,6 +282,7 @@ def create_router(runtime: StrategyRuntimeState) -> APIRouter:
             scope = mutable_scope(
                 strategy, payload.expected_scope_id, payload.expected_symbol, symbol,
             )
+            _reject_active_reservation(strategy, scope)
             try:
                 store.save_draft(
                     scope, strategy=strategy, symbol=symbol, budget=payload.budget,
@@ -279,6 +302,7 @@ def create_router(runtime: StrategyRuntimeState) -> APIRouter:
         async with runtime.lifecycle_lock(strategy):
             symbol, _ = strategy_symbol(strategy)
             scope = mutable_scope(strategy, expected_scope_id, expected_symbol, symbol)
+            _reject_active_reservation(strategy, scope)
             try:
                 store.delete_draft(
                     scope, strategy, expected_revision=revision, timestamp=int(time.time() * 1000),
@@ -289,4 +313,162 @@ def create_router(runtime: StrategyRuntimeState) -> APIRouter:
                 raise _error(409, exc.code, str(exc)) from exc
             return envelope(strategy)
 
+    @router.post("/{strategy}/activate")
+    async def activate_reservation(
+        strategy: str, payload: ReservationRequest,
+    ) -> dict[str, object]:
+        _require_local_paper()
+        async with runtime.lifecycle_lock(strategy):
+            _require_local_paper()
+            symbol, _currency = strategy_symbol(strategy)
+            scope = mutable_scope(
+                strategy, payload.expected_scope_id, payload.expected_symbol, symbol,
+            )
+            try:
+                book.activate(
+                    scope.scope_id,
+                    strategy,
+                    symbol=symbol,
+                    expected_revision=payload.expected_revision,
+                    book_equity=load_runtime_settings().backtest.initial_capital,
+                    timestamp=int(time.time() * 1000),
+                )
+            except PaperBookNotFound as exc:
+                raise _error(404, exc.code, str(exc)) from exc
+            except PaperBookError as exc:
+                raise _error(409, exc.code, str(exc)) from exc
+            return envelope(strategy)
+
+    @router.post("/{strategy}/release")
+    async def release_reservation(
+        strategy: str, payload: ReservationRequest,
+    ) -> dict[str, object]:
+        _require_local_paper()
+        async with runtime.lifecycle_lock(strategy):
+            _require_local_paper()
+            symbol, _currency = strategy_symbol(strategy)
+            scope = mutable_scope(
+                strategy, payload.expected_scope_id, payload.expected_symbol, symbol,
+            )
+            try:
+                book.release(
+                    scope.scope_id,
+                    strategy,
+                    expected_revision=payload.expected_revision,
+                    symbol=symbol,
+                    timestamp=int(time.time() * 1000),
+                )
+            except PaperBookNotFound as exc:
+                raise _error(404, exc.code, str(exc)) from exc
+            except PaperBookError as exc:
+                raise _error(409, exc.code, str(exc)) from exc
+            return envelope(strategy)
+
+    @router.post("/{strategy}/exchange-activate")
+    async def exchange_activate(
+        strategy: str, payload: ReservationRequest,
+    ) -> dict[str, object]:
+        mode = load_runtime_settings().mode.strip().lower()
+        if mode not in {"demo", "live"}:
+            raise _error(
+                409,
+                "exchange_activation_only",
+                "Exchange activation is only available in demo or live mode",
+            )
+        async with runtime.lifecycle_lock(strategy):
+            symbol, _currency = strategy_symbol(strategy)
+            scope = mutable_scope(
+                strategy, payload.expected_scope_id, payload.expected_symbol, symbol,
+            )
+            draft = store.get_draft(scope, strategy)
+            if draft is None:
+                raise _error(404, "draft_not_found", "Create a draft before exchange activation")
+            if draft.revision != payload.expected_revision:
+                raise _error(409, "revision_conflict", "Reload the draft and retry")
+            available = await fetch_exchange_available()
+            environment = "live" if mode == "live" else "sandbox"
+            try:
+                grant_ownership_from_balance(
+                    repository,
+                    scope_id=scope.scope_id,
+                    strategy=strategy,
+                    symbol=symbol,
+                    budget=float(draft.budget),
+                    available=available,
+                    environment=environment,
+                    timestamp=int(time.time() * 1000),
+                )
+            except OwnershipError as exc:
+                raise _error(409, exc.code, str(exc)) from exc
+            return envelope(strategy)
+
     return router
+
+
+async def fetch_exchange_available() -> float:
+    """读取当前模式对应的 OKX 可用余额。测试会替换这个函数。"""
+    from dataclasses import replace
+
+    from src.exchange.factory import create_okx_adapter
+
+    settings = load_runtime_settings()
+    demo = settings.mode.strip().lower() != "live"
+    exchange = replace(settings.exchange, demo=demo)
+    adapter = create_okx_adapter(exchange)
+    snapshot = await adapter.fetch_account_snapshot()
+    available = snapshot.available_balance
+    if available is None:
+        available = snapshot.cash_balance
+    return float(available)
+
+
+def _require_local_paper() -> None:
+    mode = load_runtime_settings().mode.strip().lower()
+    if mode == "live":
+        raise _error(
+            409,
+            "live_activation_blocked",
+            "Live activation stays closed until process recovery",
+        )
+    if mode not in {"demo", "paper"}:
+        raise _error(
+            409,
+            "paper_activation_only",
+            "Local paper activation is unavailable in this mode",
+        )
+
+
+def _reservation_view(
+    book: PaperBook,
+    repository: Repository,
+    scope: AllocationScope | None,
+    name: str,
+):
+    if scope is None:
+        return None
+    row = book.get(scope.scope_id, name)
+    if row is None:
+        return None
+    account = repository.get_account(name, source="paper", runtime_mode="paper")
+    holdings = 0.0
+    for position in repository.get_open_positions(name, source="paper", runtime_mode="paper"):
+        if getattr(position, "symbol", None) == row.symbol:
+            holdings += float(getattr(position, "amount", 0.0) or 0.0)
+    cash = row.budget if account is None else float(account.cash_balance)
+    return {
+        "strategy": row.strategy,
+        "symbol": row.symbol,
+        "budget": row.budget,
+        "cash": cash,
+        "holdings": holdings,
+        "revision": row.revision,
+        "scope_id": row.scope_id,
+        "status": "active",
+    }
+
+
+def _other_scope_reservation(
+    book: PaperBook, scope: AllocationScope | None, name: str,
+) -> bool:
+    current = None if scope is None else scope.scope_id
+    return any(item.scope_id != current for item in book.for_strategy(name))

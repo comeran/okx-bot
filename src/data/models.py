@@ -864,6 +864,23 @@ class KillSwitchRecord(SQLModel, table=True):
         return self
 
 
+class OpeningPauseRecord(SQLModel, table=True):
+    __tablename__ = "opening_pause"
+    id: int | None = Field(default=None, primary_key=True)
+    paused: bool = False
+    reason: str = ""
+    updated_at: int = 0
+
+    def __init__(self, **data: Any) -> None:
+        super().__init__(**data)
+        self.updated_at = _safe_timestamp(self.updated_at)
+
+    @model_validator(mode="after")
+    def normalize_values(self) -> "OpeningPauseRecord":
+        self.updated_at = _safe_timestamp(self.updated_at)
+        return self
+
+
 class RiskEventRecord(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     source: str = Field(default="unknown", index=True, nullable=True, exclude=True)
@@ -1041,6 +1058,26 @@ class BacktestResultRecord(SQLModel, table=True):
     win_rate: float
     total_trades: int
     created_at: int = Field(index=True)
+
+
+class BacktestEquityPointRecord(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    result_id: str = Field(index=True)
+    seq: int = Field(index=True)
+    timestamp: int
+    equity: float
+    drawdown: float
+
+
+class BacktestRejectedOrderRecord(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    result_id: str = Field(index=True)
+    symbol: str
+    side: str
+    timestamp: int
+    amount: float
+    price: float | None = None
+    reason: str
 
 
 class BacktestTradeRecord(SQLModel, table=True):

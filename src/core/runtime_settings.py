@@ -73,6 +73,7 @@ def save_runtime_settings(settings: AppConfig) -> None:
             "max_total_position_pct": settings.risk.max_total_position_pct,
             "allow_live_open_orders": settings.risk.allow_live_open_orders,
             "live_max_order_notional": settings.risk.live_max_order_notional,
+            "max_price_age_ms": settings.risk.max_price_age_ms,
         },
         "notify": {
             "telegram_bot_token": _persisted_secret(

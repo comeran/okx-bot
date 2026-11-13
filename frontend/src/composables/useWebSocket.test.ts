@@ -233,4 +233,19 @@ describe('useWebSocket', () => {
     expect(strategies.statuses).toEqual({});
     expect(reconcile).toHaveBeenCalledTimes(1);
   });
+
+  it('adds the saved browser token to the websocket url', () => {
+    installBrowserGlobals();
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => (key === 'okx-bot-api-token' ? 'desk-token' : null),
+      setItem: () => undefined,
+      removeItem: () => undefined,
+    });
+
+    useWebSocket('/ws?scope=exchange').connect();
+
+    expect(MockWebSocket.instances[0].url).toBe(
+      'ws://localhost:3000/ws?scope=exchange&token=desk-token',
+    );
+  });
 });
