@@ -1,4 +1,6 @@
 import asyncio
+import time
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
@@ -9,6 +11,7 @@ from sqlmodel import Session, select
 from src.core.config import AppConfig, BacktestConfig, ExchangeConfig
 from src.core.execution_scope import build_execution_context
 from src.core.runtime_settings import save_runtime_settings
+from src.data.funded_allocation import TrustedActivationFacts
 from src.data.models import AccountRecord, PositionRecord, StrategyConfigRecord
 from src.data.repository import Repository
 from src.web import app as web_app
@@ -361,7 +364,7 @@ def test_mutations_require_explicit_loaded_symbol(allocation_client):
 
 def _paper_settings():
     return AppConfig(
-        mode="demo",
+        mode="paper",
         exchange=ExchangeConfig(
             api_key="test-key", secret="test-secret", passphrase="test-passphrase", demo=True,
         ),
@@ -480,10 +483,16 @@ def test_exchange_balance_grants_live_ownership_only_when_it_covers_the_draft(
         "expected_revision": 0,
     }).status_code == 200
 
-    async def short_balance():
-        return 40.0
+    async def short_facts(*, symbol, scope_id, budget):
+        return TrustedActivationFacts(
+            available_quote=Decimal("40"),
+            observed_at=int(time.time() * 1000),
+            preflight_passed=True,
+            market_type="spot",
+            account_scope_id=scope_id,
+        )
 
-    monkeypatch.setattr(allocation_api, "fetch_exchange_available", short_balance)
+    monkeypatch.setattr(allocation_api, "load_trusted_activation_facts", short_facts)
     short = client.post("/api/allocations/ma_cross/exchange-activate", json={
         "expected_revision": 1,
         "expected_scope_id": scope_id(client),
@@ -495,10 +504,16 @@ def test_exchange_balance_grants_live_ownership_only_when_it_covers_the_draft(
         Repository(), "ma_cross", "BTC-USDT",
     ) is False
 
-    async def covered_balance():
-        return 150.0
+    async def covered_facts(*, symbol, scope_id, budget):
+        return TrustedActivationFacts(
+            available_quote=Decimal("150"),
+            observed_at=int(time.time() * 1000),
+            preflight_passed=True,
+            market_type="spot",
+            account_scope_id=scope_id,
+        )
 
-    monkeypatch.setattr(allocation_api, "fetch_exchange_available", covered_balance)
+    monkeypatch.setattr(allocation_api, "load_trusted_activation_facts", covered_facts)
     granted = client.post("/api/allocations/ma_cross/exchange-activate", json={
         "expected_revision": 1,
         "expected_scope_id": scope_id(client),
@@ -506,6 +521,18 @@ def test_exchange_balance_grants_live_ownership_only_when_it_covers_the_draft(
     })
     assert granted.status_code == 200
     assert granted.json()["context"]["execution_ready"] is False
+    assert granted.json()["funded_book"]["cash"] == "100"
+    assert granted.json()["funded_book"]["base_position"] == "0"
+    assert granted.json()["funded_book"]["realized_pnl"] == "0"
+    assert granted.json()["funded_book"]["live_open_orders"] is False
+    locked_edit = client.put("/api/allocations/ma_cross", json={
+        "expected_symbol": "BTC-USDT",
+        "expected_scope_id": scope_id(client),
+        "budget": 120,
+        "expected_revision": 1,
+    })
+    assert locked_edit.status_code == 409
+    assert locked_edit.json()["detail"]["code"] == "funded_allocation_locked"
     assert strategies.has_live_strategy_ownership_mapping(
         Repository(), "ma_cross", "BTC-USDT",
     ) is True
@@ -517,10 +544,16 @@ def test_exchange_balance_grants_live_ownership_only_when_it_covers_the_draft(
         api_key="sandbox-key", secret="test-secret", passphrase="test-passphrase", demo=False,
     )))
 
-    async def sandbox_balance():
-        return 500.0
+    async def sandbox_facts(*, symbol, scope_id, budget):
+        return TrustedActivationFacts(
+            available_quote=Decimal("500"),
+            observed_at=int(time.time() * 1000),
+            preflight_passed=True,
+            market_type="spot",
+            account_scope_id=scope_id,
+        )
 
-    monkeypatch.setattr(allocation_api, "fetch_exchange_available", sandbox_balance)
+    monkeypatch.setattr(allocation_api, "load_trusted_activation_facts", sandbox_facts)
     assert client.put("/api/allocations/ma_cross", json={
         "expected_symbol": "BTC-USDT",
         "expected_scope_id": scope_id(client),

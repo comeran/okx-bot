@@ -11,7 +11,13 @@ async def test_health_reports_database_read_and_write() -> None:
         response = await client.get("/api/health")
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "database": "ok"}
+    assert response.json() == {
+        "status": "ok",
+        "database": "ok",
+        "schema_version": 2,
+        "market": {"latest_price_at": None},
+        "private_sync": {"cursor_ms": None},
+    }
 
 
 @pytest.mark.asyncio

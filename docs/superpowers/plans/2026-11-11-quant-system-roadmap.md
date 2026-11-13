@@ -24,14 +24,14 @@ Acceptance: explicit draft configuration persists without granting trading permi
 - [x] Retain exact OKX account-configuration observations and bind the provider `uid` immutably; borrow and mode flags remain evidence only and do not open activation.
 - [x] Retain exact raw account-balance observations under the existing scoped UID binding, preserving USD equity, per-currency cash strings and missing/null/empty states. Identical payload replay is idempotent; this evidence does not fund allocations or prove available funds.
 - [x] Acquire and atomically retain exact raw public SPOT instrument rules through an injected single-response adapter. Account/environment-scoped append-only response and instrument tables preserve exact strings and optional states, canonical replay identity and observation history without requiring private UID. Rules remain evidence only; freshness certification and trading authorization are deferred.
-- [ ] Define exclusive initial spot ownership, budget consumption/reservations and strategy-local cash/position/PnL queries.
+- [x] Define exclusive initial spot ownership, budget consumption/reservations and strategy-local cash/position/PnL queries.
 - [x] Pure read-only exact SPOT order preflight with UID/balance binding, receipt freshness, borrow policy, native live instrument rules, decimal tick/lot/minimum checks and side-specific availBal including caller fee reserve. Unknown liability/fee/reconciliation/sync evidence keeps diagnostics closed; account level alone cannot prove unleveraged safety.
 - [x] Bind persisted exact config/balance/instrument evidence to a read-only SPOT preflight API. One transaction validates store/UID binding, raw hashes and typed projections; latest missing or unsafe evidence never falls back. Responses expose bounded source provenance and checks. Fee/liability/reconciliation/sync proofs remain unknown and execution stays closed.
 - [x] Retain exact account SPOT trade-fee rates and nested fee-group observations through a single-response injected raw adapter and explicit collector. UID/account/request-symbol-bound append-only storage preserves signed strings, raw/hash/state integrity and original receipt time on replay. Rates alone do not prove fee coverage; no preflight blocker is removed.
 - [x] Explain group-bound ordinary SPOT maker/taker fees in the stored preflight API. Verified raw instrument groupId and latest request-symbol fee evidence determine signed, exact unrounded scenarios and charging currency under fresh UID-bound configuration. No root/category fallback; rounding/promotion coverage remains unknown and execution stays closed.
 - [x] Surface explicit balance liabilities/accrued interest across every returned currency and separate negative-cash shortfalls. Fresh UID-bound positive debt makes the existing liability gate fail; zero/empty/missing fields never prove account-wide liability freedom. Extended asset fields reconstruct from immutable full journals without a migration or historical rewrite; API exposes bounded counts only.
-- [ ] Integrate trusted preflight evidence with atomic funded allocations and runtime order enforcement. Derivatives require their own account/risk design before activation.
-- [ ] Atomically validate/activate a draft from trusted fresh exchange facts; refuse overlapping/excess allocation and unsafe runtime edits.
+- [x] Integrate trusted preflight evidence with atomic funded allocations and runtime order enforcement. Derivatives require their own account/risk design before activation.
+- [x] Atomically validate/activate a draft from trusted fresh exchange facts; refuse overlapping/excess allocation and unsafe runtime edits.
 
 Acceptance: empty-account first trade and subsequent closes use correct strategy funds; two strategies cannot consume the same position/cash; switching accounts/environments cannot reuse authorization or historical state. Live gate opens only after this and Phase 3 prerequisites pass.
 
@@ -50,7 +50,7 @@ Phase 2c-a adds account-bound attempt/receipt status, same-transaction projectio
 Spec: `docs/superpowers/specs/2026-11-11-private-sync-receipts-design.md`.
 Plan/evidence: `docs/superpowers/plans/2026-11-11-private-sync-receipts-plan.md`.
 
-Next slices: trusted evidence acquisition and reconciliation/recovery, building on delivered pure receipt-freshness preflight, scoped instrument/config/balance persistence, single-response acquisition, resumable exact fill-page ingestion and explicitly bounded multi-page catch-up. Funded account-wide allocations and order-manager integration remain pending until these prerequisites have evidence.
+Next slices: trusted evidence acquisition and reconciliation/recovery, building on delivered pure receipt-freshness preflight, scoped instrument/config/balance persistence, single-response acquisition, resumable exact fill-page ingestion and explicitly bounded multi-page catch-up. Funded spot allocations now require an all-pass stored preflight in one transaction and are enforced on the order path. Live opening stays closed until Phase 3.
 
 Balance spec/evidence: `docs/superpowers/specs/2026-11-12-account-balance-facts-design.md` and `docs/superpowers/plans/2026-11-12-account-balance-facts-plan.md`.
 
@@ -62,9 +62,9 @@ Persisted diagnostic bridge: `docs/superpowers/specs/2026-11-12-persisted-spot-p
 
 Fee acquisition evidence: `docs/superpowers/specs/2026-11-12-spot-trade-fee-facts-design.md` and `docs/superpowers/plans/2026-11-12-spot-trade-fee-facts-plan.md`. Raw rates alone do not prove coverage. The diagnostic slice below adds group/currency/freshness interpretation; reserves additionally require trusted rounding and promotion handling.
 
-Fee diagnostic evidence: `docs/superpowers/specs/2026-11-12-spot-fee-diagnostics-design.md` and `docs/superpowers/plans/2026-11-12-spot-fee-diagnostics-plan.md`. Group/currency/freshness interpretation is delivered as unrounded scenarios. Trusted fee rounding and promotion coverage, liability evidence and complete synchronization/reconciliation remain prerequisites for funded allocation and runtime integration.
+Fee diagnostic evidence: `docs/superpowers/specs/2026-11-12-spot-fee-diagnostics-design.md` and `docs/superpowers/plans/2026-11-12-spot-fee-diagnostics-plan.md`. Group/currency/freshness interpretation is delivered as unrounded scenarios. Unknown fee rounding, promotion coverage, liability evidence or synchronization/reconciliation still makes the stored preflight fail, so activation refuses.
 
-Liability diagnostic evidence: `docs/superpowers/specs/2026-11-12-spot-liability-diagnostics-design.md` and `docs/superpowers/plans/2026-11-12-spot-liability-diagnostics-plan.md`. Observed positive liabilities/interest now explicitly reject readiness; balance coverage and mode applicability are not certified, so absence remains unknown. Full synchronization/reconciliation, trusted fee coverage and funded runtime enforcement remain pending.
+Liability diagnostic evidence: `docs/superpowers/specs/2026-11-12-spot-liability-diagnostics-design.md` and `docs/superpowers/plans/2026-11-12-spot-liability-diagnostics-plan.md`. Observed positive liabilities/interest now explicitly reject readiness; balance coverage and mode applicability are not certified, so absence remains unknown. Full synchronization, reconciliation and trusted fee coverage still keep a real preflight from passing, so the funded path refuses and live opening stays closed.
 
 ## Phase 3 — reconciliation, unknown outcomes and lifecycle recovery
 

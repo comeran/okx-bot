@@ -30,10 +30,7 @@ const stopped = computed(() => (
   (props.status ?? allocation.value?.lifecycle_status) === 'stopped'
 ));
 const reservation = computed(() => allocation.value?.reservation ?? null);
-const localPaper = computed(() => {
-  const mode = allocation.value?.context.execution_mode;
-  return mode === 'paper' || mode === 'demo';
-});
+const localPaper = computed(() => allocation.value?.context.execution_mode === 'paper');
 const baseEditable = computed(() => Boolean(
   allocation.value?.context.available
   && allocation.value.context.scope_id
@@ -53,7 +50,8 @@ const canRelease = computed(() => Boolean(
 ));
 const executionLabel = computed(() => {
   const mode = allocation.value?.context.execution_mode;
-  if (mode === 'paper' || mode === 'demo') return t('strategies.allocation.localPaper');
+  if (mode === 'paper') return t('strategies.allocation.localPaper');
+  if (mode === 'demo') return t('strategies.allocation.sandbox');
   if (mode === 'live') return t('strategies.allocation.exchangeRouting');
   return t('strategies.allocation.backtest');
 });
@@ -251,13 +249,26 @@ onBeforeUnmount(() => { requestSequence += 1; });
         <dd>{{ reservation ? t('strategies.allocation.reserved') : allocation.draft ? t('strategies.allocation.draft') : t('strategies.allocation.noDraft') }}</dd>
         <dt>{{ t('strategies.allocation.revision') }}</dt>
         <dd>{{ allocation.draft?.revision ?? '—' }}</dd>
+        <dt>{{ t('strategies.allocation.realizedPnl') }}</dt>
+        <dd data-testid="allocation-realized">{{ allocation.realized_pnl ?? '—' }}</dd>
         <template v-if="reservation">
           <dt>{{ t('strategies.allocation.availableCash') }}</dt>
           <dd>{{ reservation.cash }}</dd>
           <dt>{{ t('strategies.allocation.holdings') }}</dt>
           <dd>{{ reservation.holdings }}</dd>
         </template>
+        <template v-if="allocation.funded_book">
+          <dt>{{ t('strategies.allocation.fundedCash') }}</dt>
+          <dd data-testid="allocation-funded-cash">{{ allocation.funded_book.cash }}</dd>
+          <dt>{{ t('strategies.allocation.fundedPosition') }}</dt>
+          <dd data-testid="allocation-funded-position">{{ allocation.funded_book.base_position }}</dd>
+          <dt>{{ t('strategies.allocation.fundedPnl') }}</dt>
+          <dd data-testid="allocation-funded-pnl">{{ allocation.funded_book.realized_pnl }}</dd>
+          <dt>{{ t('strategies.allocation.fundedReserved') }}</dt>
+          <dd>{{ allocation.funded_book.reserved_quote }}</dd>
+        </template>
       </dl>
+      <p v-if="allocation.funded_book" role="status">{{ t('strategies.allocation.fundedClosed') }}</p>
       <p v-if="allocation.other_scope_reservation" role="status">{{ t('strategies.allocation.otherScope') }}</p>
       <p v-else-if="!allocation.context.available" role="status">{{ unavailableMessage }}</p>
       <p v-else-if="!stopped || !allocation.can_edit" role="status">{{ t('strategies.allocation.stoppedOnly') }}</p>

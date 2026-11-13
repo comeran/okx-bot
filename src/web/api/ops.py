@@ -29,7 +29,9 @@ from src.exchange.base import canonical_symbol, is_supported_canonical_symbol
 from src.exchange.errors import MalformedProviderData
 from src.exchange.factory import create_okx_adapter
 from src.notify.telegram import RiskEventTelegramNotifier, TelegramNotifier
+from src.ops.audit import record_operator_action
 from src.ops.flatten import cancel_open_orders, flatten_exposure
+from src.ops.lifecycle import unresolved_live_order_ids
 from src.ops.private_sync import sync_private_state
 from src.ops.spot_preflight_evidence import build_stored_spot_preflight
 from src.web.api import settings as settings_api
@@ -94,6 +96,17 @@ class PrivateSyncRequest(BaseModel):
 
 def current_timestamp_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _desk_price_age() -> int | None:
+    try:
+        latest = Repository().latest_market_timestamp()
+    except Exception:
+        logger.warning("读取行情时间失败", exc_info=True)
+        return None
+    if latest is None:
+        return None
+    return max(0, current_timestamp_ms() - int(latest))
 
 
 def serialize_kill_switch(state) -> dict[str, object]:
@@ -273,12 +286,15 @@ def create_router(broadcast: RuntimeBroadcaster | None = None) -> APIRouter:
 
     @router.put("/kill-switch")
     async def set_kill_switch(request: KillSwitchRequest) -> dict[str, object]:
-        state = Repository().set_kill_switch(
+        repository = Repository()
+        state = repository.set_kill_switch(
             request.engaged,
             request.reason,
             current_timestamp_ms(),
         )
-        return serialize_kill_switch(state)
+        payload = serialize_kill_switch(state)
+        record_operator_action(repository, "kill_switch", payload, current_timestamp_ms())
+        return payload
 
     @router.get("/opening-pause")
     async def get_opening_pause() -> dict[str, object]:
@@ -286,24 +302,44 @@ def create_router(broadcast: RuntimeBroadcaster | None = None) -> APIRouter:
 
     @router.put("/opening-pause")
     async def set_opening_pause(request: OpeningPauseRequest) -> dict[str, object]:
-        state = Repository().set_opening_pause(
+        repository = Repository()
+        state = repository.set_opening_pause(
             request.paused,
             request.reason,
             current_timestamp_ms(),
         )
-        return serialize_opening_pause(state)
+        payload = serialize_opening_pause(state)
+        record_operator_action(repository, "opening_pause", payload, current_timestamp_ms())
+        return payload
 
     @router.post("/cancel-orders")
     async def cancel_orders() -> dict[str, object]:
         kill_switch, opening_pause = engage_emergency_stop("Cancel open orders")
         result = await cancel_open_orders(emergency_order_manager())
-        return _emergency_payload(result, kill_switch, opening_pause)
+        payload = _emergency_payload(result, kill_switch, opening_pause)
+        record_operator_action(Repository(), "cancel_orders", payload, current_timestamp_ms())
+        return payload
 
     @router.post("/flatten")
     async def flatten_positions() -> dict[str, object]:
         kill_switch, opening_pause = engage_emergency_stop("Flatten positions")
         result = await flatten_exposure(emergency_order_manager())
-        return _emergency_payload(result, kill_switch, opening_pause)
+        payload = _emergency_payload(result, kill_switch, opening_pause)
+        record_operator_action(Repository(), "flatten", payload, current_timestamp_ms())
+        return payload
+
+    @router.get("/desk")
+    async def get_desk() -> dict[str, object]:
+        repository = Repository()
+        price_age = _desk_price_age()
+        return {
+            "unresolved_live_orders": len(unresolved_live_order_ids(repository)),
+            "price_age_ms": price_age,
+            "fill_cursor_ms": repository.get_fill_cursor("live:"),
+            "opening_pause": serialize_opening_pause(repository.get_opening_pause()),
+            "kill_switch": serialize_kill_switch(repository.get_kill_switch()),
+            "actions": repository.list_operator_actions(limit=8),
+        }
 
     @router.get("/sync/private/status")
     async def get_private_sync_status(

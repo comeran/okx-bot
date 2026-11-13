@@ -12,6 +12,7 @@ import AppPageHeader from '@/components/ui/AppPageHeader.vue';
 import MetricCard from '@/components/ui/MetricCard.vue';
 import {
   cancelOpenOrders,
+  fetchDesk,
   fetchKillSwitch,
   fetchOpeningPause,
   flattenPositions,
@@ -157,6 +158,7 @@ function retryStrategyPerformance() {
   void dashboard.refreshStrategyPerformance();
 }
 
+const desk = ref<Awaited<ReturnType<typeof fetchDesk>> | null>(null);
 const killSwitchEngaged = ref(false);
 const killSwitchSaving = ref(false);
 const killSwitchStatus = ref('');
@@ -305,10 +307,19 @@ async function flatten(): Promise<void> {
   }
 }
 
+async function loadDesk(): Promise<void> {
+  try {
+    desk.value = await fetchDesk();
+  } catch {
+    desk.value = null;
+  }
+}
+
 onMounted(() => {
   refreshAll();
   void loadKillSwitch();
   void loadOpeningPause();
+  void loadDesk();
 });
 </script>
 
@@ -386,6 +397,15 @@ onMounted(() => {
     />
 
     <div class="dashboard-view__sync" role="status" aria-live="polite">
+      <p v-if="desk" class="dashboard-view__desk">
+        {{ t('dashboard.deskUnresolved') }}: {{ desk.unresolved_live_orders }}
+        · {{ t('dashboard.deskPriceAge') }}: {{ desk.price_age_ms ?? t('dashboard.deskUnknown') }}
+        · {{ t('dashboard.deskFillCursor') }}: {{ desk.fill_cursor_ms ?? t('dashboard.deskUnknown') }}
+        · {{ t('dashboard.deskOpeningPause') }}: {{ desk.opening_pause.paused ? t('dashboard.deskOn') : t('dashboard.deskOff') }}
+        · {{ t('dashboard.deskKillSwitch') }}: {{ desk.kill_switch.engaged ? t('dashboard.deskOn') : t('dashboard.deskOff') }}
+        · {{ t('dashboard.deskActions') }}:
+        {{ desk.actions.length ? desk.actions.map((item) => item.action).join(', ') : t('dashboard.deskEmpty') }}
+      </p>
       <p>{{ t('dashboard.accountSync.description') }}</p>
       <p v-if="accountContext.context?.environment === 'live'">{{ t('dashboard.accountSync.demoOnly') }}</p>
       <p v-else-if="!canSyncAccount && !dashboard.privateSyncLoading && !dashboard.loading">{{ t('dashboard.accountSync.authRequired') }}</p>

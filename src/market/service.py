@@ -10,12 +10,12 @@ from collections.abc import Awaitable, Callable
 from ccxt.base.errors import NotSupported
 
 from src.core.types import Bar
-from src.exchange.base import safe_ohlcv_bar
 from src.exchange.errors import MalformedProviderData
 from src.exchange.okx_client import (
     OKX_RUNTIME_TIMEFRAME_MILLISECONDS,
     create_okx_client,
 )
+from src.market.bars import is_closed_bar, parse_exchange_bar
 from src.market.health import (
     MARKET_FEED_DELIVERY_ERROR_CODE,
     MARKET_FEED_ERROR_CODE,
@@ -82,7 +82,6 @@ class MarketDataService:
     _poll_interval_seconds = 1
     _max_retry_delay_seconds = 8
     _history_page_limit = 300
-    _max_backfill_pages = 4
     _max_subscriber_failures = 3
 
     def __init__(
@@ -92,13 +91,17 @@ class MarketDataService:
         passphrase: str,
         default_type: str = "spot",
         demo: bool = True,
+        *,
+        public_stream: object | None = None,
+        exchange: object | None = None,
     ):
         self._api_key = api_key
         self._secret = secret
         self._passphrase = passphrase
         self._default_type = default_type
         self._demo = demo
-        self._exchange = self._create_exchange()
+        self._public_stream = public_stream
+        self._exchange = exchange if exchange is not None else self._create_exchange()
         self._exchange_usable = True
         self._retired_exchanges: list[object] = []
         self._exchange_closed = False
@@ -221,7 +224,7 @@ class MarketDataService:
             if not isinstance(row, (list, tuple)) or len(row) < 6:
                 logger.warning("Skipping invalid OHLCV row for %s: %r", key, row)
                 raise MalformedProviderData(f"Malformed OHLCV batch for {key}")
-            bar = safe_ohlcv_bar(row)
+            bar = parse_exchange_bar(row)
             if bar is None:
                 logger.warning("Skipping invalid OHLCV row for %s: %r", key, row)
                 raise MalformedProviderData(f"Malformed OHLCV batch for {key}")
@@ -271,10 +274,11 @@ class MarketDataService:
         last_delivered = self._last_bar_timestamps.get(key, 0)
         if last_delivered:
             cursor = last_delivered + interval
-            for _ in range(self._max_backfill_pages):
-                earliest = min(merged)
-                if cursor >= earliest:
-                    break
+            target = min(merged)
+            guard = 0
+            while cursor < target and guard < 10_000:
+                guard += 1
+                earliest = target
                 try:
                     rows = await self._call_fetch_ohlcv(
                         fetch_ohlcv, symbol, timeframe, since=cursor
@@ -285,7 +289,7 @@ class MarketDataService:
                         if last_delivered < bar.timestamp < earliest
                     ]
                 except (MalformedProviderData, TypeError, ValueError):
-                    logger.warning("Skipping malformed backfill page for %s", key)
+                    logger.warning("跳过无法解析的回补页 %s", key)
                     break
                 if not page:
                     break
@@ -299,10 +303,10 @@ class MarketDataService:
         required = self._required_bars.get(key, 0)
         if required:
             needed_start = int(self._current_time() * 1000) - required * interval
-            for _ in range(self._max_backfill_pages):
+            guard = 0
+            while min(merged) > needed_start and guard < 10_000:
+                guard += 1
                 earliest = min(merged)
-                if earliest <= needed_start:
-                    break
                 since = max(0, earliest - self._history_page_limit * interval)
                 try:
                     rows = await self._call_fetch_ohlcv(
@@ -314,12 +318,14 @@ class MarketDataService:
                         if bar.timestamp < earliest
                     ]
                 except (MalformedProviderData, TypeError, ValueError):
-                    logger.warning("Skipping malformed warmup backfill page for %s", key)
+                    logger.warning("跳过无法解析的预热回补页 %s", key)
                     break
                 if not page:
                     break
                 for bar in page:
                     merged[bar.timestamp] = bar
+                if min(merged) >= earliest:
+                    break
 
         return sorted(merged.values(), key=lambda bar: bar.timestamp)
 
@@ -367,8 +373,10 @@ class MarketDataService:
             raise ValueError("Unsupported OKX runtime timeframe") from None
 
     def _is_closed_bar(self, timestamp: int, timeframe: str) -> bool:
-        return timestamp + self._timeframe_milliseconds(timeframe) <= int(
-            self._current_time() * 1000
+        return is_closed_bar(
+            timestamp,
+            self._timeframe_milliseconds(timeframe),
+            int(self._current_time() * 1000),
         )
 
     def _is_fresh_bar(self, timestamp: int | None, timeframe: str) -> bool:
@@ -605,7 +613,18 @@ class MarketDataService:
                 exchange = self._exchange
             watch_ohlcv = getattr(exchange, "watch_ohlcv", None)
             fetch_ohlcv = getattr(exchange, "fetch_ohlcv", None)
-            if callable(watch_ohlcv):
+            rows = None
+            if self._public_stream is not None:
+                try:
+                    rows = await self._public_stream.watch_ohlcv(symbol, timeframe)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.warning("公有行情流不可用，改用轮询", exc_info=True)
+                    rows = None
+            if rows is not None:
+                pass
+            elif callable(watch_ohlcv):
                 try:
                     rows = await watch_ohlcv(symbol, timeframe)
                 except NotSupported:

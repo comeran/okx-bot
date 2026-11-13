@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 import os
 import re
 import secrets
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -99,9 +102,88 @@ def strategy_runtime_snapshot(
     }
 
 
+def _local_readiness(repository: Repository) -> dict[str, object]:
+    version = 0
+    latest = None
+    cursor = None
+    try:
+        version = repository.get_schema_version()
+    except Exception:
+        logger.warning("读取数据库版本失败", exc_info=True)
+    try:
+        latest = repository.latest_market_timestamp()
+    except Exception:
+        logger.warning("读取本地行情时间失败", exc_info=True)
+    try:
+        cursor = repository.get_fill_cursor("live:")
+    except Exception:
+        logger.warning("读取私有同步游标失败", exc_info=True)
+    return {
+        "schema_version": version,
+        "market": {"latest_price_at": latest},
+        "private_sync": {"cursor_ms": cursor},
+    }
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    from src.ops.lifecycle import graceful_shutdown, startup_reconcile
+    from src.risk.supervisor import supervise_forever
+    from src.runtime.boundaries import Boundary, DeskRuntime
+
+    holder: dict[str, asyncio.Task[None] | None] = {"risk": None}
+
+    async def start_risk() -> None:
+        holder["risk"] = asyncio.create_task(supervise_forever())
+
+    async def stop_risk() -> None:
+        task = holder.get("risk")
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            holder["risk"] = None
+
+    async def start_ledger() -> None:
+        try:
+            Repository()
+        except Exception:
+            logger.exception("账本边界没有打开")
+
+    async def stop_quiet() -> None:
+        return None
+
+    desk = DeskRuntime([
+        Boundary("market", stop_quiet, stop_quiet),
+        Boundary("orders", stop_quiet, stop_quiet),
+        Boundary("risk", start_risk, stop_risk),
+        Boundary("ledger", start_ledger, stop_quiet),
+    ])
+    _app.state.desk = desk
+    try:
+        startup_reconcile(Repository())
+    except Exception:
+        logger.exception("启动对账失败")
+    try:
+        await desk.start()
+    except Exception:
+        logger.exception("运行边界启动失败")
+    try:
+        yield
+    finally:
+        try:
+            await desk.stop()
+        except Exception:
+            logger.exception("运行边界停止失败")
+        try:
+            graceful_shutdown(Repository(), str(os.getpid()))
+        except Exception:
+            logger.exception("优雅停机失败")
+
+
 def create_app() -> FastAPI:
     strategy_runtime = strategies.StrategyRuntimeState()
-    app = FastAPI(title="OKX Bot API", version="0.1.0")
+    app = FastAPI(title="OKX Bot API", version="0.1.0", lifespan=_lifespan)
     app.add_middleware(
         CORSMiddleware,
         allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
@@ -126,16 +208,17 @@ def create_app() -> FastAPI:
         return await call_next(request)
 
     @app.get("/api/health", response_model=None)
-    async def health() -> JSONResponse | dict[str, str]:
+    async def health() -> JSONResponse | dict[str, object]:
+        repository = Repository()
         try:
-            Repository().probe_database()
+            repository.probe_database()
         except Exception:
             logger.warning("Database health probe failed", exc_info=True)
             return JSONResponse(
                 {"status": "unavailable", "database": "unavailable"},
                 status_code=503,
             )
-        return {"status": "ok", "database": "ok"}
+        return {"status": "ok", "database": "ok", **_local_readiness(repository)}
 
     @app.get("/api/auth/session")
     async def auth_session() -> dict[str, bool]:

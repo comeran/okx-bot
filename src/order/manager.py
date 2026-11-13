@@ -5,6 +5,7 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any
 
 import ccxt.async_support as ccxt
@@ -21,6 +22,7 @@ from src.data.paper_book import normalize_spot_symbol
 from src.exchange.base import canonical_symbol
 from src.exchange.errors import AcceptedUnknownOrderResultError
 from src.order.accounting import PaperAccountingService
+from src.order.lifecycle import record_transition
 from src.order.router import OrderRouter
 from src.order.value import (
     contract_size,
@@ -74,6 +76,11 @@ def risk_reason_code(reason: str) -> str:
         "Paper spot sell exceeds reserved holdings": "paper_holdings_exceeded",
         "Paper reservation does not include this symbol": "paper_symbol_mismatch",
         "Paper reservation does not match the configured account": "paper_scope_mismatch",
+        "Funded quote budget exceeded": "funded_quote_exceeded",
+        "Funded base budget exceeded": "funded_base_exceeded",
+        "Funded allocation does not include this symbol": "funded_symbol_mismatch",
+        "Funded allocation scope is unavailable": "funded_scope_unavailable",
+        "Funded allocation requires a positive price": "funded_price_required",
         "Paper reservation scope is unavailable": "paper_scope_unavailable",
         "Activate a local paper budget before trading this symbol": "paper_budget_required",
         "Unresolved live order requires reconciliation": "unresolved_live_order",
@@ -147,6 +154,9 @@ class UnifiedOrderManager:
         opening_pause_checker: Callable[[], bool] | None = None,
         price_observed_at_provider: Callable[[str], int | None] | None = None,
         max_price_age_ms: int = 0,
+        require_position_ownership: bool = True,
+        funding_environment: str | None = None,
+        funding_scope_id: Callable[[], str | None] | None = None,
     ) -> None:
         self.router = router
         self.repository = repository
@@ -170,6 +180,9 @@ class UnifiedOrderManager:
         self.opening_pause_checker = opening_pause_checker
         self.price_observed_at_provider = price_observed_at_provider
         self.max_price_age_ms = max(0, int(max_price_age_ms))
+        self.require_position_ownership = require_position_ownership
+        self.funding_environment = funding_environment
+        self.funding_scope_id = funding_scope_id
         self._balances: dict[str, float] = {}
         self._order_seq = 0
         self._order_token = uuid.uuid4().hex[:12]
@@ -323,9 +336,18 @@ class UnifiedOrderManager:
                 order.client_order_id = self._new_client_order_id()
                 self._persist_order(order, strategy_name)
 
+            reservation = self._reserve_funded(order, strategy_name)
+            if isinstance(reservation, str):
+                return await self._reject_order(
+                    order,
+                    strategy_name,
+                    RiskGateResult(False, reservation, effective_price=price),
+                )
             try:
                 submitted_order = await self.router.submit(order)
             except Exception as exc:
+                if reservation is True:
+                    self._release_funded(order.id)
                 await self._handle_submit_exception(order, strategy_name, exc)
                 raise
             status_conflict = self._normalize_successful_submit_status(submitted_order)
@@ -349,6 +371,8 @@ class UnifiedOrderManager:
                     f"Exchange accepted order {accepted_id}; "
                     "local persistence failed and reconciliation is required"
                 ) from exc
+            if reservation is True:
+                self._settle_funded_submission(order.id, submitted_order)
             if status_conflict:
                 await self._record_provider_status_conflict(
                     submitted_order, strategy_name
@@ -598,13 +622,19 @@ class UnifiedOrderManager:
             local_order.fill_price = fill_price
 
         if filled_amount >= local_order.amount:
-            local_order.status = OrderStatus.FILLED.value
+            record_transition(
+                local_order, OrderStatus.FILLED,
+                cause="venue_fill", clock_ms=self.timestamp_ms(), source="venue",
+            )
         elif response_status in {"closed", "filled"} and not has_response_quantity:
             # A provider terminal status without quantities is not proof of a fill or
             # cancellation. Keep the locally confirmed pending/partial state.
             pass
         else:
-            local_order.status = OrderStatus.CANCELLED.value
+            record_transition(
+                local_order, OrderStatus.CANCELLED,
+                cause="venue_cancel", clock_ms=self.timestamp_ms(), source="venue",
+            )
         if reconciliation_reason is not None:
             self._record_cancel_reconciliation_required(
                 local_order, reconciliation_reason, cancel_response
@@ -637,6 +667,7 @@ class UnifiedOrderManager:
             order_record.updated_at,
             fill_order,
         )
+        self._settle_funded_record(local_order)
         if self.on_order_update is not None:
             try:
                 await self._run_callback(self.on_order_update, local_order.strategy)
@@ -869,6 +900,132 @@ class UnifiedOrderManager:
             if item.scope_id == scope_id
         ]
         return matches[0] if matches else None
+
+    def _funded_active(self, strategy_name: str) -> bool:
+        return (
+            self.funding_environment in {"sandbox", "live"}
+            and strategy_name not in {"", "__exchange__"}
+            and self.repository is not None
+            and getattr(self.repository, "engine", None) is not None
+        )
+
+    def _funding_scope(self) -> str | None:
+        if self.funding_scope_id is None:
+            return None
+        try:
+            scope = self.funding_scope_id()
+        except Exception:
+            logger.warning("读取资金账户范围失败", exc_info=True)
+            return None
+        if not isinstance(scope, str) or not scope.strip():
+            return None
+        return scope
+
+    def _funded_block_reason(self, order: Order, strategy_name: str, price: float) -> str | None:
+        if not self._funded_active(strategy_name):
+            return None
+        from src.data.funded_allocation import capacity_block
+
+        try:
+            return capacity_block(
+                self.repository,
+                scope_id=self._funding_scope(),
+                strategy=strategy_name,
+                environment=self.funding_environment,
+                symbol=order.symbol,
+                side=str(getattr(order.side, "value", order.side)),
+                amount=Decimal(str(order.amount)),
+                price=Decimal(str(price)),
+            )
+        except Exception:
+            logger.warning("读取策略资金失败，拒绝下单", exc_info=True)
+            return "Funded allocation scope is unavailable"
+
+    def _reserve_funded(self, order: Order, strategy_name: str) -> bool | str:
+        """True 表示已预留，False 表示没有拨款，字符串表示拒绝原因。"""
+        if not self._funded_active(strategy_name):
+            return False
+        from src.data.funded_allocation import reserve_funded_order
+
+        price = order.price
+        if price is None or price <= 0:
+            supplied = None if self.price_provider is None else self.price_provider(order.symbol)
+            price = supplied
+        try:
+            quote = Decimal(str(price))
+            amount = Decimal(str(order.amount))
+        except Exception:
+            return "Funded allocation requires a positive price"
+        if quote <= 0 or amount <= 0:
+            return "Funded allocation requires a positive price"
+        try:
+            result = reserve_funded_order(
+                self.repository,
+                scope_id=self._funding_scope(),
+                strategy=strategy_name,
+                environment=self.funding_environment or "",
+                symbol=order.symbol,
+                order_id=order.id,
+                side=str(getattr(order.side, "value", order.side)),
+                amount=amount,
+                price=quote,
+                now_ms=self.timestamp_ms(),
+            )
+        except Exception:
+            logger.warning("预留策略资金失败，拒绝下单", exc_info=True)
+            return "Funded allocation scope is unavailable"
+        if result == "absent":
+            return False
+        if result == "reserved":
+            return True
+        return result
+
+    def _release_funded(self, order_id: str) -> None:
+        if self.repository is None or getattr(self.repository, "engine", None) is None:
+            return
+        from src.data.funded_allocation import release_funded_order
+
+        release_funded_order(self.repository, order_id)
+
+    def _settle_funded_submission(self, order_id: str, submitted: Order) -> None:
+        filled = submitted.filled_amount
+        if submitted.status == OrderStatus.FILLED and not filled:
+            filled = submitted.amount
+        price = submitted.fill_price if submitted.fill_price else submitted.price
+        self._settle_funded_values(order_id, submitted.status, filled, price)
+
+    def _settle_funded_record(self, local_order: Any) -> None:
+        if self.funding_environment not in {"sandbox", "live"}:
+            return
+        price = local_order.fill_price or local_order.price
+        self._settle_funded_values(
+            local_order.order_id,
+            local_order.status,
+            local_order.filled_amount,
+            price,
+        )
+
+    def _settle_funded_values(
+        self, order_id: str, status: object, filled: object, price: object,
+    ) -> None:
+        if self.repository is None or getattr(self.repository, "engine", None) is None:
+            return
+        from src.data.funded_allocation import settle_funded_order
+
+        status_text = str(getattr(status, "value", status) or "")
+        try:
+            filled_amount = Decimal(str(0 if filled is None else filled))
+            fill_price = Decimal(str(0 if price is None else price))
+        except Exception:
+            logger.warning("策略资金结算价格无效，保留预留")
+            return
+        settle_funded_order(
+            self.repository,
+            order_id,
+            status=status_text,
+            filled_amount=filled_amount,
+            fill_price=fill_price,
+        )
 
     def _paper_order_block(self, order: Order, strategy_name: str) -> str | None:
         if self.paper_book is None or getattr(self.router, "mode", None) != "demo":
@@ -1105,13 +1262,28 @@ class UnifiedOrderManager:
             contract_size_value=size,
         )
 
+    def _rolled_daily_pnl(self) -> bool:
+        if self.repository is None or not hasattr(self.repository, "get_daily_ledger_day"):
+            return False
+        try:
+            from src.risk.daily_ledger import roll_daily_pnl
+
+            return bool(roll_daily_pnl(self.repository, self.timestamp_ms()))
+        except Exception:
+            logger.warning("滚动日盈亏失败", exc_info=True)
+            return False
+
     def _check_risk_gate(self, order: Order, strategy_name: str) -> RiskGateResult:
         account = None
         positions: list[Any] = []
         state_owner = strategy_name
         state_symbol = self._canonical_state_symbol(order.symbol)
 
-        if self.router.mode == "live" and strategy_name != "__exchange__":
+        if (
+            self.require_position_ownership
+            and self.router.mode == "live"
+            and strategy_name != "__exchange__"
+        ):
             candidate_positions = self.get_positions("__exchange__", state_symbol)
             owned_positions = [
                 position
@@ -1174,10 +1346,21 @@ class UnifiedOrderManager:
                 reason="Risk evaluation requires a current price",
             )
         order_price = normalized_price
+        funded_reason = self._funded_block_reason(order, strategy_name, order_price)
+        if funded_reason is not None:
+            return RiskGateResult(
+                False,
+                funded_reason,
+                effective_price=order_price,
+            )
 
         if self.live_safeguards:
             safety_positions = positions
-            if self.router.mode == "live" and strategy_name != "__exchange__":
+            if (
+                self.require_position_ownership
+                and self.router.mode == "live"
+                and strategy_name != "__exchange__"
+            ):
                 candidate_positions = self.get_positions("__exchange__", state_symbol)
                 owned_positions = [
                     position
@@ -1309,6 +1492,8 @@ class UnifiedOrderManager:
 
         total_equity = account.equity if account is not None else self.initial_equity
         daily_pnl = account.daily_pnl if account is not None else 0.0
+        if self._rolled_daily_pnl():
+            daily_pnl = 0.0
         current_equity = account.equity if account is not None else self.initial_equity
         initial_equity = account.initial_equity if account is not None else self.initial_equity
         peak_equity = max(
@@ -1491,12 +1676,16 @@ class UnifiedOrderManager:
             normalized_filled = 0.0
         order.filled_amount = normalized_filled
         order.remaining_amount = order.amount - normalized_filled
-        order.status = (
+        record_transition(
+            order,
             OrderStatus.FILLED
             if normalized_filled >= order.amount
             else OrderStatus.PARTIALLY_FILLED
             if normalized_filled > 0.0
-            else OrderStatus.PENDING
+            else OrderStatus.PENDING,
+            cause="provider_status_conflict",
+            clock_ms=order.updated_at,
+            source="venue",
         )
         return True
 
@@ -1601,11 +1790,17 @@ class UnifiedOrderManager:
             if self.router.mode != "live":
                 return
             if self._classify_submit_exception(error) == "rejected":
-                order.status = OrderStatus.REJECTED
+                record_transition(
+                    order, OrderStatus.REJECTED,
+                    cause="venue_reject", clock_ms=self.timestamp_ms(), source="venue",
+                )
                 self._persist_order(order, strategy_name)
                 return
 
-            order.status = OrderStatus.PENDING
+            record_transition(
+                order, OrderStatus.PENDING,
+                cause="venue_unknown", clock_ms=self.timestamp_ms(), source="venue",
+            )
             self._persist_order(order, strategy_name)
             event = {
                 "type": "risk_event",
@@ -1760,8 +1955,11 @@ class UnifiedOrderManager:
         strategy_name: str,
         risk_result: RiskGateResult,
     ) -> Order:
-        order.status = OrderStatus.REJECTED
         timestamp = self.timestamp_ms()
+        record_transition(
+            order, OrderStatus.REJECTED,
+            cause="risk_reject", clock_ms=timestamp, source="venue",
+        )
         self._persist_order(order, strategy_name, timestamp=timestamp)
         try:
             payload = self._risk_event_payload(order, strategy_name, risk_result, timestamp)
