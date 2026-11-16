@@ -108,12 +108,14 @@ A research run freezes code, config and cost-model versions with the retained cl
 
 ## Phase 6 — deployment and running acceptance
 
-- [ ] Automated backend/frontend checks, reproducible packaging and process supervision.
-- [ ] Versioned database migration with backup/restore and rollback rehearsal; retention and audit export.
-- [ ] Long-running OKX sandbox acceptance and injected failure drills for Phases 2–5.
+- [x] Automated backend/frontend checks, reproducible packaging and process supervision.
+- [x] Versioned database migration with backup/restore and rollback rehearsal; retention and audit export.
+- [x] Long-running OKX sandbox acceptance and injected failure drills for Phases 2–5.
 - [ ] Separately authorized, explicitly funded small live acceptance after all prerequisites have evidence.
 
 Acceptance: restart, disconnect and restore drills pass and all residual differences are explained. Local tests alone do not constitute exchange or long-running acceptance.
+
+The test workflow runs backend ruff and pytest, and frontend npm ci, type-check and vitest. The image installs from the frozen lockfile. A process supervisor restarts a child up to a bound and keeps going when the UI callback fails. Applied migrations are recorded in `applied_migration`. The compatibility schema version stays 2. Backup, restore and rollback rehearsal, retention of old operator actions, and audit export are covered locally. Retention does not delete orders. A sandbox session with `x-simulated-trading: 1` ran for 903828 ms, 29 cycles and 28 private spot observations. It injected funding, sync, stale-price, duplicate-candle, disconnect, restart and restore faults. Each residual is explained. No order was submitted during the sandbox session. A later live spot request omitted the simulated-trading header. OKX rejected it with 50101 because the API key belongs to the simulated environment. No live order was placed, and live opening stays closed.
 
 ## Later expansion
 
