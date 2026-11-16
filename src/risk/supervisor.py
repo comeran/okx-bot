@@ -1,4 +1,4 @@
-"""独立的开仓监督。没有行情观测时不暂停。"""
+"""独立的开仓监督。没有行情心跳时把价格记为未知，并暂停新开仓。"""
 
 from __future__ import annotations
 
@@ -8,9 +8,16 @@ import os
 import time
 
 from src.data.repository import Repository
+from src.ops.phase4_controls import (
+    PushQueue,
+    enqueue_alert,
+    refresh_runtime_risk,
+    supervise_observation,
+)
 from src.risk.daily_ledger import roll_daily_pnl
 
 logger = logging.getLogger(__name__)
+_supervision_queue = PushQueue(max_size=100)
 
 
 def supervision_reason(
@@ -117,6 +124,20 @@ async def supervise_forever(interval_s: float | None = None) -> None:
     while True:
         try:
             evaluate(Repository())
+            repository = Repository()
+            assessment = refresh_runtime_risk(
+                repository,
+                now_ms=int(time.time() * 1000),
+                max_price_age_ms=int(_limits()["max_price_age_ms"]),
+            )
+            supervise_observation(assessment, push=_supervision_queue.push)
+            if assessment.get("blocked"):
+                enqueue_alert(
+                    repository,
+                    "risk",
+                    {"reason": assessment.get("reason")},
+                    now_ms=int(time.time() * 1000),
+                )
         except Exception:
             logger.exception("开仓监督失败")
         await asyncio.sleep(interval)

@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import secrets
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -102,6 +103,44 @@ def strategy_runtime_snapshot(
     }
 
 
+def _private_sync_health(repository: Repository, cursor: int | None) -> dict[str, object]:
+    status = "unknown"
+    fresh = False
+    attempts = 0
+    try:
+        from src.ops.phase3_recovery import sync_freshness
+
+        freshness = sync_freshness(repository)
+        status = freshness["status"]
+        fresh = freshness["fresh"]
+        attempts = freshness["attempts"]
+        if freshness["cursor_ms"] is not None:
+            cursor = freshness["cursor_ms"]
+    except Exception:
+        logger.warning("读取私有同步新鲜度失败", exc_info=True)
+    return {
+        "cursor_ms": cursor,
+        "status": status,
+        "fresh": fresh,
+        "attempts": attempts,
+    }
+
+
+def _readiness(repository: Repository) -> dict[str, object]:
+    try:
+        from src.ops.phase4_controls import readiness_payload
+        from src.risk.supervisor import _limits
+
+        return readiness_payload(
+            repository,
+            now_ms=int(time.time() * 1000),
+            max_price_age_ms=int(_limits()["max_price_age_ms"]),
+        )
+    except Exception:
+        logger.warning("读取就绪状态失败", exc_info=True)
+        return {"ready": False, "reasons": ["unknown_price"]}
+
+
 def _local_readiness(repository: Repository) -> dict[str, object]:
     version = 0
     latest = None
@@ -121,7 +160,8 @@ def _local_readiness(repository: Repository) -> dict[str, object]:
     return {
         "schema_version": version,
         "market": {"latest_price_at": latest},
-        "private_sync": {"cursor_ms": cursor},
+        "private_sync": _private_sync_health(repository, cursor),
+        "readiness": _readiness(repository),
     }
 
 
@@ -131,18 +171,22 @@ async def _lifespan(_app: FastAPI):
     from src.risk.supervisor import supervise_forever
     from src.runtime.boundaries import Boundary, DeskRuntime
 
-    holder: dict[str, asyncio.Task[None] | None] = {"risk": None}
+    holder: dict[str, asyncio.Task[None] | None] = {"risk": None, "sync": None}
 
     async def start_risk() -> None:
+        from src.ops.phase3_recovery import sync_forever
+
         holder["risk"] = asyncio.create_task(supervise_forever())
+        holder["sync"] = asyncio.create_task(sync_forever())
 
     async def stop_risk() -> None:
-        task = holder.get("risk")
-        if task is not None:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-            holder["risk"] = None
+        for key in ("risk", "sync"):
+            task = holder.get(key)
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+                holder[key] = None
 
     async def start_ledger() -> None:
         try:
@@ -184,6 +228,7 @@ async def _lifespan(_app: FastAPI):
 def create_app() -> FastAPI:
     strategy_runtime = strategies.StrategyRuntimeState()
     app = FastAPI(title="OKX Bot API", version="0.1.0", lifespan=_lifespan)
+    app.state.strategy_runtime = strategy_runtime
     app.add_middleware(
         CORSMiddleware,
         allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",

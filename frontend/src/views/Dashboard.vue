@@ -401,6 +401,9 @@ onMounted(() => {
         {{ t('dashboard.deskUnresolved') }}: {{ desk.unresolved_live_orders }}
         · {{ t('dashboard.deskPriceAge') }}: {{ desk.price_age_ms ?? t('dashboard.deskUnknown') }}
         · {{ t('dashboard.deskFillCursor') }}: {{ desk.fill_cursor_ms ?? t('dashboard.deskUnknown') }}
+        · {{ t('dashboard.deskSync') }}: {{ desk.private_sync?.status ?? t('dashboard.deskUnknown') }}
+        · {{ t('dashboard.deskRisk') }}: {{ desk.runtime_risk?.reason ?? t('dashboard.deskOff') }}
+        · {{ t('dashboard.deskConfig') }}: {{ desk.config_apply ?? t('dashboard.deskUnknown') }}
         · {{ t('dashboard.deskOpeningPause') }}: {{ desk.opening_pause.paused ? t('dashboard.deskOn') : t('dashboard.deskOff') }}
         · {{ t('dashboard.deskKillSwitch') }}: {{ desk.kill_switch.engaged ? t('dashboard.deskOn') : t('dashboard.deskOff') }}
         · {{ t('dashboard.deskActions') }}:

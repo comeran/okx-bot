@@ -157,6 +157,8 @@ class UnifiedOrderManager:
         require_position_ownership: bool = True,
         funding_environment: str | None = None,
         funding_scope_id: Callable[[], str | None] | None = None,
+        identity_lookup: Callable[[str], dict | None] | None = None,
+        runtime_risk_checker: Callable[[], str | None] | None = None,
     ) -> None:
         self.router = router
         self.repository = repository
@@ -183,6 +185,8 @@ class UnifiedOrderManager:
         self.require_position_ownership = require_position_ownership
         self.funding_environment = funding_environment
         self.funding_scope_id = funding_scope_id
+        self.identity_lookup = identity_lookup
+        self.runtime_risk_checker = runtime_risk_checker
         self._balances: dict[str, float] = {}
         self._order_seq = 0
         self._order_token = uuid.uuid4().hex[:12]
@@ -241,6 +245,14 @@ class UnifiedOrderManager:
                 strategy_name,
                 RiskGateResult(False, "Opening orders are paused", effective_price=price),
             )
+        if not protective and self.runtime_risk_checker is not None:
+            runtime_reason = self.runtime_risk_checker()
+            if runtime_reason:
+                return await self._reject_order(
+                    order,
+                    strategy_name,
+                    RiskGateResult(False, str(runtime_reason), effective_price=price),
+                )
         if not protective:
             stale_reason = self._stale_price_block(order, strategy_name)
             if stale_reason is not None:
@@ -321,6 +333,8 @@ class UnifiedOrderManager:
                     ),
                 )
 
+            if callable(self.identity_lookup):
+                await self._explain_unresolved_identities()
             if self._unresolved_live_submission():
                 return await self._reject_order(
                     order,
@@ -859,6 +873,23 @@ class UnifiedOrderManager:
             return True
         terminal = {"filled", "cancelled", "canceled", "rejected"}
         return any(status_by_client.get(client) not in terminal for client in clients)
+
+    async def _explain_unresolved_identities(self) -> None:
+        """提交下一笔之前，先用已有客户单号采纳交易所结果。查不清就保持拦截。"""
+        from src.ops.lifecycle import unresolved_live_order_ids
+        from src.ops.phase3_recovery import explain_order_by_identity
+
+        if self.repository is None or not callable(self.identity_lookup):
+            return
+        for client in unresolved_live_order_ids(self.repository):
+            if client == "unknown":
+                continue
+            explain_order_by_identity(
+                self.repository,
+                client_order_id=client,
+                lookup=self.identity_lookup,
+                kind="submit",
+            )
 
     @staticmethod
     def _risk_event_identity(event: object) -> tuple[str, str]:

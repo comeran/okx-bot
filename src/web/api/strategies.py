@@ -216,6 +216,22 @@ def _opening_orders_paused(repository) -> Callable[[], bool]:
     return paused
 
 
+def _record_strategy_runtime(name: str, state: str, owner: str) -> None:
+    try:
+        from src.ops.phase3_recovery import record_runtime_intent
+
+        record_runtime_intent(
+            Repository(),
+            name=name,
+            intended=state,
+            actual=state,
+            owner=owner,
+            updated_at=int(time.time() * 1000),
+        )
+    except Exception:
+        logger.exception("记录策略运行状态失败")
+
+
 def _release_strategy_execution_lease(name: str) -> None:
     try:
         repository = Repository()
@@ -360,7 +376,23 @@ def create_order_manager(
             if resolved_mode == "live" else None
         ),
         funding_scope_id=_funding_scope if resolved_mode == "live" else None,
+        runtime_risk_checker=_stored_runtime_risk(order_repository),
     )
+
+
+def _stored_runtime_risk(repository):
+    def checker() -> str | None:
+        if repository is None:
+            return None
+        try:
+            from src.ops.phase4_controls import runtime_risk_reason
+
+            return runtime_risk_reason(repository)
+        except Exception:
+            logger.warning("读取运行风险失败", exc_info=True)
+            return None
+
+    return checker
 
 
 def create_strategy_registry() -> StrategyRegistry:
@@ -1377,6 +1409,19 @@ def create_router(
                     repository = Repository()
                     if kill_switch_engaged(repository):
                         raise HTTPException(status_code=423, detail="Kill switch engaged")
+                    from src.ops.phase3_recovery import resume_allowed
+
+                    if not resume_allowed(repository, name, lease_owner):
+                        raise HTTPException(
+                            status_code=409,
+                            detail={
+                                "code": "reconcile_required",
+                                "message": (
+                            "Runtime state must be reconciled before this strategy resumes"
+                        ),
+                                "reason_code": "reconcile_required",
+                            },
+                        )
                     acquire_lease = getattr(repository, "acquire_strategy_lease", None)
                     if callable(acquire_lease):
                         if not acquire_lease(name, lease_owner):
@@ -1531,6 +1576,7 @@ def create_router(
                         runtime.strategy_status[name] = "running"
                         runtime.strategy_errors.pop(name, None)
                         await broadcast_status(name)
+                        _record_strategy_runtime(name, "running", lease_owner)
                         startup_finalized = True
                     finally:
                         if engine is not None and not startup_finalized:
@@ -1616,6 +1662,7 @@ def create_router(
                 await release_market_data_service_if_idle()
             runtime.strategy_status[name] = "stopped"
             await broadcast_status(name)
+            _record_strategy_runtime(name, "stopped", str(os.getpid()))
             _release_strategy_execution_lease(name)
         return {"status": "stopped", "strategy": name}
 

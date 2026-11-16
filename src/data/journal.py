@@ -181,6 +181,13 @@ class Journal:
             raise JournalError("结算方向无效")
         self._post("settlement", ref, timestamp, postings)
 
+    def post_rebate(self, amount: Decimal, currency: str, *, ref: str, timestamp: int) -> None:
+        rebate = _decimal(amount, "返佣")
+        self._post("rebate", ref, timestamp, (
+            Posting(f"cash:{currency}", currency, rebate, Decimal(0)),
+            Posting(f"rebate:{currency}", currency, Decimal(0), rebate),
+        ))
+
     def nav(self) -> Decimal:
         return self._net_debit("cash:") + self._net_debit("position:")
 
@@ -194,10 +201,23 @@ class Journal:
             + self._net_debit("funding:")
             + self._net_debit("transfer:")
             + self._net_debit("settlement:")
+            + self._net_debit("rebate:")
         )
 
     def nav_change(self) -> Decimal:
         return self.nav() - self.opening()
+
+    def nav_change_by_currency(self) -> dict[str, Decimal]:
+        return {
+            currency: self._nav(currency) - self._opening(currency)
+            for currency in self._currencies()
+        }
+
+    def flows_by_currency(self) -> dict[str, Decimal]:
+        return {currency: self._flows(currency) for currency in self._currencies()}
+
+    def reconciles(self) -> bool:
+        return self.nav_change_by_currency() == self.flows_by_currency()
 
     def _post(
         self, kind: str, ref: str, timestamp: int, postings: tuple[Posting, ...],
@@ -206,9 +226,33 @@ class Journal:
         self.entries.append(JournalEntry(kind, ref, timestamp, postings))
 
     def _net_debit(self, prefix: str) -> Decimal:
+        return self._net_debit_for(prefix, None)
+
+    def _currencies(self) -> set[str]:
+        return {posting.currency for entry in self.entries for posting in entry.postings}
+
+    def _nav(self, currency: str) -> Decimal:
+        return self._net_debit_for("cash:", currency) + self._net_debit_for("position:", currency)
+
+    def _opening(self, currency: str) -> Decimal:
+        return -self._net_debit_for("equity", currency)
+
+    def _flows(self, currency: str) -> Decimal:
+        return -(
+            self._net_debit_for("realized:", currency)
+            + self._net_debit_for("fee:", currency)
+            + self._net_debit_for("funding:", currency)
+            + self._net_debit_for("transfer:", currency)
+            + self._net_debit_for("settlement:", currency)
+            + self._net_debit_for("rebate:", currency)
+        )
+
+    def _net_debit_for(self, prefix: str, currency: str | None) -> Decimal:
         total = Decimal(0)
         for entry in self.entries:
             for posting in entry.postings:
+                if currency is not None and posting.currency != currency:
+                    continue
                 if posting.account == prefix or posting.account.startswith(prefix):
                     total += posting.debit - posting.credit
         return total

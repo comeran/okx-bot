@@ -52,27 +52,40 @@ def unresolved_live_order_ids(repository) -> list[str]:
     return [client for client in clients if status_by_client.get(client) not in _TERMINAL]
 
 
-def startup_reconcile(repository) -> dict[str, object]:
+def startup_reconcile(repository, *, alive=None) -> dict[str, object]:
+    """未知实盘单，或进程已退出仍记为运行中时，先暂停。解释清楚后才允许恢复。"""
+    from src.ops.phase3_recovery import mark_crashed_actual
+
     now = int(time.time() * 1000)
+    crashed = False
+    if getattr(repository, "engine", None) is not None:
+        crashed = mark_crashed_actual(repository, alive=alive, now_ms=now)
     unresolved = unresolved_live_order_ids(repository)
     writer = getattr(repository, "write_runtime_checkpoint", None)
-    if unresolved:
-        repository.set_opening_pause(True, _RECONCILE_REASON, now)
+    if unresolved or crashed:
+        reason = _RECONCILE_REASON if unresolved else "reconcile_required"
+        repository.set_opening_pause(True, reason, now)
         if callable(writer):
-            writer("paused", now)
-        return {"paused": True, "unresolved": len(unresolved)}
+            writer("paused" if unresolved else "reconcile_required", now)
+        return {"paused": True, "unresolved": len(unresolved), "resume": False}
     pause = repository.get_opening_pause()
-    if getattr(pause, "paused", False) and getattr(pause, "reason", "") == _RECONCILE_REASON:
+    if getattr(pause, "paused", False) and getattr(pause, "reason", "") in {
+        _RECONCILE_REASON, "reconcile_required",
+    }:
         repository.set_opening_pause(False, "", now)
     if callable(writer):
         writer("reconciled", now)
-    return {"paused": False, "unresolved": 0}
+    return {"paused": False, "unresolved": 0, "resume": True}
 
 
 def graceful_shutdown(repository, owner: str) -> None:
+    from src.ops.phase3_recovery import mark_owner_stopped
+
     release = getattr(repository, "release_strategy_leases_for_owner", None)
     if callable(release):
         release(owner)
+    if getattr(repository, "engine", None) is not None:
+        mark_owner_stopped(repository, owner)
     writer = getattr(repository, "write_runtime_checkpoint", None)
     if callable(writer):
         writer("stopped", int(time.time() * 1000))

@@ -1998,8 +1998,14 @@ class Repository:
             self._ensure_opening_pause_table(engine)
             self._ensure_strategy_ownership_table(engine)
             from src.data.funded_allocation import ensure_funded_tables
+            from src.ops.phase3_recovery import ensure_recovery_tables
+            from src.ops.phase4_controls import ensure_control_tables
+            from src.research.phase5 import ensure_research_tables
 
             ensure_funded_tables(engine)
+            ensure_recovery_tables(engine)
+            ensure_control_tables(engine)
+            ensure_research_tables(engine)
             self._ensure_runtime_tables(engine)
             if migration_key is not None:
                 Repository._MIGRATED_SQLITE_DATABASES.add(migration_key)
