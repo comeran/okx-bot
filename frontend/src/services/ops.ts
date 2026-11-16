@@ -50,3 +50,26 @@ export async function flattenPositions(): Promise<EmergencyOrderResult> {
   const response = await axios.post<EmergencyOrderResult>('/api/ops/flatten');
   return response.data;
 }
+
+export interface DeskState {
+  unresolved_live_orders: number;
+  price_age_ms: number | null;
+  fill_cursor_ms: number | null;
+  private_sync?: {
+    status: string;
+    fresh: boolean;
+    attempts: number;
+    cursor_ms: number | null;
+    complete: false;
+  };
+  runtime_risk?: { blocked: boolean; reason: string | null };
+  config_apply?: string;
+  opening_pause: OpeningPauseState;
+  kill_switch: KillSwitchState;
+  actions: Array<{ action: string; result: Record<string, unknown>; created_at: number }>;
+}
+
+export async function fetchDesk(): Promise<DeskState> {
+  const response = await axios.get<DeskState>('/api/ops/desk');
+  return response.data;
+}

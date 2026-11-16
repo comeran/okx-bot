@@ -18,7 +18,7 @@ from ccxt.base.errors import (
     RateLimitExceeded,
     RequestTimeout,
 )
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, StringConstraints, field_validator
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -29,7 +29,9 @@ from src.exchange.base import canonical_symbol, is_supported_canonical_symbol
 from src.exchange.errors import MalformedProviderData
 from src.exchange.factory import create_okx_adapter
 from src.notify.telegram import RiskEventTelegramNotifier, TelegramNotifier
+from src.ops.audit import record_operator_action
 from src.ops.flatten import cancel_open_orders, flatten_exposure
+from src.ops.lifecycle import unresolved_live_order_ids
 from src.ops.private_sync import sync_private_state
 from src.ops.spot_preflight_evidence import build_stored_spot_preflight
 from src.web.api import settings as settings_api
@@ -94,6 +96,86 @@ class PrivateSyncRequest(BaseModel):
 
 def current_timestamp_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _desk_price_age() -> int | None:
+    try:
+        latest = Repository().latest_market_timestamp()
+    except Exception:
+        logger.warning("读取行情时间失败", exc_info=True)
+        return None
+    if latest is None:
+        return None
+    return max(0, current_timestamp_ms() - int(latest))
+
+
+def _desk_private_sync(repository) -> dict[str, object]:
+    try:
+        from src.ops.phase3_recovery import sync_freshness
+
+        freshness = sync_freshness(repository)
+    except Exception:
+        logger.warning("读取私有同步新鲜度失败", exc_info=True)
+        freshness = {
+            "status": "unknown",
+            "fresh": False,
+            "attempts": 0,
+            "cursor_ms": None,
+            "complete": False,
+        }
+    return {
+        "status": freshness["status"],
+        "fresh": freshness["fresh"],
+        "attempts": freshness["attempts"],
+        "cursor_ms": freshness["cursor_ms"],
+        "complete": False,
+    }
+
+
+def _desk_runtime_risk(repository) -> dict[str, object]:
+    try:
+        from src.ops.phase4_controls import runtime_risk_reason
+
+        reason = runtime_risk_reason(repository)
+    except Exception:
+        logger.warning("读取运行风险失败", exc_info=True)
+        reason = None
+    return {"blocked": reason is not None, "reason": reason}
+
+
+def _desk_sources(repository) -> dict[str, str]:
+    try:
+        from src.ops.phase4_controls import source_freshness
+
+        return source_freshness(repository, now_ms=current_timestamp_ms(), max_age_ms=15_000)
+    except Exception:
+        logger.warning("读取来源心跳失败", exc_info=True)
+        return {"market": "unknown", "account": "unknown", "private_sync": "unknown"}
+
+
+def _desk_config_apply(repository) -> str:
+    try:
+        from src.ops.phase4_controls import config_state
+
+        return config_state(repository)
+    except Exception:
+        logger.warning("读取配置生效状态失败", exc_info=True)
+        return "effective"
+
+
+def _desk_readiness(repository) -> dict[str, object]:
+    try:
+        from src.ops.phase4_controls import readiness_payload
+        from src.risk.supervisor import _limits
+
+        return readiness_payload(
+            repository,
+            now_ms=current_timestamp_ms(),
+            max_price_age_ms=int(_limits()["max_price_age_ms"]),
+        )
+    except Exception:
+        logger.warning("读取就绪状态失败", exc_info=True)
+        return {"ready": False, "reasons": ["unknown_price"]}
 
 
 def serialize_kill_switch(state) -> dict[str, object]:
@@ -273,12 +355,15 @@ def create_router(broadcast: RuntimeBroadcaster | None = None) -> APIRouter:
 
     @router.put("/kill-switch")
     async def set_kill_switch(request: KillSwitchRequest) -> dict[str, object]:
-        state = Repository().set_kill_switch(
+        repository = Repository()
+        state = repository.set_kill_switch(
             request.engaged,
             request.reason,
             current_timestamp_ms(),
         )
-        return serialize_kill_switch(state)
+        payload = serialize_kill_switch(state)
+        record_operator_action(repository, "kill_switch", payload, current_timestamp_ms())
+        return payload
 
     @router.get("/opening-pause")
     async def get_opening_pause() -> dict[str, object]:
@@ -286,24 +371,76 @@ def create_router(broadcast: RuntimeBroadcaster | None = None) -> APIRouter:
 
     @router.put("/opening-pause")
     async def set_opening_pause(request: OpeningPauseRequest) -> dict[str, object]:
-        state = Repository().set_opening_pause(
+        repository = Repository()
+        state = repository.set_opening_pause(
             request.paused,
             request.reason,
             current_timestamp_ms(),
         )
-        return serialize_opening_pause(state)
+        payload = serialize_opening_pause(state)
+        record_operator_action(repository, "opening_pause", payload, current_timestamp_ms())
+        return payload
 
     @router.post("/cancel-orders")
     async def cancel_orders() -> dict[str, object]:
         kill_switch, opening_pause = engage_emergency_stop("Cancel open orders")
         result = await cancel_open_orders(emergency_order_manager())
-        return _emergency_payload(result, kill_switch, opening_pause)
+        payload = _emergency_payload(result, kill_switch, opening_pause)
+        record_operator_action(Repository(), "cancel_orders", payload, current_timestamp_ms())
+        return payload
 
     @router.post("/flatten")
     async def flatten_positions() -> dict[str, object]:
         kill_switch, opening_pause = engage_emergency_stop("Flatten positions")
         result = await flatten_exposure(emergency_order_manager())
-        return _emergency_payload(result, kill_switch, opening_pause)
+        payload = _emergency_payload(result, kill_switch, opening_pause)
+        record_operator_action(Repository(), "flatten", payload, current_timestamp_ms())
+        return payload
+
+    @router.post("/stop-engine")
+    async def stop_engine(request: Request) -> dict[str, object]:
+        from src.ops.phase4_controls import apply_control
+
+        runtime = getattr(request.app.state, "strategy_runtime", None)
+        names = []
+        if runtime is not None:
+            names = [
+                name for name, status in runtime.strategy_status.items() if status == "running"
+            ]
+            for name in names:
+                engine = runtime.engines.get(name)
+                if engine is not None:
+                    await engine.stop()
+                    if runtime.engines.get(name) is engine:
+                        runtime.engines.pop(name, None)
+                runtime.strategy_status[name] = "stopped"
+        return apply_control(
+            Repository(), "stop_engine", now_ms=current_timestamp_ms(), names=names,
+        )
+
+    @router.post("/recover")
+    async def recover_controls() -> dict[str, object]:
+        from src.ops.phase4_controls import apply_control
+
+        return apply_control(Repository(), "recover", now_ms=current_timestamp_ms())
+
+    @router.get("/desk")
+    async def get_desk() -> dict[str, object]:
+        repository = Repository()
+        price_age = _desk_price_age()
+        return {
+            "unresolved_live_orders": len(unresolved_live_order_ids(repository)),
+            "price_age_ms": price_age,
+            "fill_cursor_ms": repository.get_fill_cursor("live:"),
+            "private_sync": _desk_private_sync(repository),
+            "opening_pause": serialize_opening_pause(repository.get_opening_pause()),
+            "kill_switch": serialize_kill_switch(repository.get_kill_switch()),
+            "actions": repository.list_operator_actions(limit=8),
+            "runtime_risk": _desk_runtime_risk(repository),
+            "sources": _desk_sources(repository),
+            "config_apply": _desk_config_apply(repository),
+            "readiness": _desk_readiness(repository),
+        }
 
     @router.get("/sync/private/status")
     async def get_private_sync_status(

@@ -40,17 +40,33 @@ export interface StrategyAllocationDraft {
   updated_at: number;
 }
 
+export interface FundedStrategyBook {
+  strategy: string;
+  symbol: string;
+  environment: 'sandbox' | 'live';
+  scope_id: string;
+  cash: string;
+  base_position: string;
+  realized_pnl: string;
+  reserved_quote: string;
+  reserved_base: string;
+  revision: number;
+  live_open_orders: false;
+}
+
 export interface StrategyAllocationEnvelope {
   context: AllocationContext;
   execution_context: ExecutionContext;
   draft: StrategyAllocationDraft | null;
   reservation?: PaperReservation | null;
+  funded_book?: FundedStrategyBook | null;
   other_scope_reservation?: boolean;
   strategy: string;
   symbol: string;
   currency: string;
   lifecycle_status: string;
   can_edit: boolean;
+  realized_pnl?: number;
 }
 
 export interface StrategyAllocationUpdate {

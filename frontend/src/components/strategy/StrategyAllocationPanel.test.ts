@@ -328,4 +328,21 @@ describe('StrategyAllocationPanel', () => {
     wrapper.unmount();
   });
 
+  it('shows the funded strategy book without opening live orders', async () => {
+    api.get.mockResolvedValue(envelope('alpha', {
+      funded_book: {
+        strategy: 'alpha', symbol: 'BTC-USDT', environment: 'sandbox', scope_id: 'sandbox-account',
+        cash: '62', base_position: '0', realized_pnl: '2', reserved_quote: '0', reserved_base: '0',
+        revision: 2, live_open_orders: false,
+      },
+    }));
+    const wrapper = await mounted();
+    expect(wrapper.text()).toContain('Strategy cash');
+    expect(wrapper.text()).toContain('62');
+    expect(wrapper.text()).toContain('Strategy realized PnL');
+    expect(wrapper.text()).toContain('Live opening stays closed');
+    expect(api.start).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
 });

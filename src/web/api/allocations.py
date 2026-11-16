@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import time
 from copy import deepcopy
 from dataclasses import asdict
+from decimal import Decimal
 from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query
@@ -25,9 +27,16 @@ from src.data.allocations import (
     spot_symbol,
 )
 from src.data.exchange_store import ExchangeStoreError
-from src.data.live_ownership import OwnershipError, grant_ownership_from_balance
+from src.data.funded_allocation import (
+    FundingError,
+    TrustedActivationFacts,
+    activate_funded_allocation,
+    assert_funded_draft_editable,
+    funded_book_payload,
+)
 from src.data.models import EXCHANGE_STRATEGY
 from src.data.paper_book import PaperBook, PaperBookError, PaperBookNotFound
+from src.data.pnl import strategy_realized_pnl
 from src.data.repository import Repository
 from src.ops.allocation_readiness import build_allocation_readiness
 from src.strategy.definitions import StrategyConfigValidationError
@@ -91,6 +100,9 @@ def allocation_context(
     }, scope
 
 
+logger = logging.getLogger(__name__)
+
+
 def _error(status: int, code: str, message: str) -> HTTPException:
     return HTTPException(status_code=status, detail={"code": code, "message": message})
 
@@ -136,12 +148,16 @@ def create_router(runtime: StrategyRuntimeState) -> APIRouter:
             "execution_context": execution_context,
             "draft": asdict(draft) if draft is not None else None,
             "reservation": _reservation_view(book, repository, scope, name),
+            "funded_book": None if scope is None else funded_book_payload(
+                repository, scope.scope_id, name, scope.environment,
+            ),
             "other_scope_reservation": _other_scope_reservation(book, scope, name),
             "strategy": name,
             "symbol": symbol,
             "currency": currency,
             "lifecycle_status": status,
             "can_edit": scope is not None and status == "stopped",
+            "realized_pnl": strategy_realized_pnl(repository, name),
         }
 
     def mutable_scope(
@@ -175,6 +191,27 @@ def create_router(runtime: StrategyRuntimeState) -> APIRouter:
                 "reservation_active",
                 "Release the local paper reservation before editing the draft",
             )
+
+    def _reject_funded_edit(
+        scope: AllocationScope,
+        name: str,
+        symbol: str,
+        budget: Decimal,
+        *,
+        deleting: bool = False,
+    ) -> None:
+        try:
+            assert_funded_draft_editable(
+                repository,
+                scope_id=scope.scope_id,
+                strategy=name,
+                environment=scope.environment,
+                symbol=symbol,
+                budget=budget,
+                deleting=deleting,
+            )
+        except FundingError as exc:
+            raise _error(409, exc.code, str(exc)) from exc
 
     @router.get("/context")
     def context() -> dict[str, object]:
@@ -283,6 +320,7 @@ def create_router(runtime: StrategyRuntimeState) -> APIRouter:
                 strategy, payload.expected_scope_id, payload.expected_symbol, symbol,
             )
             _reject_active_reservation(strategy, scope)
+            _reject_funded_edit(scope, strategy, symbol, Decimal(str(payload.budget)))
             try:
                 store.save_draft(
                     scope, strategy=strategy, symbol=symbol, budget=payload.budget,
@@ -303,6 +341,7 @@ def create_router(runtime: StrategyRuntimeState) -> APIRouter:
             symbol, _ = strategy_symbol(strategy)
             scope = mutable_scope(strategy, expected_scope_id, expected_symbol, symbol)
             _reject_active_reservation(strategy, scope)
+            _reject_funded_edit(scope, strategy, symbol, Decimal("0"), deleting=True)
             try:
                 store.delete_draft(
                     scope, strategy, expected_revision=revision, timestamp=int(time.time() * 1000),
@@ -385,24 +424,96 @@ def create_router(runtime: StrategyRuntimeState) -> APIRouter:
                 raise _error(404, "draft_not_found", "Create a draft before exchange activation")
             if draft.revision != payload.expected_revision:
                 raise _error(409, "revision_conflict", "Reload the draft and retry")
-            available = await fetch_exchange_available()
             environment = "live" if mode == "live" else "sandbox"
+            settings = load_runtime_settings()
+            # 可信预检通过才拨款。实盘开仓仍由 allow_live_open_orders 关掉。
+            facts = await load_trusted_activation_facts(
+                symbol=symbol,
+                scope_id=scope.scope_id,
+                budget=_budget_text(draft.budget),
+            )
             try:
-                grant_ownership_from_balance(
+                activate_funded_allocation(
                     repository,
                     scope_id=scope.scope_id,
                     strategy=strategy,
                     symbol=symbol,
-                    budget=float(draft.budget),
-                    available=available,
+                    budget=Decimal(str(draft.budget)),
                     environment=environment,
-                    timestamp=int(time.time() * 1000),
+                    revision=draft.revision,
+                    facts=facts,
+                    now_ms=int(time.time() * 1000),
+                    market_type=settings.exchange.market_type,
                 )
-            except OwnershipError as exc:
+            except FundingError as exc:
                 raise _error(409, exc.code, str(exc)) from exc
             return envelope(strategy)
 
     return router
+
+
+def _budget_text(budget: float) -> str:
+    rendered = format(Decimal(str(budget)), "f")
+    if "." in rendered:
+        rendered = rendered.rstrip("0").rstrip(".")
+    return rendered or "0"
+
+
+async def load_trusted_activation_facts(
+    *, symbol: str, scope_id: str, budget: str,
+) -> TrustedActivationFacts:
+    """只接受已保存且全部通过的现货预检。测试会替换这个函数。"""
+    settings = load_runtime_settings()
+    market = settings.exchange.market_type.strip().lower() or "spot"
+    try:
+        from src.ops.spot_preflight_evidence import build_stored_spot_preflight
+        from src.web.exchange_context import bind_exchange_store
+
+        binding = bind_exchange_store(
+            settings.exchange, Repository(), scope_id, require_available=True,
+        )
+        if binding.repository is None:
+            raise ValueError("stored spot evidence is unavailable")
+        evidence = binding.repository.get_spot_preflight_evidence(
+            symbol, expected_account_scope_id=binding.context["account_scope_id"],
+        )
+        result = build_stored_spot_preflight(
+            evidence,
+            symbol=symbol,
+            side="buy",
+            amount="1",
+            price=budget,
+            now_ms=int(time.time() * 1000),
+        )
+        available = Decimal("0")
+        observed = 0
+        balance = evidence.balance
+        quote = symbol.split("-")[-1]
+        if balance is not None and balance.fact is not None:
+            observed = int(balance.received_at)
+            matches = [
+                row for row in balance.fact.details
+                if getattr(row, "ccy", None) == quote
+                and isinstance(getattr(row, "avail_bal", None), str)
+            ]
+            if len(matches) == 1:
+                available = Decimal(matches[0].avail_bal)
+        return TrustedActivationFacts(
+            available_quote=available,
+            observed_at=observed,
+            preflight_passed=bool(result.get("can_activate")),
+            market_type=market,
+            account_scope_id=scope_id,
+        )
+    except Exception:
+        logger.warning("可信预检不可用，交易所激活保持关闭")
+        return TrustedActivationFacts(
+            available_quote=Decimal("0"),
+            observed_at=0,
+            preflight_passed=False,
+            market_type=market,
+            account_scope_id=scope_id,
+        )
 
 
 async def fetch_exchange_available() -> float:
@@ -430,7 +541,7 @@ def _require_local_paper() -> None:
             "live_activation_blocked",
             "Live activation stays closed until process recovery",
         )
-    if mode not in {"demo", "paper"}:
+    if mode != "paper":
         raise _error(
             409,
             "paper_activation_only",

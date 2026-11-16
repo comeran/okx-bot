@@ -1,6 +1,7 @@
 from src.core.types import Bar
 from src.data.models import KlineCache
 from src.data.repository import Repository
+from src.market.bars import bar_from_prices
 
 
 class BacktestDataSource:
@@ -31,13 +32,8 @@ class BacktestDataSource:
             if kline.source == "backtest" and kline.runtime_mode == "backtest"
         ]
         return [
-            Bar(
-                timestamp=kline.timestamp,
-                open=kline.open,
-                high=kline.high,
-                low=kline.low,
-                close=kline.close,
-                volume=kline.volume,
+            bar_from_prices(
+                kline.timestamp, kline.open, kline.high, kline.low, kline.close, kline.volume,
             )
             for kline in scoped_klines
         ]

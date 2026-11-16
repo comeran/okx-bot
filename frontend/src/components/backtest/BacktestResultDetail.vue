@@ -78,6 +78,12 @@ const metricCards = computed(() => ([
       : formatBacktestNumber(detail.value.result.total_trades, 0),
     tone: 'neutral' as const,
   },
+  {
+    key: 'annualized_return',
+    label: t('backtest.metrics.annualizedReturn'),
+    value: formatBacktestPercent(detail.value?.manifest?.annualized_return),
+    tone: 'primary' as const,
+  },
 ]));
 
 const summaryFields = computed(() => {
@@ -91,6 +97,11 @@ const summaryFields = computed(() => {
     { key: 'end', label: t('backtest.endTime'), value: formatBacktestTime(detail.value.result.end_time, currentLocale.value) },
     { key: 'capital', label: t('backtest.initialCapital'), value: formatBacktestNumber(detail.value.result.initial_capital, 0) },
     { key: 'created', label: t('common.timestamp'), value: formatBacktestTime(detail.value.result.created_at, currentLocale.value) },
+    {
+      key: 'digest',
+      label: t('backtest.metrics.dataDigest'),
+      value: detail.value.manifest?.digest || EMPTY_BACKTEST_VALUE,
+    },
   ];
 });
 

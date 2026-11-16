@@ -15,7 +15,11 @@ from sqlalchemy.exc import IntegrityError
 
 from src.core.config import BacktestConfig
 from src.core.engine import BotEngine
-from src.core.execution_mode import adapter_uses_sandbox
+from src.core.execution_mode import (
+    account_environment,
+    adapter_uses_sandbox,
+    normalized_mode,
+)
 from src.core.runtime_settings import load_runtime_settings
 from src.core.types import Order, OrderStatus, OrderType
 from src.data.models import StrategyConfigRecord
@@ -30,6 +34,7 @@ from src.exchange.okx_swap import OKXSwapAdapter
 from src.market.service import MarketDataService
 from src.notify.telegram import RiskEventTelegramNotifier, TelegramNotifier
 from src.ops.private_sync import sync_private_state
+from src.order.lifecycle import record_transition
 from src.order.manager import PRICE_FRESHNESS_UNTRACKED, UnifiedOrderManager
 from src.order.mark_to_market import PaperMarkToMarketService
 from src.order.router import OrderHandler, OrderRouter
@@ -105,15 +110,22 @@ class LocalPaperOrderHandler(OrderHandler):
 
     async def submit(self, order: Order) -> Order:
         fill_price = self._fill_price(order)
+        clock = current_timestamp_ms()
         if fill_price is None:
-            order.status = OrderStatus.REJECTED
+            record_transition(
+                order, OrderStatus.REJECTED,
+                cause="local_reject", clock_ms=clock, source="local_paper",
+            )
             order.fill_price = None
             order.fill_time = None
             return order
 
-        order.status = OrderStatus.FILLED
+        record_transition(
+            order, OrderStatus.FILLED,
+            cause="local_match", clock_ms=clock, source="local_paper",
+        )
         order.fill_price = fill_price
-        order.fill_time = current_timestamp_ms()
+        order.fill_time = clock
         return order
 
     async def cancel(self, order_id: str, symbol: str | None = None) -> bool:
@@ -134,6 +146,8 @@ def paper_backtest_config() -> BacktestConfig:
 
 
 def create_market_data_service() -> MarketDataService:
+    from src.market.public_stream import OkxPublicCandleStream
+
     exchange = load_runtime_settings().exchange
     return MarketDataService(
         exchange.api_key,
@@ -141,6 +155,7 @@ def create_market_data_service() -> MarketDataService:
         exchange.passphrase,
         default_type=exchange.market_type,
         demo=exchange.demo,
+        public_stream=OkxPublicCandleStream(demo=exchange.demo),
     )
 
 
@@ -181,7 +196,10 @@ def resolve_order_router_mode(mode: object) -> str:
 
 
 def current_order_router_mode() -> str:
-    return resolve_order_router_mode(load_runtime_settings().mode)
+    mode = normalized_mode(load_runtime_settings().mode)
+    if mode == "demo":
+        return "live"
+    return resolve_order_router_mode(mode)
 
 
 def _opening_orders_paused(repository) -> Callable[[], bool]:
@@ -196,6 +214,22 @@ def _opening_orders_paused(repository) -> Callable[[], bool]:
             return True
 
     return paused
+
+
+def _record_strategy_runtime(name: str, state: str, owner: str) -> None:
+    try:
+        from src.ops.phase3_recovery import record_runtime_intent
+
+        record_runtime_intent(
+            Repository(),
+            name=name,
+            intended=state,
+            actual=state,
+            owner=owner,
+            updated_at=int(time.time() * 1000),
+        )
+    except Exception:
+        logger.exception("记录策略运行状态失败")
 
 
 def _release_strategy_execution_lease(name: str) -> None:
@@ -242,7 +276,7 @@ def create_order_manager(
 ) -> UnifiedOrderManager:
     settings = load_runtime_settings()
     resolved_mode = (
-        resolve_order_router_mode(settings.mode)
+        current_order_router_mode()
         if order_router_mode is _UNSET_ORDER_ROUTER_MODE
         else resolve_order_router_mode(order_router_mode)
     )
@@ -295,6 +329,17 @@ def create_order_manager(
             risk_event_notifier=on_risk_event,
         )
 
+    def _funding_scope() -> str | None:
+        try:
+            from src.web.api.allocations import allocation_context
+
+            _context, scope = allocation_context()
+        except Exception:
+            return None
+        if scope is None:
+            return None
+        return scope.scope_id
+
     return UnifiedOrderManager(
         router=router,
         repository=order_repository,
@@ -311,7 +356,9 @@ def create_order_manager(
         live_state_refresher=live_state_refresher if resolved_mode == "live" else None,
         post_live_order_sync=post_live_order_sync if resolved_mode == "live" else None,
         allow_live_open_orders=(
-            risk_config.allow_live_open_orders if resolved_mode == "live" else False
+            True
+            if normalized_mode(settings.mode) == "demo" and resolved_mode == "live"
+            else risk_config.allow_live_open_orders if resolved_mode == "live" else False
         ),
         live_max_order_notional=(
             risk_config.live_max_order_notional if resolved_mode == "live" else 0.0
@@ -321,7 +368,31 @@ def create_order_manager(
         opening_pause_checker=_opening_orders_paused(order_repository),
         price_observed_at_provider=price_observed_at,
         max_price_age_ms=risk_config.max_price_age_ms,
+        require_position_ownership=not (
+            normalized_mode(settings.mode) == "demo" and resolved_mode == "live"
+        ),
+        funding_environment=(
+            account_environment(settings.mode, settings.exchange.demo)
+            if resolved_mode == "live" else None
+        ),
+        funding_scope_id=_funding_scope if resolved_mode == "live" else None,
+        runtime_risk_checker=_stored_runtime_risk(order_repository),
     )
+
+
+def _stored_runtime_risk(repository):
+    def checker() -> str | None:
+        if repository is None:
+            return None
+        try:
+            from src.ops.phase4_controls import runtime_risk_reason
+
+            return runtime_risk_reason(repository)
+        except Exception:
+            logger.warning("读取运行风险失败", exc_info=True)
+            return None
+
+    return checker
 
 
 def create_strategy_registry() -> StrategyRegistry:
@@ -1338,6 +1409,19 @@ def create_router(
                     repository = Repository()
                     if kill_switch_engaged(repository):
                         raise HTTPException(status_code=423, detail="Kill switch engaged")
+                    from src.ops.phase3_recovery import resume_allowed
+
+                    if not resume_allowed(repository, name, lease_owner):
+                        raise HTTPException(
+                            status_code=409,
+                            detail={
+                                "code": "reconcile_required",
+                                "message": (
+                            "Runtime state must be reconciled before this strategy resumes"
+                        ),
+                                "reason_code": "reconcile_required",
+                            },
+                        )
                     acquire_lease = getattr(repository, "acquire_strategy_lease", None)
                     if callable(acquire_lease):
                         if not acquire_lease(name, lease_owner):
@@ -1351,7 +1435,12 @@ def create_router(
                             )
                         lease_acquired = True
                     strategy = create_strategy(name)
-                    if order_router_mode == "live" and not has_live_strategy_ownership_mapping(
+                    runtime_settings = load_runtime_settings()
+                    needs_live_ownership = (
+                        order_router_mode == "live"
+                        and normalized_mode(getattr(runtime_settings, "mode", "")) != "demo"
+                    )
+                    if needs_live_ownership and not has_live_strategy_ownership_mapping(
                         repository, name, strategy.symbol
                     ):
                         ownership_detail = {
@@ -1487,6 +1576,7 @@ def create_router(
                         runtime.strategy_status[name] = "running"
                         runtime.strategy_errors.pop(name, None)
                         await broadcast_status(name)
+                        _record_strategy_runtime(name, "running", lease_owner)
                         startup_finalized = True
                     finally:
                         if engine is not None and not startup_finalized:
@@ -1572,6 +1662,7 @@ def create_router(
                 await release_market_data_service_if_idle()
             runtime.strategy_status[name] = "stopped"
             await broadcast_status(name)
+            _record_strategy_runtime(name, "stopped", str(os.getpid()))
             _release_strategy_execution_lease(name)
         return {"status": "stopped", "strategy": name}
 

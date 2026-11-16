@@ -3395,20 +3395,41 @@ def test_create_order_manager_maps_paper_runtime_to_demo_router(monkeypatch):
     assert manager.post_live_order_sync is None
 
 
-def test_create_order_manager_maps_demo_runtime_to_safe_demo_router(monkeypatch):
+def test_create_order_manager_maps_demo_runtime_to_sandbox_adapter(monkeypatch):
     monkeypatch.setattr(
         strategy_api,
         "load_runtime_settings",
         lambda: AppConfig(mode="demo"),
     )
 
+    with pytest.raises(ValueError, match="Live trading requires OKX api_key"):
+        strategy_api.create_order_manager()
+
+    constructed: list[bool] = []
+
+    class SentinelAdapter(strategy_api.LocalPaperOrderHandler):
+        def __init__(self, api_key, secret, passphrase, demo=True):
+            constructed.append(bool(demo))
+
+    monkeypatch.setattr(
+        strategy_api,
+        "load_runtime_settings",
+        lambda: AppConfig(
+            mode="demo",
+            exchange=ExchangeConfig(
+                api_key="key", secret="secret", passphrase="pass", demo=False,
+            ),
+        ),
+    )
+    monkeypatch.setattr(strategy_api, "OKXSpotAdapter", SentinelAdapter)
+
     manager = strategy_api.create_order_manager()
 
-    assert manager.router.mode == "demo"
-    assert isinstance(manager.router.demo, strategy_api.LocalPaperOrderHandler)
-    assert manager.router.live is None
-    assert manager.router.backtest is None
-    assert manager.post_live_order_sync is None
+    assert manager.router.mode == "live"
+    assert constructed == [True]
+    assert manager.allow_live_open_orders is True
+    assert manager.require_position_ownership is False
+    assert manager.post_live_order_sync is not None
 
 
 def test_create_order_manager_maps_explicit_paper_to_demo_router(monkeypatch):
@@ -7211,7 +7232,10 @@ async def test_get_backtest_result_detail_returns_result_klines_and_markers(monk
 
     assert resp.status_code == 200
     data = resp.json()
-    assert set(data) == {"result", "klines", "markers", "equity_curve", "rejected_orders"}
+    assert set(data) == {
+        "result", "klines", "markers", "equity_curve", "rejected_orders", "manifest",
+    }
+    assert data["manifest"] is None
     assert data["equity_curve"] == []
     assert data["rejected_orders"] == []
     assert data["result"]["id"] == "bt-detail"

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import time
 from typing import Literal
 
 from fastapi import APIRouter
@@ -14,7 +16,10 @@ from src.core.config import (
     WebConfig,
 )
 from src.core.runtime_settings import load_runtime_settings, save_runtime_settings
+from src.data.repository import Repository
 from src.web.exchange_auth import probe_saved_exchange_auth
+
+logger = logging.getLogger(__name__)
 
 MarketType = Literal["spot", "swap", "future", "futures", "option", "options"]
 RuntimeMode = Literal["backtest", "paper", "demo", "live"]
@@ -92,7 +97,20 @@ def _merge_secret(current: str, incoming: str) -> str:
     return incoming
 
 
-def _serialize_settings(settings: SettingsUpdate) -> dict[str, object]:
+def _fingerprint(settings: SettingsUpdate) -> dict[str, object]:
+    return {
+        "mode": settings.mode,
+        "market_type": settings.exchange.market_type,
+        "demo": settings.exchange.demo,
+        "web_host": settings.web.host,
+        "web_port": settings.web.port,
+        "risk": settings.risk.max_daily_loss_pct,
+    }
+
+
+def _serialize_settings(
+    settings: SettingsUpdate, config_apply: str = "effective",
+) -> dict[str, object]:
     return {
         "mode": settings.mode,
         "exchange": {
@@ -113,6 +131,7 @@ def _serialize_settings(settings: SettingsUpdate) -> dict[str, object]:
             "telegram_chat_id": settings.notify.telegram_chat_id,
         },
         "web": settings.web.model_dump(),
+        "config_apply": config_apply,
     }
 
 
@@ -189,10 +208,18 @@ def _save_settings(settings: SettingsUpdate) -> None:
 def create_router(broadcast=None) -> APIRouter:
     router = APIRouter()
     settings = _load_settings()
+    startup_fingerprint = _fingerprint(settings)
 
     @router.get("")
     async def get_settings() -> dict[str, object]:
-        return _serialize_settings(settings)
+        from src.ops.phase4_controls import config_state
+
+        try:
+            apply_state = config_state(Repository())
+        except Exception:
+            logger.warning("读取配置生效状态失败", exc_info=True)
+            apply_state = "effective"
+        return _serialize_settings(settings, apply_state)
 
     @router.post("/exchange-auth")
     async def exchange_auth(
@@ -228,8 +255,17 @@ def create_router(broadcast=None) -> APIRouter:
         settings.notify.telegram_chat_id = update.notify.telegram_chat_id
         settings.web = update.web
         _save_settings(settings)
+        from src.ops.phase4_controls import classify_config, record_config_state
+
+        apply_state = classify_config(
+            startup_fingerprint, _fingerprint(settings), applied=True,
+        )
+        try:
+            record_config_state(Repository(), apply_state, int(time.time() * 1000))
+        except Exception:
+            logger.warning("记录配置生效状态失败", exc_info=True)
         if broadcast is not None:
             await broadcast({"type": "context_changed"})
-        return _serialize_settings(settings)
+        return _serialize_settings(settings, apply_state)
 
     return router

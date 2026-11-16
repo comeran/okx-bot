@@ -5,10 +5,12 @@ import math
 from dataclasses import dataclass, field
 from typing import Any
 
+from src.backtest.manifest import annualized_return
 from src.backtest.matcher import OrderMatcher
 from src.backtest.report import BacktestReport, generate_report
 from src.core.types import Bar, Order, OrderSide, OrderStatus, OrderType, Position, PositionSide
 from src.exchange.base import canonical_symbol, is_supported_canonical_symbol
+from src.order.lifecycle import record_transition
 from src.risk.manager import RiskManager
 
 
@@ -43,6 +45,7 @@ class BacktestOrderManager:
         *,
         strategy_name: str = "",
         symbol: str | None = None,
+        allow_multiple: bool = False,
     ) -> None:
         self._next_id = 0
         self._submitted: list[Order] = []
@@ -50,6 +53,7 @@ class BacktestOrderManager:
         self._portfolio = portfolio if portfolio is not None else _Portfolio(cash=0)
         self._strategy_name = strategy_name
         self._symbol = symbol
+        self._allow_multiple = allow_multiple
 
     async def submit(
         self,
@@ -85,7 +89,10 @@ class BacktestOrderManager:
             or (symbol is not None and order.symbol != symbol)
         ):
             return False
-        order.status = OrderStatus.CANCELLED
+        record_transition(
+            order, OrderStatus.CANCELLED,
+            cause="research_cancel", clock_ms=0, source="research_matcher",
+        )
         self._submitted = [item for item in self._submitted if item is not order]
         return True
 
@@ -99,6 +106,9 @@ class BacktestOrderManager:
 
     def bind_symbol(self, symbol: str) -> None:
         normalized = spot_backtest_symbol(symbol)
+        if self._allow_multiple:
+            self._symbol = normalized
+            return
         if self._symbol is not None and self._symbol != normalized:
             raise ValueError("backtest supports a single spot symbol only")
         self._symbol = normalized
@@ -221,14 +231,19 @@ class BacktestEngine:
         self, initial_capital: float, matcher: OrderMatcher, *,
         market_type: str = "spot", symbol: str | None = None,
         risk_manager: RiskManager | None = None,
+        allocation_budget: float | None = None,
     ) -> None:
         if market_type != "spot":
             raise ValueError("backtest supports the unleveraged spot model only")
         if not _finite_number(initial_capital, positive=True):
             raise ValueError("initial_capital must be positive and finite")
+        if allocation_budget is not None and not _finite_number(allocation_budget, positive=False):
+            raise ValueError("allocation_budget must be finite")
         self.initial_capital = initial_capital
         self.matcher = matcher
         self.risk_manager = risk_manager
+        self.allocation_budget = allocation_budget
+        self._allocated_notional = 0.0
         self.symbol = spot_backtest_symbol(symbol) if symbol is not None else None
 
     async def run(self, strategy: Any, bars: list[Bar]) -> BacktestReport:
@@ -281,7 +296,10 @@ class BacktestEngine:
                             strategy, order, reason, bar.timestamp, rejected
                         )
                         continue
-                    order.status = OrderStatus.FILLED
+                    record_transition(
+                        order, OrderStatus.FILLED,
+                        cause="research_match", clock_ms=bar.timestamp, source="research_matcher",
+                    )
                     order.fill_price = match.fill_price
                     order.fill_time = bar.timestamp
                     order.filled_amount = order.amount
@@ -289,6 +307,7 @@ class BacktestEngine:
                     realized = portfolio.apply_fill(
                         order.side, order.amount, match.fill_price, match.fee
                     )
+                    self._release_allocation(order.side, order.amount, match.fill_price)
                     trades.append(
                         {
                             "symbol": order.symbol,
@@ -327,6 +346,12 @@ class BacktestEngine:
                             strategy, order, str(exc), bar.timestamp, rejected
                         )
                         continue
+                    allocation_reason = self._allocation_rejection(order, bar.close)
+                    if allocation_reason is not None:
+                        await self._reject_order(
+                            strategy, order, allocation_reason, bar.timestamp, rejected
+                        )
+                        continue
                     risk_reason = self._risk_rejection(
                         portfolio,
                         order,
@@ -340,6 +365,7 @@ class BacktestEngine:
                             strategy, order, risk_reason, bar.timestamp, rejected
                         )
                         continue
+                    self._reserve_allocation(order, bar.close)
                     order_manager.track_order(order)
                     pending.append(order)
 
@@ -350,9 +376,30 @@ class BacktestEngine:
             round_trip_pnls=portfolio.round_trip_pnls,
             bars_per_year=_bars_per_year(bars),
         )
+        elapsed = 0
+        if len(equity_timestamps) > 1:
+            elapsed = equity_timestamps[-1] - equity_timestamps[0]
+        report.annualized_return = annualized_return(
+            equity_curve[0] if equity_curve else self.initial_capital,
+            report.final_equity,
+            elapsed,
+        )
         report.equity_timestamps = equity_timestamps
         report.rejected_orders = rejected
         return report
+
+    async def run_portfolio(
+        self,
+        strategy: Any,
+        bars_by_symbol: dict[str, list[Bar]],
+        *,
+        contracts: dict[str, Any] | None = None,
+    ) -> BacktestReport:
+        from src.backtest.portfolio import run_portfolio
+
+        return await run_portfolio(
+            self, strategy, bars_by_symbol, contracts=contracts,
+        )
 
     def _risk_rejection(
         self,
@@ -387,6 +434,27 @@ class BacktestEngine:
         )
         return None if result.passed else result.reason
 
+    def _allocation_rejection(self, order: Order, mark_price: float) -> str | None:
+        if self.allocation_budget is None or order.side != OrderSide.BUY:
+            return None
+        price = order.price if order.price is not None else mark_price
+        if not _finite_number(price, positive=True):
+            return "Allocation budget exceeded"
+        if self._allocated_notional + order.amount * price > self.allocation_budget + 1e-8:
+            return "Allocation budget exceeded"
+        return None
+
+    def _reserve_allocation(self, order: Order, mark_price: float) -> None:
+        if self.allocation_budget is None or order.side != OrderSide.BUY:
+            return
+        price = order.price if order.price is not None else mark_price
+        self._allocated_notional += order.amount * price
+
+    def _release_allocation(self, side: OrderSide, amount: float, price: float) -> None:
+        if self.allocation_budget is None or side != OrderSide.SELL:
+            return
+        self._allocated_notional = max(0.0, self._allocated_notional - amount * price)
+
     async def _reject_order(
         self,
         strategy: Any,
@@ -395,7 +463,10 @@ class BacktestEngine:
         timestamp: int,
         rejected: list[dict[str, Any]],
     ) -> None:
-        order.status = OrderStatus.REJECTED
+        record_transition(
+            order, OrderStatus.REJECTED,
+            cause="research_reject", clock_ms=timestamp, source="research_matcher",
+        )
         order.fill_price = None
         order.fill_time = None
         order.filled_amount = 0
