@@ -1,0 +1,49 @@
+src/data/repository.py
+  s_3e7081b93657e6::t_d83e1d9b5ed31b 2009-2011
+scripts/sandbox_phase6_acceptance.py
+  s_3e7081b93657e6::t_5dd2b46bf2f9eb 1-6,8-65,67-85
+  s_3e7081b93657e6::t_5ada407d952e71 7
+  s_3e7081b93657e6::t_49c63c11e3c514 66
+docs/superpowers/plans/2026-11-11-quant-system-roadmap.md
+  s_3e7081b93657e6::t_d77ac767032e0b 113
+  s_3e7081b93657e6::t_9f314192746e00 118
+  s_3e7081b93657e6::t_7aff6b1e60cdd0 111-112,117
+tests/unit/test_phase6_release.py
+  s_3e7081b93657e6::t_84351985ee0d7f 7-8
+  s_3e7081b93657e6::t_90d9abb208162c 94-96
+  s_3e7081b93657e6::t_41e5b19d419351 1-6,9-65,70-93,97-126
+  s_3e7081b93657e6::t_c045a4d0e847e9 66-69
+src/ops/sandbox_acceptance.py
+  s_3e7081b93657e6::t_9722b737bac746 129-133
+  s_3e7081b93657e6::t_c7b1ad8f6483cc 166-170
+  s_3e7081b93657e6::t_d49dc598ab8c23 95-97
+  s_3e7081b93657e6::t_2e46defc8dff79 58-60
+  s_3e7081b93657e6::t_3ede95774c17e0 144-148
+  s_3e7081b93657e6::t_802d3c5f7e1be2 1-57,61-94,98-128,134-143,149-165,171-333
+tests/unit/test_sandbox_acceptance.py
+  s_3e7081b93657e6::t_55b916c09e112c 57
+  s_3e7081b93657e6::t_03a8534771bc68 1-56,58-91
+src/ops/phase6_release.py
+  s_3e7081b93657e6::t_4de5c913191c49 173-174
+  s_3e7081b93657e6::t_aab9686cfe0736 201-202,204-205
+  s_3e7081b93657e6::t_3d851e4b9deaf1 1-172,175-200,203,206-232
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "15cd0c72738e7f74f38b87bb2a1ef92075260413",
+  "prompts": {},
+  "logical_commit_id": "15cd0c72738e7f74f38b87bb2a1ef92075260413",
+  "sessions": {
+    "s_3e7081b93657e6": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "74e436f8-716d-49ee-b50c-aaff8b39f104",
+        "model": "grok-4.7"
+      },
+      "human_author": "Zane <zane@bigo.sg>",
+      "total_additions": 7160,
+      "total_deletions": 344
+    }
+  }
+}
