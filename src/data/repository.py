@@ -2006,6 +2006,9 @@ class Repository:
             ensure_recovery_tables(engine)
             ensure_control_tables(engine)
             ensure_research_tables(engine)
+            from src.ops.phase6_release import apply_migrations
+
+            apply_migrations(engine=engine)
             self._ensure_runtime_tables(engine)
             if migration_key is not None:
                 Repository._MIGRATED_SQLITE_DATABASES.add(migration_key)
