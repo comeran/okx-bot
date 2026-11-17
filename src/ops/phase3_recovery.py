@@ -1,6 +1,6 @@
 """有限重试的私有同步、未知单身份解释，以及重启前的运行状态核对。
 
-默认不访问交易所。同步函数由调用方注入。解释未知单只更新已有订单，不会另下一笔。
+纸面和回测不访问交易所。模拟盘和实盘只读余额或按客户单号核对已有订单，不会另下一笔。
 """
 
 from __future__ import annotations
@@ -14,6 +14,8 @@ from collections.abc import Callable
 from sqlalchemy import text
 
 from src.data.models import OrderRecord
+from src.exchange.base import canonical_symbol
+from src.exchange.markets import market_type_for_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -297,6 +299,117 @@ def resume_allowed(repository, name: str, owner: str) -> bool:
     from src.ops.lifecycle import unresolved_live_order_ids
 
     return not unresolved_live_order_ids(repository)
+
+
+def default_private_fetch(loader=None, factory=None):
+    """纸面和回测不连交易所。模拟盘和实盘只读余额，不下单。"""
+    load = loader or _load_settings
+    build = factory or _sync_exchange
+
+    def fetch() -> dict[str, object]:
+        settings = load()
+        mode = str(getattr(settings, "mode", "") or "").strip().lower()
+        now = int(time.time() * 1000)
+        if mode not in {"demo", "live"}:
+            return {"observed_at": now, "cursor_ms": None, "complete": False}
+        client = build(settings)
+        try:
+            header = str((getattr(client, "headers", {}) or {}).get("x-simulated-trading", ""))
+            if mode == "demo" and header != "1":
+                raise RuntimeError("simulated header missing")
+            if mode == "live" and header == "1":
+                raise RuntimeError("live client is simulated")
+            client.fetch_balance()
+        finally:
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
+        return {"observed_at": now, "cursor_ms": now, "complete": False}
+
+    return fetch
+
+
+def _load_settings():
+    from src.core.runtime_settings import load_runtime_settings
+
+    return load_runtime_settings()
+
+
+def _sync_exchange(settings):
+    import ccxt
+
+    from src.core.execution_mode import adapter_uses_sandbox
+
+    exchange = settings.exchange
+    client = ccxt.okx({
+        "apiKey": exchange.api_key,
+        "secret": exchange.secret,
+        "password": exchange.passphrase,
+        "options": {"defaultType": "spot"},
+    })
+    if adapter_uses_sandbox(settings.mode, bool(exchange.demo)):
+        client.set_sandbox_mode(True)
+    return client
+
+
+def build_live_identity_lookup(settings, repository, factory=None):
+    """用客户单号向交易所核对已有订单。查不到就抛出，保持拦截。"""
+    build = factory or _sync_exchange
+
+    def lookup(client_order_id: str) -> dict[str, object]:
+        matches = [
+            order for order in repository.get_orders()
+            if str(getattr(order, "client_order_id", "") or "") == client_order_id
+        ]
+        if len(matches) != 1:
+            raise RuntimeError("local order is not unique")
+        client = build(settings)
+        try:
+            mode = str(getattr(settings, "mode", "") or "").strip().lower()
+            header = str((getattr(client, "headers", {}) or {}).get("x-simulated-trading", ""))
+            if mode == "demo" and header != "1":
+                raise RuntimeError("simulated header missing")
+            if mode == "live" and header == "1":
+                raise RuntimeError("live client is simulated")
+            stored_symbol = str(getattr(matches[0], "symbol", "") or "")
+            market = market_type_for_symbol(stored_symbol)
+            symbol = canonical_symbol(stored_symbol, market_type=market)
+            if market == "spot":
+                symbol = symbol.replace("-", "/")
+            options = getattr(client, "options", None)
+            if isinstance(options, dict):
+                options["defaultType"] = market
+            found = client.fetch_order(
+                client_order_id,
+                symbol,
+                {"clOrdId": client_order_id},
+            )
+        finally:
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
+        if not isinstance(found, dict):
+            raise RuntimeError("exchange order was not found")
+        reported = str(found.get("status") or "").lower()
+        filled = float(found.get("filled") or 0)
+        status = {
+            "closed": "filled",
+            "filled": "filled",
+            "canceled": "cancelled",
+            "cancelled": "cancelled",
+            "rejected": "rejected",
+            "open": "partially_filled" if filled else "pending",
+            "pending": "pending",
+        }.get(reported)
+        if status is None:
+            raise RuntimeError("exchange status is unknown")
+        return {
+            "status": status,
+            "filled_amount": filled,
+            "exchange_order_id": str(found.get("id") or ""),
+        }
+
+    return lookup
 
 
 async def sync_forever(

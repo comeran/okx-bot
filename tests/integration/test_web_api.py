@@ -672,6 +672,7 @@ async def test_registered_builtin_types_are_not_implicit_runtime_strategies(app)
         "rsi_mean_reversion",
         "bollinger_mean_reversion",
         "donchian_breakout",
+        "rule",
     ]
 
     transport = ASGITransport(app=app)
@@ -805,7 +806,7 @@ async def test_strategy_config_api_saves_and_lists_configs(monkeypatch):
         "strategy_type": "ma_cross",
         "symbol": "BTC-USDT",
         "timeframe": "1h",
-        "params": {"fast_window": 5, "slow_window": 20, "amount": 0.1},
+        "params": {"fast_window": 5, "slow_window": 20, "amount": 0.0001},
         "enabled": True,
         "created_at": 1700000000000,
         "updated_at": 1700000000000,
@@ -984,7 +985,7 @@ async def test_strategy_config_crud_clone_validate_and_yaml_use_normalized_confi
     assert duplicate_resp.status_code == 409
     assert get_resp.status_code == 200
     assert update_resp.status_code == 200
-    assert update_resp.json()["params"] == {"fast_window": 6, "slow_window": 20, "amount": 0.1}
+    assert update_resp.json()["params"] == {"fast_window": 6, "slow_window": 20, "amount": 0.0001}
     assert clone_resp.status_code == 201
     assert clone_resp.json()["name"] == "ma_cross_clone"
     assert clone_resp.json()["enabled"] is False
@@ -1321,7 +1322,7 @@ async def test_clone_config_to_different_strategy_type_without_params_uses_targe
         "period": 14,
         "oversold": 30,
         "overbought": 70,
-        "amount": 0.1,
+        "amount": 0.0001,
     }
     transport = ASGITransport(app=app)
 
@@ -7767,7 +7768,6 @@ async def test_get_and_update_settings(app):
         "secret_set": True,
         "passphrase": "",
         "passphrase_set": True,
-        "market_type": "spot",
         "demo": True,
     }
     assert saved["backtest"]["initial_capital"] == 250000
@@ -7818,7 +7818,6 @@ async def test_settings_defaults_load_project_config_environment(monkeypatch):
         "secret_set": True,
         "passphrase": "",
         "passphrase_set": True,
-        "market_type": "spot",
         "demo": True,
     }
     assert settings["notify"] == {
@@ -7872,7 +7871,6 @@ async def test_settings_round_trip_keeps_existing_secrets(tmp_path, monkeypatch)
         "api_key": "real-api-key",
         "secret": "real-secret-value",
         "passphrase": "real-passphrase",
-        "market_type": "spot",
         "demo": True,
     }
     assert persisted["notify"] == {
@@ -7937,7 +7935,6 @@ async def test_settings_persist_across_app_instances(tmp_path, monkeypatch):
         "secret_set": True,
         "passphrase": "",
         "passphrase_set": True,
-        "market_type": "spot",
         "demo": True,
     }
     assert saved["backtest"]["initial_capital"] == 300000
@@ -7957,7 +7954,6 @@ async def test_settings_persist_across_app_instances(tmp_path, monkeypatch):
     "payload",
     [
         {"mode": "turbo"},
-        {"exchange": {"market_type": "futures2"}},
         {"backtest": {"initial_capital": 0}},
         {"risk": {"max_daily_loss_pct": -0.1}},
         {"web": {"host": "127.0.0.1", "port": 70000}},

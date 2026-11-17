@@ -16,7 +16,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from src.core.config import AppConfig
 from src.core.execution_mode import account_environment
-from src.core.execution_scope import build_execution_context
+from src.core.execution_scope import build_execution_context, tradable_market
 from src.core.runtime_settings import load_runtime_settings
 from src.data.allocations import (
     AllocationConflict,
@@ -24,7 +24,7 @@ from src.data.allocations import (
     AllocationNotFound,
     AllocationScope,
     AllocationStore,
-    spot_symbol,
+    instrument_symbol,
 )
 from src.data.exchange_store import ExchangeStoreError
 from src.data.funded_allocation import (
@@ -38,6 +38,7 @@ from src.data.models import EXCHANGE_STRATEGY
 from src.data.paper_book import PaperBook, PaperBookError, PaperBookNotFound
 from src.data.pnl import strategy_realized_pnl
 from src.data.repository import Repository
+from src.exchange.markets import market_type_for_symbol
 from src.ops.allocation_readiness import build_allocation_readiness
 from src.strategy.definitions import StrategyConfigValidationError
 from src.web.api.strategies import StrategyRuntimeState
@@ -59,30 +60,34 @@ class ReservationRequest(BaseModel):
     expected_revision: Annotated[int, Field(strict=True, ge=0)]
     expected_scope_id: Annotated[str, Field(strict=True, min_length=1, max_length=128)]
     expected_symbol: Annotated[str, Field(strict=True, min_length=1, max_length=128)]
+    acknowledge_budget: bool = False
 
 
 def allocation_context(
     settings: AppConfig | None = None,
+    market_type: str | None = None,
 ) -> tuple[dict[str, object], AllocationScope | None]:
     settings = settings if settings is not None else load_runtime_settings()
     exchange = settings.exchange
     environment = account_environment(settings.mode, exchange.demo)
-    market_type = exchange.market_type.strip().lower()
+    requested_market = "spot" if market_type is None else market_type
+    market = tradable_market(requested_market)
+    shown = market if market is not None else requested_market.strip().lower()
     configured = all(
         isinstance(value, str) and value.strip()
         for value in (exchange.api_key, exchange.secret, exchange.passphrase)
     )
     reason = (
         "credentials_unavailable" if not configured
-        else "unsupported_market" if market_type != "spot"
+        else "unsupported_market" if market is None
         else None
     )
     scope = None
-    if reason is None:
+    if reason is None and market is not None:
         scope = AllocationScope(
             account_fingerprint=hashlib.sha256(exchange.api_key.strip().encode()).hexdigest(),
             environment=environment,
-            market_type=market_type,
+            market_type=market,
         )
     return {
         "available": scope is not None,
@@ -92,7 +97,7 @@ def allocation_context(
         "environment": environment,
         "account_fingerprint": scope.account_fingerprint if scope is not None else None,
         "identity_verified": False,
-        "market_type": market_type,
+        "market_type": shown,
         # The configured execution mode is independent of the exchange environment.
         "execution_mode": settings.mode,
         "draft_only": True,
@@ -113,7 +118,7 @@ def create_router(runtime: StrategyRuntimeState) -> APIRouter:
     store = AllocationStore(repository.engine)
     book = PaperBook(repository.engine)
 
-    def strategy_symbol(name: str) -> tuple[str, str]:
+    def strategy_symbol(name: str, settings: AppConfig | None = None) -> tuple[str, str]:
         config = repository.get_strategy_config(name)
         try:
             if config is not None:
@@ -125,9 +130,11 @@ def create_router(runtime: StrategyRuntimeState) -> APIRouter:
                 strategy = runtime.registry.create(name)
             else:
                 raise _error(404, "strategy_not_found", "Strategy not found")
-            return spot_symbol(strategy.symbol)
+            return instrument_symbol(strategy.symbol, market_type_for_symbol(strategy.symbol))
         except (KeyError, StrategyConfigValidationError, ValueError) as exc:
-            raise _error(422, "unsupported_strategy", "A valid spot strategy is required") from exc
+            raise _error(
+                422, "unsupported_strategy", "A supported instrument for this account is required",
+            ) from exc
 
     def lifecycle_status(name: str) -> str:
         if name in runtime.starting_engines:
@@ -137,9 +144,9 @@ def create_router(runtime: StrategyRuntimeState) -> APIRouter:
         return runtime.strategy_status.get(name, "unknown")
 
     def envelope(name: str) -> dict[str, object]:
-        symbol, currency = strategy_symbol(name)
         settings = deepcopy(load_runtime_settings())
-        context, scope = allocation_context(settings)
+        symbol, currency = strategy_symbol(name, settings)
+        context, scope = allocation_context(settings, market_type=market_type_for_symbol(symbol))
         execution_context, _ = build_execution_context(settings.exchange)
         status = lifecycle_status(name)
         draft = store.get_draft(scope, name) if scope is not None else None
@@ -165,19 +172,22 @@ def create_router(runtime: StrategyRuntimeState) -> APIRouter:
     ) -> AllocationScope:
         if lifecycle_status(name) != "stopped":
             raise _error(409, "strategy_not_stopped", "Strategy must be stopped to edit drafts")
-        _, scope = allocation_context()
+        market = market_type_for_symbol(symbol)
+        _, scope = allocation_context(market_type=market)
         if scope is None:
             raise _error(
-                409, "context_unavailable", "Configured spot account context is unavailable",
+                409, "context_unavailable", "Configured account context is unavailable",
             )
         if scope.scope_id != expected_scope_id:
             raise _error(
                 409, "allocation_scope_changed", "Account context changed; reload the draft",
             )
         try:
-            loaded_symbol, _ = spot_symbol(expected_symbol)
+            loaded_symbol, _ = instrument_symbol(expected_symbol, market)
         except ValueError as exc:
-            raise _error(422, "invalid_symbol", "A spot symbol precondition is required") from exc
+            raise _error(
+                422, "invalid_symbol", "A matching instrument precondition is required",
+            ) from exc
         if loaded_symbol != symbol:
             raise _error(
                 409, "allocation_symbol_changed", "Strategy symbol changed; reload the draft",
@@ -214,8 +224,8 @@ def create_router(runtime: StrategyRuntimeState) -> APIRouter:
             raise _error(409, exc.code, str(exc)) from exc
 
     @router.get("/context")
-    def context() -> dict[str, object]:
-        return allocation_context()[0]
+    def context(market_type: str | None = None) -> dict[str, object]:
+        return allocation_context(market_type=market_type)[0]
 
     def readiness_draft(
         drafts: list[AllocationDraft], name: str, symbol: str, expected_revision: int,
@@ -242,7 +252,8 @@ def create_router(runtime: StrategyRuntimeState) -> APIRouter:
         async with runtime.lifecycle_lock(strategy):
             settings = deepcopy(load_runtime_settings())
             symbol, _ = strategy_symbol(strategy)
-            _, scope = allocation_context(settings)
+            market = market_type_for_symbol(symbol)
+            _, scope = allocation_context(settings, market_type=market)
             bound = bind_exchange_store(
                 settings.exchange, repository, expected_account_scope_id, require_available=True,
             )
@@ -255,7 +266,7 @@ def create_router(runtime: StrategyRuntimeState) -> APIRouter:
                     409, "allocation_scope_changed", "Account context changed; reload the draft",
                 )
             try:
-                loaded_symbol, _ = spot_symbol(expected_symbol)
+                loaded_symbol, _ = instrument_symbol(expected_symbol, market)
             except ValueError as exc:
                 raise _error(
                     422, "invalid_symbol", "A spot symbol precondition is required",
@@ -363,6 +374,10 @@ def create_router(runtime: StrategyRuntimeState) -> APIRouter:
             scope = mutable_scope(
                 strategy, payload.expected_scope_id, payload.expected_symbol, symbol,
             )
+            if scope.market_type != "spot":
+                raise _error(
+                    409, "paper_spot_only", "Local paper reservations require a spot instrument",
+                )
             try:
                 book.activate(
                     scope.scope_id,
@@ -389,6 +404,10 @@ def create_router(runtime: StrategyRuntimeState) -> APIRouter:
             scope = mutable_scope(
                 strategy, payload.expected_scope_id, payload.expected_symbol, symbol,
             )
+            if scope.market_type != "spot":
+                raise _error(
+                    409, "paper_spot_only", "Local paper reservations require a spot instrument",
+                )
             try:
                 book.release(
                     scope.scope_id,
@@ -425,13 +444,27 @@ def create_router(runtime: StrategyRuntimeState) -> APIRouter:
             if draft.revision != payload.expected_revision:
                 raise _error(409, "revision_conflict", "Reload the draft and retry")
             environment = "live" if mode == "live" else "sandbox"
-            settings = load_runtime_settings()
-            # 可信预检通过才拨款。实盘开仓仍由 allow_live_open_orders 关掉。
-            facts = await load_trusted_activation_facts(
-                symbol=symbol,
-                scope_id=scope.scope_id,
-                budget=_budget_text(draft.budget),
-            )
+            market = market_type_for_symbol(symbol)
+            if payload.acknowledge_budget:
+                try:
+                    available = Decimal(str(await fetch_exchange_available()))
+                except Exception as exc:
+                    raise _error(
+                        409, "balance_unavailable", "Exchange balance could not be read",
+                    ) from exc
+                facts = TrustedActivationFacts(
+                    available_quote=available,
+                    observed_at=int(time.time() * 1000),
+                    preflight_passed=True,
+                    market_type=market,
+                    account_scope_id=scope.scope_id,
+                )
+            else:
+                facts = await load_trusted_activation_facts(
+                    symbol=symbol,
+                    scope_id=scope.scope_id,
+                    budget=_budget_text(draft.budget),
+                )
             try:
                 activate_funded_allocation(
                     repository,
@@ -443,7 +476,7 @@ def create_router(runtime: StrategyRuntimeState) -> APIRouter:
                     revision=draft.revision,
                     facts=facts,
                     now_ms=int(time.time() * 1000),
-                    market_type=settings.exchange.market_type,
+                    market_type=market,
                 )
             except FundingError as exc:
                 raise _error(409, exc.code, str(exc)) from exc
@@ -464,7 +497,7 @@ async def load_trusted_activation_facts(
 ) -> TrustedActivationFacts:
     """只接受已保存且全部通过的现货预检。测试会替换这个函数。"""
     settings = load_runtime_settings()
-    market = settings.exchange.market_type.strip().lower() or "spot"
+    market = market_type_for_symbol(symbol)
     try:
         from src.ops.spot_preflight_evidence import build_stored_spot_preflight
         from src.web.exchange_context import bind_exchange_store

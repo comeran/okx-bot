@@ -52,6 +52,17 @@ async function flush(wrapper: Awaited<ReturnType<typeof setup>>['wrapper']) {
 }
 beforeEach(() => { vi.resetAllMocks(); api.readiness.mockResolvedValue(result()); });
 describe('saved allocation readiness', () => {
+  it('evaluates a spot allocation under a shared all-market account', async () => {
+    const { wrapper, store } = await setup();
+    api.readiness.mockClear();
+    store.context = { ...context(), market_type: 'all' };
+    await flush(wrapper);
+    expect(api.readiness).toHaveBeenCalledWith('alpha', {
+      expected_account_scope_id: 'account-a', expected_scope_id: 'allocation-a', expected_revision: 2, expected_symbol: 'BTC-USDT',
+    });
+    expect(wrapper.text()).toContain('100.000000000000000001');
+    wrapper.unmount();
+  });
   it('requests saved preconditions and renders exact strings without an activation action', async () => {
     const { wrapper } = await setup();
     expect(api.readiness).toHaveBeenCalledWith('alpha', {

@@ -42,3 +42,11 @@ class OrderRouter:
 
     async def cancel(self, order_id: str, symbol: str | None = None) -> Any:
         return await self._get_handler().cancel(order_id, symbol)
+
+    async def amend(self, order_id: str, symbol: str | None, price: float) -> Any:
+        """有交易所改价接口时转发。纸面通道只回传新价格。"""
+        handler = self._get_handler()
+        editor = getattr(handler, "amend", None)
+        if not callable(editor):
+            return {"id": order_id, "price": price, "status": "open"}
+        return await editor(order_id, symbol, price)

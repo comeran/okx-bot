@@ -99,10 +99,11 @@ def activate_funded_allocation(
     max_age_ms: int = 30_000,
 ) -> StrategyBook:
     """校验新鲜预检后，在一个事务里写入独占现货资金。"""
-    if (
-        str(market_type).strip().lower() != "spot"
-        or str(facts.market_type).strip().lower() != "spot"
-    ):
+    from src.core.execution_scope import tradable_market
+
+    market = tradable_market(market_type)
+    fact_market = tradable_market(facts.market_type)
+    if market is None or fact_market != market:
         raise FundingError(
             "derivative_activation_closed",
             "Derivatives need their own account and risk design before activation",
@@ -150,11 +151,11 @@ def activate_funded_allocation(
             "Exchange quote balance does not cover the draft budget",
         )
     try:
-        normalized = canonical_symbol(symbol, market_type="spot")
+        normalized = canonical_symbol(symbol, market_type=market)
     except ValueError as exc:
-        raise FundingError("invalid_symbol", "A spot symbol is required") from exc
-    if not is_supported_canonical_symbol(normalized, market_type="spot"):
-        raise FundingError("invalid_symbol", "A spot symbol is required")
+        raise FundingError("invalid_symbol", "A supported instrument is required") from exc
+    if not is_supported_canonical_symbol(normalized, market_type=market):
+        raise FundingError("invalid_symbol", "A supported instrument is required")
     ensure_funded_tables(repository.engine)
     with repository.engine.begin() as connection:
         existing = _book_row(connection, scope_id, strategy, environment)

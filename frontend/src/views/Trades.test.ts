@@ -1,9 +1,15 @@
 import { defineComponent, h, reactive } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { defineHostComponent, mount, textContent } from '@/test-utils/mount';
 import type { TradeRecord } from '@/types/trades';
+
+vi.mock('element-plus', () => ({ ElMessage: { success: vi.fn(), error: vi.fn(), warning: vi.fn() } }));
+
+const marketApi = vi.hoisted(() => ({ fetchTickers: vi.fn() }));
+const tradingApi = vi.hoisted(() => ({ submit: vi.fn() }));
+vi.mock('@/services/market', () => ({ fetchTickers: marketApi.fetchTickers }));
 
 const fetchTradesMock = vi.hoisted(() => ({
   fetchTrades: vi.fn(),
@@ -11,6 +17,13 @@ const fetchTradesMock = vi.hoisted(() => ({
 
 vi.mock('@/services/trades', () => ({
   fetchTrades: fetchTradesMock.fetchTrades,
+}));
+
+vi.mock('@/services/trading', () => ({
+  fetchTradingOrders: vi.fn().mockResolvedValue([]),
+  submitManualOrder: tradingApi.submit,
+  cancelTradingOrder: vi.fn(),
+  amendTradingOrder: vi.fn(),
 }));
 
 vi.mock('@/components/trades/TradeFilters.vue', () => ({
@@ -57,12 +70,10 @@ vi.mock('@/components/trades/TradesTable.vue', () => ({
   }),
 }));
 
+const testContext = { available: true, account_scope_id: 'scope-A', environment: 'sandbox' as const, exchange: 'okx' as const, market_type: 'all', identity_verified: false as const, execution_ready: false as const, reason: null };
 const authority = reactive({
   epoch: 1,
-  context: { available: true, account_scope_id: 'scope-A' } as {
-    available: boolean;
-    account_scope_id: string;
-  } | null,
+  context: { ...testContext } as typeof testContext | null,
   loading: false,
   error: null,
   ensure: async () => authority.context,
@@ -94,15 +105,67 @@ const firstTrades: TradeRecord[] = [
   },
 ];
 
+const ticketWrappers: Awaited<ReturnType<typeof mount>>[] = [];
+async function mountTicket() {
+  const wrapper = await mount(TradesView, { locale: 'en', components });
+  ticketWrappers.push(wrapper);
+  return wrapper;
+}
+
 const components = {
+  ElSelect: defineHostComponent('el-select'),
+  ElOption: defineHostComponent('el-option'),
   ElButton: defineHostComponent('el-button'),
 };
 
 describe('Trades view', () => {
+  afterEach(() => { ticketWrappers.splice(0).forEach((wrapper) => wrapper.unmount()); vi.unstubAllGlobals(); });
+  it('clears the ticket instrument on market change and submits the explicit selected market', async () => {
+    const wrapper = await mountTicket();
+    await wrapper.flush();
+    await wrapper.invoke(wrapper.getByTestId('manual-market-type'), 'onUpdate:modelValue', 'swap');
+    expect(wrapper.getByTestId('manual-symbol').props.modelValue).toBe('');
+    expect(marketApi.fetchTickers).toHaveBeenLastCalledWith('swap');
+    await wrapper.invoke(wrapper.getByTestId('manual-symbol'), 'onUpdate:modelValue', 'ETH/USDT:USDT');
+    await wrapper.invoke(wrapper.getByTestId('manual-price'), 'onUpdate:modelValue', '3000');
+    await wrapper.trigger(wrapper.find((node) => node.type === 'form'), 'submit');
+    expect(tradingApi.submit).toHaveBeenCalledWith({
+      symbol: 'ETH/USDT:USDT', market_type: 'swap', side: 'buy', order_type: 'limit', amount: 0.0001, price: 3000,
+    });
+    wrapper.unmount();
+  });
+
+  it('rejects a typed symbol from another market before submitting', async () => {
+    const wrapper = await mountTicket();
+    await wrapper.invoke(wrapper.getByTestId('manual-symbol'), 'onUpdate:modelValue', 'BTC-USDT-SWAP');
+    await wrapper.invoke(wrapper.getByTestId('manual-price'), 'onUpdate:modelValue', '3000');
+    await wrapper.trigger(wrapper.find((node) => node.type === 'form'), 'submit');
+    expect(tradingApi.submit).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it('keeps only the newest market instruments when ticker requests arrive out of order', async () => {
+    let resolveOld!: (rows: Array<{ symbol: string }>) => void;
+    marketApi.fetchTickers.mockReturnValueOnce(new Promise((resolve) => { resolveOld = resolve; }))
+      .mockResolvedValueOnce([{ symbol: 'BTC-USD-271231-100000-C' }, { symbol: 'ETH-USDT' }]);
+    const wrapper = await mountTicket();
+    await wrapper.invoke(wrapper.getByTestId('manual-market-type'), 'onUpdate:modelValue', 'option');
+    await wrapper.flush();
+    resolveOld([{ symbol: 'OLD-USDT' }]);
+    await wrapper.flush();
+    const select = wrapper.getByTestId('manual-symbol');
+    const symbols = wrapper.findAll((node) => node.type === 'el-option' && node.parent === select).map((node) => node.props.value);
+    expect(symbols).toEqual(['BTC-USD-271231-100000-C']);
+    wrapper.unmount();
+  });
   beforeEach(() => {
-    fetchTradesMock.fetchTrades.mockReset();
+    vi.stubGlobal('Document', class {});
+    vi.stubGlobal('ShadowRoot', class {});
+    fetchTradesMock.fetchTrades.mockReset().mockResolvedValue([]);
+    tradingApi.submit.mockReset().mockResolvedValue({});
+    marketApi.fetchTickers.mockReset().mockResolvedValue([]);
     authority.epoch = 1;
-    authority.context = { available: true, account_scope_id: 'scope-A' };
+    authority.context = { ...testContext };
     authority.loading = false;
   });
 
@@ -282,7 +345,7 @@ describe('Trades view', () => {
     authority.context = null;
     authority.epoch += 1;
     authority.epoch += 1;
-    authority.context = { available: true, account_scope_id: 'scope-A' };
+    authority.context = { ...testContext };
     await wrapper.flush();
     expect(fetchTradesMock.fetchTrades).toHaveBeenLastCalledWith(undefined, 'scope-A');
     if (outcome === 'success') {

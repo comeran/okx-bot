@@ -72,12 +72,14 @@ def test_distinct_account_scopes_do_not_share_drafts(tmp_path, overrides):
     assert store.get_draft(make_scope(), "alpha").budget == 100
 
 
-def test_scope_is_immutable_and_rejects_non_spot_market():
+def test_scope_is_immutable_and_rejects_an_unsupported_market():
     scope = make_scope()
     with pytest.raises(AttributeError):
         scope.environment = "live"
+    swap = make_scope(market_type="swap")
+    assert swap.market_type == "swap"
     with pytest.raises(ValueError):
-        make_scope(market_type="swap")
+        make_scope(market_type="margin")
 
 
 def test_conflicting_symbol_is_exclusive_across_stores(tmp_path):

@@ -11,6 +11,7 @@ class ExchangeConfig:
     api_key: str = ""
     secret: str = ""
     passphrase: str = ""
+    # Read legacy files; operation routing derives its market from the instrument.
     market_type: str = "spot"
     demo: bool = True
 

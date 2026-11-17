@@ -16,7 +16,7 @@ class BollingerMeanReversionStrategy(BaseStrategy):
         symbol: str = "BTC-USDT",
         window: int = 20,
         stddev_multiplier: float = 2.0,
-        amount: float = 0.1,
+        amount: float = 0.0001,
     ) -> None:
         super().__init__()
         if not _is_integral(window) or window < 2:
@@ -101,7 +101,7 @@ def bollinger_mean_reversion_definition() -> StrategyDefinition:
                 "number",
                 label="Order amount",
                 description="Base asset amount submitted for each signal.",
-                default=0.1,
+                default=0.0001,
                 minimum=0,
                 step=0.01,
                 exclusive_min=True,

@@ -310,6 +310,20 @@ def _create_adapter(settings):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def private_sync_allowed(settings: object) -> bool:
+    """模拟盘可以同步。实盘只有模式、密钥都齐了才同步。"""
+    exchange = getattr(settings, "exchange", None)
+    if exchange is None:
+        return False
+    if bool(getattr(exchange, "demo", False)):
+        return True
+    mode = str(getattr(settings, "mode", "") or "").strip().lower()
+    return mode == "live" and all(
+        str(getattr(exchange, name, "")).strip()
+        for name in ("api_key", "secret", "passphrase")
+    )
+
+
 def _sync_scope_arguments(account_scope_id: str) -> dict[str, str]:
     try:
         parameters = signature(sync_private_state).parameters.values()
@@ -468,15 +482,15 @@ def create_router(broadcast: RuntimeBroadcaster | None = None) -> APIRouter:
         request: PrivateSyncRequest, expected_account_scope_id: str | None = None,
     ) -> dict[str, object]:
         settings = deepcopy(settings_api._load_settings())
-        if not settings.exchange.demo:
+        if not private_sync_allowed(settings):
             raise HTTPException(
                 status_code=403,
                 detail="Private sync is only available in OKX demo mode",
             )
         if request.symbols is not None and any(
             not is_supported_canonical_symbol(
-                canonical_symbol(symbol, market_type=settings.exchange.market_type),
-                market_type=settings.exchange.market_type,
+                canonical_symbol(symbol, market_type="auto"),
+                market_type="auto",
             )
             for symbol in request.symbols
         ):

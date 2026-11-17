@@ -27,7 +27,6 @@ const request = computed(() => {
     || !context?.available || !context.account_scope_id
     || !matchesExecutionContext(context, envelope.execution_context)
     || context.environment !== envelope.context.environment
-    || context.market_type !== envelope.context.market_type
     || draft.symbol !== envelope.symbol || draft.scope_id !== envelope.context.scope_id) return null;
   return {
     strategy: envelope.strategy,

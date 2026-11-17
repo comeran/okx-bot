@@ -157,6 +157,56 @@ def store_manifest(repository, manifest: RunManifest) -> None:
         ), {"manifest_id": manifest.manifest_id, "payload": _canonical(payload)})
 
 
+def remember_backtest_manifest(repository, result_id: str, bars) -> str:
+    """把这次回测的行情收成研究清单，并记下结果编号。"""
+    research_bars = tuple(
+        ResearchBar(
+            int(getattr(bar, "timestamp")),
+            float(getattr(bar, "open")),
+            float(getattr(bar, "high")),
+            float(getattr(bar, "low")),
+            float(getattr(bar, "close")),
+            float(getattr(bar, "volume")),
+        )
+        for bar in bars
+    )
+    manifest = build_manifest(
+        code_version=result_id,
+        config_version=result_id,
+        cost_model_version="backtest",
+        bars=research_bars,
+        equity=(),
+        rejected=(),
+    )
+    store_manifest(repository, manifest)
+    _require_sqlite(repository)
+    with repository.engine.begin() as connection:
+        connection.execute(text(
+            "CREATE TABLE IF NOT EXISTS backtest_research_manifest ("
+            "result_id VARCHAR PRIMARY KEY, manifest_id VARCHAR NOT NULL)"
+        ))
+        connection.execute(text(
+            "INSERT INTO backtest_research_manifest(result_id, manifest_id) "
+            "VALUES (:result_id, :manifest_id) "
+            "ON CONFLICT(result_id) DO UPDATE SET manifest_id = excluded.manifest_id"
+        ), {"result_id": result_id, "manifest_id": manifest.manifest_id})
+    return manifest.manifest_id
+
+
+def backtest_manifest_id(repository, result_id: str) -> str | None:
+    if not _sqlite(repository):
+        return None
+    with repository.engine.begin() as connection:
+        connection.execute(text(
+            "CREATE TABLE IF NOT EXISTS backtest_research_manifest ("
+            "result_id VARCHAR PRIMARY KEY, manifest_id VARCHAR NOT NULL)"
+        ))
+        row = connection.execute(text(
+            "SELECT manifest_id FROM backtest_research_manifest WHERE result_id = :result_id"
+        ), {"result_id": result_id}).first()
+    return None if row is None else str(row[0])
+
+
 def load_manifest(repository, manifest_id: str) -> RunManifest:
     _require_sqlite(repository)
     with repository.engine.connect() as connection:

@@ -5,6 +5,7 @@ export interface ExecutionContext {
   exchange: 'okx';
   environment: 'sandbox' | 'live';
   market_type: string;
+  market_types?: Array<'spot' | 'swap' | 'future' | 'option'>;
   identity_verified: false;
   available: boolean;
   reason: string | null;

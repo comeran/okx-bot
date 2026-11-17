@@ -303,7 +303,8 @@ const useDashboardStoreBase = defineStore('dashboard', {
       const context = authority.context;
       const authentication = authority.authentication;
       if (authority.loading || authority.authenticationChecking || !context?.available
-        || !context.account_scope_id || context.environment !== 'sandbox'
+        || !context.account_scope_id
+        || (context.environment !== 'sandbox' && context.environment !== 'live')
         || authentication?.status !== 'authenticated'
         || authentication.account_scope_id !== context.account_scope_id
         || authentication.environment !== context.environment) {
@@ -324,7 +325,7 @@ const useDashboardStoreBase = defineStore('dashboard', {
         this.privateSyncError = 'authentication_required';
         return;
       }
-      if (context.environment !== 'sandbox') {
+      if (context.environment !== 'sandbox' && context.environment !== 'live') {
         this.privateSyncError = 'demo_only';
         return;
       }

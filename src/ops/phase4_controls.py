@@ -353,13 +353,15 @@ def readiness_payload(repository, *, now_ms: int, max_price_age_ms: int) -> dict
 
 
 def refresh_runtime_risk(repository, *, now_ms: int, max_price_age_ms: int) -> dict[str, object]:
-    """根据本地心跳写下一份风险结论。没有心跳就是未知，并暂停新开仓。"""
+    """根据本地心跳写下一份风险结论。还没有心跳时不暂停开仓。"""
     payload = readiness_payload(
         repository, now_ms=now_ms, max_price_age_ms=max_price_age_ms,
     )
     reason = None if not payload["reasons"] else payload["reasons"][0]
+    if reason in {"unknown_price", "unknown_account"}:
+        reason = None
     assessment = {
-        "blocked": not payload["ready"],
+        "blocked": reason is not None,
         "reason": reason,
         "exposure": 0,
         "derivative_margin": "not_applicable",

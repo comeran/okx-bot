@@ -21,7 +21,7 @@ class RSIMeanReversionStrategy(BaseStrategy):
         period: int = 14,
         oversold: float = 30,
         overbought: float = 70,
-        amount: float = 0.1,
+        amount: float = 0.0001,
     ) -> None:
         super().__init__()
         if not _is_integral(period) or period < 2:
@@ -164,7 +164,7 @@ def rsi_mean_reversion_definition() -> StrategyDefinition:
                 "number",
                 label="Order amount",
                 description="Base asset amount submitted for each signal.",
-                default=0.1,
+                default=0.0001,
                 minimum=0,
                 step=0.01,
                 exclusive_min=True,

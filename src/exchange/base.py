@@ -1669,6 +1669,14 @@ class OKXBaseAdapter(ExchangeAdapter):
         if decimal_value.as_tuple().exponent < -precision:
             raise ValueError(f"{field_name} precision exceeds exchange precision")
 
+    async def amend(self, order_id: str, symbol: str | None, price: float) -> object:
+        """按订单号修改未完成委托的价格。"""
+        if symbol is None:
+            raise ValueError("OKX amend requires symbol")
+        return await self._exchange.edit_order(
+            order_id, self._to_ccxt_symbol(symbol), "limit", None, None, price,
+        )
+
     async def cancel(self, order_id: str, symbol: str | None = None) -> object:
         if symbol is None:
             raise ValueError("OKX cancel requires symbol")

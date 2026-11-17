@@ -58,7 +58,6 @@ def save_runtime_settings(settings: AppConfig) -> None:
             "api_key": _persisted_secret(settings.exchange.api_key, "OKX_API_KEY"),
             "secret": _persisted_secret(settings.exchange.secret, "OKX_SECRET"),
             "passphrase": _persisted_secret(settings.exchange.passphrase, "OKX_PASSPHRASE"),
-            "market_type": settings.exchange.market_type,
             "demo": settings.exchange.demo,
         },
         "backtest": {

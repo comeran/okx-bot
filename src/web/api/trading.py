@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from copy import deepcopy
 from dataclasses import asdict
-from typing import Any
+from typing import Any, Literal
 
 from ccxt.base.errors import (
     AuthenticationError,
@@ -16,6 +16,7 @@ from ccxt.base.errors import (
     RequestTimeout,
 )
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, ConfigDict, Field
 
 from src.analytics.strategy_performance import build_strategy_performance
 from src.core.execution_scope import build_execution_context
@@ -401,10 +402,10 @@ async def refresh_live_state(
             raise HTTPException(status_code=422, detail="symbol must not be empty")
         canonical = canonical_symbol(
             symbol,
-            market_type=settings.exchange.market_type,
+            market_type="auto",
         )
         if not is_supported_canonical_symbol(
-            canonical, market_type=settings.exchange.market_type
+            canonical, market_type="auto"
         ):
             raise HTTPException(status_code=422, detail="Invalid symbol")
         scoped_symbols = [canonical]
@@ -788,3 +789,92 @@ async def get_exchange_snapshot(
         load_runtime_settings().exchange, Repository(), expected_account_scope_id,
     )
     return exchange_snapshot(binding.repository, context=binding.context, master=binding.master)
+
+
+class ManualOrderRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    symbol: str
+    market_type: Literal["spot", "swap", "future", "option"] | None = None
+    side: Literal["buy", "sell"]
+    order_type: Literal["market", "limit"] = "limit"
+    amount: float = Field(gt=0, allow_inf_nan=False)
+    price: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+
+
+class AmendOrderRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    symbol: str
+    market_type: Literal["spot", "swap", "future", "option"] | None = None
+    price: float = Field(gt=0, allow_inf_nan=False)
+
+
+def _order_market(symbol: str, selected_market: str | None = None) -> tuple[str, str]:
+    from src.exchange.markets import market_type_for_symbol
+
+    market = market_type_for_symbol(symbol)
+    if selected_market is not None and selected_market != market:
+        raise ValueError("Market type does not match the instrument")
+    return canonical_symbol(symbol, market_type=market), market
+
+
+async def submit_manual_order_request(body: ManualOrderRequest) -> dict[str, object]:
+    """通过统一订单管理器提交手工单。"""
+    from src.order.manual import submit_manual_order
+    from src.web.api.strategies import create_order_manager
+
+    symbol, market = _order_market(body.symbol, body.market_type)
+    return await submit_manual_order(
+        create_order_manager(market_type=market),
+        symbol=symbol,
+        side=body.side,
+        order_type=body.order_type,
+        amount=body.amount,
+        price=body.price,
+    )
+
+
+@router.post("/orders")
+async def create_manual_order(body: ManualOrderRequest) -> dict[str, object]:
+    try:
+        return await submit_manual_order_request(body)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/orders/{order_id}/cancel")
+async def cancel_manual_order(
+    order_id: str, symbol: str,
+    market_type: Literal["spot", "swap", "future", "option"] | None = None,
+) -> dict[str, object]:
+    from src.order.manual import cancel_one_order
+    from src.web.api.strategies import create_order_manager
+
+    try:
+        normalized, market = _order_market(symbol, market_type)
+        return await cancel_one_order(
+            create_order_manager(market_type=market), order_id, normalized,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/orders/{order_id}/amend")
+async def amend_manual_order(order_id: str, body: AmendOrderRequest) -> dict[str, object]:
+    from src.order.manual import amend_resting_order
+    from src.web.api.strategies import create_order_manager
+
+    try:
+        symbol, market = _order_market(body.symbol, body.market_type)
+        manager = create_order_manager(market_type=market)
+        return await amend_resting_order(
+            manager.repository, manager.router, order_id, symbol, body.price,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+

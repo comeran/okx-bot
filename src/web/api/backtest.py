@@ -239,6 +239,12 @@ async def run_backtest(req: BacktestRequest) -> dict[str, float | int]:
             oos_return=oos_return,
             created_at=created_at,
         )
+    try:
+        from src.research.phase5 import remember_backtest_manifest
+
+        remember_backtest_manifest(repository, result_id, bars)
+    except Exception:
+        logger.exception("研究清单没有保存")
     return {
         **metrics,
         "annualized_return": float(getattr(report, "annualized_return", 0.0) or 0.0),
@@ -286,6 +292,15 @@ async def get_result_detail(result_id: str) -> dict[str, object]:
     rejected_orders = rejected_getter(result_id) if callable(rejected_getter) else []
     manifest_getter = getattr(repository, "get_backtest_manifest", None)
     manifest = manifest_getter(result_id) if callable(manifest_getter) else None
+    if manifest is None:
+        try:
+            from src.research.phase5 import backtest_manifest_id
+
+            research_id = backtest_manifest_id(repository, result_id)
+        except Exception:
+            research_id = None
+        if research_id:
+            manifest = {"research_manifest_id": research_id}
     return {
         "result": result.model_dump(),
         "klines": [

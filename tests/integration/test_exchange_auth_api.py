@@ -127,7 +127,6 @@ def test_success_accepts_boolean_configuration_flags_without_projecting_facts(
     ("api_key", "", "credentials_unavailable"),
     ("secret", "", "credentials_unavailable"),
     ("passphrase", " ", "credentials_unavailable"),
-    ("market_type", "swap", "unsupported_market"),
 ])
 def test_unconfigured_never_constructs_provider(configured, field, value, reason):
     config, exchange, constructions, _ = configured
@@ -210,7 +209,7 @@ def test_raw_errors_and_malformed_success_never_authenticate(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("field,value", [
     ("api_key", "replacement-key"), ("secret", "replacement-secret"),
-    ("passphrase", "replacement-passphrase"), ("demo", False), ("market_type", "swap"),
+    ("passphrase", "replacement-passphrase"), ("demo", False),
 ])
 async def test_inflight_credential_or_environment_change_rejects_old_result(
     configured, field, value,

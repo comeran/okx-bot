@@ -16,9 +16,13 @@ import {
   fetchKillSwitch,
   fetchOpeningPause,
   flattenPositions,
+  recoverControls,
+  spotPreflight,
+  stopEngine,
   updateKillSwitch,
   updateOpeningPause,
 } from '@/services/ops';
+import { refreshLiveState } from '@/services/trading';
 import { useDashboardStore } from '@/stores/dashboard';
 import { useStrategiesStore } from '@/stores/strategies';
 import { formatRuntimeCurrency, formatRuntimeTime } from '@/utils/dashboard';
@@ -42,7 +46,8 @@ const headerLoading = computed(() => dashboard.loading || strategies.loadingInit
 const canSyncAccount = computed(() => {
   const context = accountContext.context;
   const auth = accountContext.authentication;
-  return Boolean(context?.available && context.account_scope_id && context.environment === 'sandbox'
+  return Boolean(context?.available && context.account_scope_id
+    && (context.environment === 'sandbox' || context.environment === 'live')
     && auth?.status === 'authenticated' && auth.account_scope_id === context.account_scope_id
     && auth.environment === context.environment && !accountContext.loading
     && !accountContext.authenticationChecking && !dashboard.loading && !dashboard.privateSyncLoading);
@@ -63,6 +68,21 @@ const showSyncRetry = computed(() => Boolean(
 
 function syncAccount() {
   if (canSyncAccount.value) void dashboard.syncExchangeAccount();
+}
+
+const controlBusy = ref(false);
+
+async function runControl(action: () => Promise<unknown>): Promise<void> {
+  if (controlBusy.value) return;
+  controlBusy.value = true;
+  try {
+    await action();
+    ElMessage.success(t('dashboard.controlDone'));
+  } catch {
+    ElMessage.error(t('dashboard.controlError'));
+  } finally {
+    controlBusy.value = false;
+  }
 }
 
 const accountOverviewHasVisibleData = computed(() => (dashboard.account?.assets?.length ?? 0) > 0);
@@ -368,8 +388,20 @@ onMounted(() => {
         >
           {{ t('dashboard.flattenPositions') }}
         </el-button>
-        <el-button v-if="showSyncRetry" type="primary" :loading="dashboard.privateSyncLoading" :disabled="!canSyncAccount" @click="syncAccount">
-          {{ t('dashboard.accountSync.retry') }}
+        <el-button :loading="controlBusy" @click="runControl(stopEngine)">
+          {{ t('dashboard.stopEngine') }}
+        </el-button>
+        <el-button :loading="controlBusy" @click="runControl(recoverControls)">
+          {{ t('dashboard.recoverControls') }}
+        </el-button>
+        <el-button :loading="controlBusy" @click="runControl(() => spotPreflight({ symbol: 'BTC-USDT', side: 'buy', amount: '0.0001', price: '1' }))">
+          {{ t('dashboard.spotPreflight') }}
+        </el-button>
+        <el-button :loading="controlBusy" @click="runControl(refreshLiveState)">
+          {{ t('dashboard.refreshLiveState') }}
+        </el-button>
+        <el-button v-if="canSyncAccount || showSyncRetry" type="primary" :loading="dashboard.privateSyncLoading" :disabled="!canSyncAccount" @click="syncAccount">
+          {{ t(showSyncRetry ? 'dashboard.accountSync.retry' : 'dashboard.accountSync.action') }}
         </el-button>
       </template>
     </AppPageHeader>

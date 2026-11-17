@@ -28,7 +28,6 @@ describe('settings service', () => {
           secret_set: false,
           passphrase: '',
           passphrase_set: false,
-          market_type: 'spot',
           demo: true,
         },
         backtest: {
@@ -70,7 +69,6 @@ describe('settings service', () => {
         api_key: 'okx-api-key',
         secret: 'okx-secret-value',
         passphrase: 'okx-passphrase',
-        market_type: 'swap',
         demo: true,
       },
       backtest: {

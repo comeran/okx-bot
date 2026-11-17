@@ -10,4 +10,4 @@ COPY config ./config
 
 EXPOSE 8080
 
-CMD ["uv", "run", "uvicorn", "src.web.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["uv", "run", "python", "-m", "src.ops.serve"]

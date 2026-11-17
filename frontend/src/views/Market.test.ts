@@ -7,11 +7,20 @@ import { defineHostComponent, mount, textContent } from '@/test-utils/mount';
 const marketMocks = vi.hoisted(() => ({
   fetchKlines: vi.fn(),
   fetchTickers: vi.fn(),
+  fetchMarketBoard: vi.fn().mockResolvedValue({
+    symbol: 'BTC-USDT',
+    market_type: 'spot',
+    order_book: { bids: [], asks: [] },
+    trades: [],
+    funding_rate: { available: false, reason: 'not_applicable' },
+    open_interest: { available: false, reason: 'not_applicable' },
+  }),
 }));
 
 vi.mock('@/services/market', () => ({
   fetchKlines: (...args: unknown[]) => marketMocks.fetchKlines(...args),
   fetchTickers: (...args: unknown[]) => marketMocks.fetchTickers(...args),
+  fetchMarketBoard: (...args: unknown[]) => marketMocks.fetchMarketBoard(...args),
 }));
 
 vi.mock('@/components/charts/Candlestick.vue', () => ({
@@ -96,7 +105,7 @@ describe('Market view', () => {
     await wrapper.invoke(marketTypeSelect, 'onUpdate:modelValue', 'future');
     await wrapper.flush();
 
-    expect(wrapper.getByTestId('market-symbol-select').props.modelValue).toBe('BTC-USDT-260626');
+    expect(wrapper.getByTestId('market-symbol-select').props.modelValue).toBe('');
     wrapper.unmount();
   });
 
@@ -168,13 +177,13 @@ describe('Market view', () => {
     futureTickers.resolve([{ symbol: 'XRP-USDT-260626' }]);
     await wrapper.flush();
     expect(wrapper.getByTestId('market-market-type-select').props.loading).toBe(false);
-    expect(wrapper.getByTestId('market-symbol-select').props.modelValue).toBe('BTC-USDT-260626');
+    expect(wrapper.getByTestId('market-symbol-select').props.modelValue).toBe('');
     expect(wrapper.findAll((node) => node.type === 'el-option' && node.props.label === 'XRP-USDT-260626')).toHaveLength(1);
 
     spotTickers.resolve([{ symbol: 'DOGE-USDT' }]);
     await wrapper.flush();
 
-    expect(wrapper.getByTestId('market-symbol-select').props.modelValue).toBe('BTC-USDT-260626');
+    expect(wrapper.getByTestId('market-symbol-select').props.modelValue).toBe('');
     expect(wrapper.getByTestId('market-market-type-select').props.loading).toBe(false);
     expect(wrapper.findAll((node) => node.type === 'el-option' && node.props.label === 'XRP-USDT-260626')).toHaveLength(1);
     expect(wrapper.findAll((node) => node.type === 'el-option' && node.props.label === 'DOGE-USDT')).toHaveLength(0);

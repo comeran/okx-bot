@@ -240,14 +240,13 @@ describe('dashboard store', () => {
       expect(dashboard.privateSyncResult?.status).toBe('ok');
     });
 
-    it.each(['unconfigured', 'failed', 'unchecked', 'wrong-scope', 'live', 'context-loading', 'auth-checking'] as const)(
+    it.each(['unconfigured', 'failed', 'unchecked', 'wrong-scope', 'context-loading', 'auth-checking'] as const)(
       'blocks a private sync for %s context or authentication', async (condition) => {
         const authority = authenticate();
         if (condition === 'unconfigured') authority.context = null;
         if (condition === 'failed') authority.authentication!.status = 'failed';
         if (condition === 'unchecked') authority.authentication = null;
         if (condition === 'wrong-scope') authority.authentication!.account_scope_id = 'scope-B';
-        if (condition === 'live') authority.context = { ...accountContext, environment: 'live' };
         if (condition === 'context-loading') authority.loading = true;
         if (condition === 'auth-checking') authority.authenticationChecking = true;
         const dashboard = useDashboardStore();
@@ -256,11 +255,23 @@ describe('dashboard store', () => {
 
         expect(mockedPrivateSync).not.toHaveBeenCalled();
         expect(mockedSnapshot).not.toHaveBeenCalled();
-        expect(dashboard.privateSyncError).toBe(condition === 'live' ? 'demo_only'
-          : condition === 'wrong-scope' ? 'scope_changed' : 'authentication_required');
+        expect(dashboard.privateSyncError).toBe(condition === 'wrong-scope' ? 'scope_changed' : 'authentication_required');
         expect(dashboard.privateSyncLoading).toBe(false);
       },
     );
+
+    it('synchronizes a verified live account', async () => {
+      const liveContext = { ...accountContext, environment: 'live' as const };
+      authenticate(liveContext);
+      mockedPrivateSync.mockResolvedValue(privateSyncResult(liveContext));
+      mockedSnapshot.mockResolvedValue(savedSnapshot(200, liveContext));
+      const dashboard = useDashboardStore();
+
+      await dashboard.syncExchangeAccount();
+
+      expect(mockedPrivateSync).toHaveBeenCalledWith('scope-A');
+      expect(dashboard.privateSyncError).toBeNull();
+    });
 
     it('does not send duplicate requests while synchronization or its refresh is pending', async () => {
       authenticate();

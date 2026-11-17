@@ -21,7 +21,6 @@ from src.web.exchange_auth import probe_saved_exchange_auth
 
 logger = logging.getLogger(__name__)
 
-MarketType = Literal["spot", "swap", "future", "futures", "option", "options"]
 RuntimeMode = Literal["backtest", "paper", "demo", "live"]
 
 
@@ -29,13 +28,7 @@ class ExchangeSettingsUpdate(BaseModel):
     api_key: str = ""
     secret: str = ""
     passphrase: str = ""
-    market_type: MarketType = "spot"
     demo: bool = True
-
-    @field_validator("market_type", mode="before")
-    @classmethod
-    def normalize_market_type(cls, value: object) -> object:
-        return value.strip().lower() if isinstance(value, str) else value
 
 
 class BacktestSettings(BaseModel):
@@ -100,7 +93,6 @@ def _merge_secret(current: str, incoming: str) -> str:
 def _fingerprint(settings: SettingsUpdate) -> dict[str, object]:
     return {
         "mode": settings.mode,
-        "market_type": settings.exchange.market_type,
         "demo": settings.exchange.demo,
         "web_host": settings.web.host,
         "web_port": settings.web.port,
@@ -120,7 +112,6 @@ def _serialize_settings(
             "secret_set": bool(settings.exchange.secret),
             "passphrase": "",
             "passphrase_set": bool(settings.exchange.passphrase),
-            "market_type": settings.exchange.market_type,
             "demo": settings.exchange.demo,
         },
         "backtest": settings.backtest.model_dump(),
@@ -142,7 +133,6 @@ def _settings_from_config(config: AppConfig) -> SettingsUpdate:
             api_key=config.exchange.api_key,
             secret=config.exchange.secret,
             passphrase=config.exchange.passphrase,
-            market_type=config.exchange.market_type,
             demo=config.exchange.demo,
         ),
         backtest=BacktestSettings(
@@ -173,7 +163,6 @@ def _config_from_settings(settings: SettingsUpdate) -> AppConfig:
             api_key=settings.exchange.api_key,
             secret=settings.exchange.secret,
             passphrase=settings.exchange.passphrase,
-            market_type=settings.exchange.market_type,
             demo=settings.exchange.demo,
         ),
         backtest=BacktestConfig(
@@ -244,7 +233,6 @@ def create_router(broadcast=None) -> APIRouter:
             settings.exchange.passphrase,
             update.exchange.passphrase,
         )
-        settings.exchange.market_type = update.exchange.market_type
         settings.exchange.demo = update.exchange.demo
         settings.backtest = update.backtest
         settings.risk = update.risk

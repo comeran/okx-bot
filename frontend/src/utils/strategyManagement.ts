@@ -24,7 +24,7 @@ export function buildDefaultStrategyDraft(definition: StrategyDefinition): Strat
   return {
     name: '',
     strategy_type: definition.strategy_type,
-    symbol: 'BTC-USDT-SWAP',
+    symbol: 'BTC-USDT',
     timeframe: '1m',
     enabled: false,
     params: Object.fromEntries(definition.params.map((parameter) => [parameter.key, parameter.default ?? null])),

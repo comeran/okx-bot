@@ -375,7 +375,7 @@ async def test_funded_live_book_does_not_open_live_orders():
     assert manager.allow_live_open_orders is False
 
 
-def test_order_factory_keeps_the_live_open_gate_closed():
+def test_order_factory_opens_live_from_mode_demo_and_key():
     save_runtime_settings(AppConfig(
         mode="live",
         exchange=ExchangeConfig(
@@ -383,7 +383,8 @@ def test_order_factory_keeps_the_live_open_gate_closed():
         ),
     ))
     live = create_order_manager(repository=Repository())
-    assert live.allow_live_open_orders is False
+    assert live.allow_live_open_orders is True
+    assert live.require_position_ownership is False
     assert live.funding_environment == "live"
 
     save_runtime_settings(AppConfig(

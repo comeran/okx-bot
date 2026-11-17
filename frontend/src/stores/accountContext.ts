@@ -49,8 +49,7 @@ export function matchesExecutionContext(
   return value.available === true
     && value.account_scope_id === current.account_scope_id
     && value.exchange === current.exchange
-    && value.environment === current.environment
-    && value.market_type === current.market_type;
+    && value.environment === current.environment;
 }
 
 function isExecutionContext(value: unknown): value is ExecutionContext {

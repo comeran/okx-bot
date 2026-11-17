@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { buildMarketKlineQuery } from './market';
+import { buildMarketKlineQuery, marketTypeForSymbol, fallbackSymbolsByType } from './market';
 
 describe('buildMarketKlineQuery', () => {
   const baseInput = {
@@ -65,5 +65,22 @@ describe('buildMarketKlineQuery', () => {
       startTime: new Date('2026-08-02T00:00:00.000Z'),
       endTime: new Date('2026-08-02T00:00:00.000Z'),
     })).toEqual({ error: 'invalidRange' });
+  });
+});
+
+
+describe('instrument market identity', () => {
+  it.each([
+    ['BTC-USDT', 'spot'], ['BTC/USDT', 'spot'],
+    ['BTC-USDT-SWAP', 'swap'], ['BTC/USDT:USDT', 'swap'],
+    ['BTC-USDT-271231', 'future'], ['BTC/USDT:USDT-271231', 'future'],
+    ['BTC-USD-271231-100000-C', 'option'], ['BTC/USD:BTC-271231-100000-P', 'option'],
+    ['', null], ['BTC', null], ['BTC-USDT-MALFORMED', null], ['BTC/USDT:USDT-bad', null],
+  ])('identifies %s as %s', (symbol, market) => {
+    expect(marketTypeForSymbol(symbol)).toBe(market);
+  });
+  it('offers no fixed-expiry futures or options as fallback recommendations', () => {
+    expect(fallbackSymbolsByType.future).toEqual([]);
+    expect(fallbackSymbolsByType.option).toEqual([]);
   });
 });

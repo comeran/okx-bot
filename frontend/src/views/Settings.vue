@@ -31,7 +31,6 @@ const form = reactive<AppSettingsUpdate>({
     api_key: '',
     secret: '',
     passphrase: '',
-    market_type: 'spot',
     demo: true,
   },
   backtest: {
@@ -64,7 +63,6 @@ function buildUpdatePayload(): AppSettingsUpdate {
       api_key: form.exchange.api_key,
       secret: form.exchange.secret,
       passphrase: form.exchange.passphrase,
-      market_type: form.exchange.market_type,
       demo: form.exchange.demo,
     },
     backtest: {
@@ -98,7 +96,6 @@ function cloneSettings(settings: AppSettingsView): AppSettingsUpdate {
       api_key: '',
       secret: '',
       passphrase: '',
-      market_type: settings.exchange.market_type,
       demo: settings.exchange.demo,
     },
     backtest: {
@@ -136,7 +133,6 @@ const canPersist = computed(() => hasLoadedSettings.value && !loadError.value);
 const authenticationCheckDisabled = computed(() => actionDisabled.value || !canPersist.value
   || isDirty.value || accountContext.loading || accountContext.authenticationChecking);
 const allowedModes = ['backtest', 'paper', 'live'] as const;
-const allowedMarketTypes = ['spot', 'swap', 'future', 'option'] as const;
 
 type SettingsSectionKey = 'runtime' | 'exchange' | 'backtest' | 'risk' | 'notifications' | 'web';
 
@@ -170,14 +166,6 @@ function validateSettings(settings: AppSettingsUpdate): SettingsValidationState 
 
   if (!allowedModes.includes(settings.mode as typeof allowedModes[number])) {
     addValidationError(state, 'runtime', t('settings.validation.requiredField', { field: t('settings.mode') }));
-  }
-
-  if (!allowedMarketTypes.includes(settings.exchange.market_type as typeof allowedMarketTypes[number])) {
-    addValidationError(
-      state,
-      'exchange',
-      t('settings.validation.requiredField', { field: t('settings.marketType') }),
-    );
   }
 
   if (!isFiniteNumber(settings.backtest.initial_capital) || settings.backtest.initial_capital < 0) {
@@ -267,7 +255,6 @@ function applySettings(settings: AppSettingsView): void {
   form.exchange.api_key = '';
   form.exchange.secret = '';
   form.exchange.passphrase = '';
-  form.exchange.market_type = settings.exchange.market_type;
   form.exchange.demo = settings.exchange.demo;
   form.backtest = { ...settings.backtest };
   form.risk = { ...settings.risk };
@@ -441,6 +428,7 @@ onBeforeRouteLeave(async () => confirmIfDirty());
               </span>
             </template>
             <template #content>
+              <p class="settings-page__hint">{{ t('market.sharedCredentials') }}</p>
               <div v-if="validationState.exchange.length" class="settings-page__validation" role="alert" aria-live="polite">
                 <p v-for="(error, index) in validationState.exchange" :key="`exchange-${index}-${error}`" class="settings-page__validation-item">
                   {{ error }}
@@ -448,16 +436,6 @@ onBeforeRouteLeave(async () => confirmIfDirty());
               </div>
 
               <el-row :gutter="16">
-                <el-col :xs="24" :md="8">
-                  <el-form-item :label="t('settings.marketType')">
-                    <el-select v-model="form.exchange.market_type" class="settings-form__control">
-                      <el-option :label="t('settings.marketTypes.spot')" value="spot" />
-                      <el-option :label="t('settings.marketTypes.swap')" value="swap" />
-                      <el-option :label="t('settings.marketTypes.future')" value="future" />
-                      <el-option :label="t('settings.marketTypes.option')" value="option" />
-                    </el-select>
-                  </el-form-item>
-                </el-col>
                 <el-col :xs="24" :md="8">
                   <el-form-item :label="t('settings.okxDemo')">
                     <el-switch v-model="form.exchange.demo" />
