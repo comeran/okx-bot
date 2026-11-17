@@ -134,7 +134,9 @@ async def test_shared_strategy_market_data_has_no_legacy_default(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_unscoped_order_manager_keeps_account_routing_independent_of_legacy_market(monkeypatch):
+async def test_unscoped_order_manager_keeps_account_routing_independent_of_legacy_market(
+    monkeypatch,
+):
     monkeypatch.setattr(
         strategies, "load_runtime_settings", lambda: configured_settings(mode="demo"),
     )
