@@ -1,0 +1,22 @@
+tests/integration/test_strategy_market_routing.py
+  s_1ea190f8b13f30::t_e39685d2ea6d54 137-139
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "379324bf39e2f7dabf746a2d4620355b19e09ddb",
+  "prompts": {},
+  "logical_commit_id": "379324bf39e2f7dabf746a2d4620355b19e09ddb",
+  "sessions": {
+    "s_1ea190f8b13f30": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1e833-f553-7c22-a9be-ab5f0f9f5b79",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Zane <zane@bigo.sg>",
+      "total_additions": 3,
+      "total_deletions": 1
+    }
+  }
+}
