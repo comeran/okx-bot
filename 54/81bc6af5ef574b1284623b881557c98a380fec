@@ -1,0 +1,162 @@
+tests/unit/test_market_routing.py
+  s_1ea190f8b13f30::t_c8e867dff2963c 283-288
+  s_1ea190f8b13f30::t_8ec16d77e34252 257-259,265-267,274-276
+  s_1ea190f8b13f30::t_d9ec8c658b871d 1-5,7-34,46-95,99-108,115-124,131-139,143-150,157-168
+  s_1ea190f8b13f30::t_151f0cd172b52f 6,214-256,260-264,268-273,277-282,289-299,303-304
+  s_1ea190f8b13f30::t_bab3cb0ea276a9 305-329
+  s_1ea190f8b13f30::t_fe88ec8180badd 35-45,96-98,109-114,125-130,140-142,151-156,201-203,206-212
+  s_1ea190f8b13f30::t_d11f4d5230c0fb 169-200,204-205,213
+  s_1ea190f8b13f30::t_b9e493a57ad6d0 300-302
+docs/superpowers/specs/2026-11-17-market-selection-design.md
+  s_1ea190f8b13f30::t_36b1bf67cc6da5 17-18
+frontend/src/views/Settings.test.ts
+  s_40e46f6941fc76::t_466bd7d37e86a5 44
+  s_40e46f6941fc76::t_183beec51653c0 172-206
+src/core/config.py
+  s_40e46f6941fc76::t_5381bc3d2b1611 8-10,137-138,141,147-150
+src/exchange/okx_account.py
+  s_1ea190f8b13f30::t_10513305237acd 1-135,139-166
+  s_1ea190f8b13f30::t_a4994e4db21a72 136-138
+tests/unit/test_phase2_funding.py
+  s_1ea190f8b13f30::t_b7dc92d75d16ad 288-322,342-347
+  s_1ea190f8b13f30::t_01cfd6c550de7a 17,323-338
+  s_1ea190f8b13f30::t_dcbbc570050fde 339-341
+src/web/api/settings.py
+  s_40e46f6941fc76::t_5381bc3d2b1611 7,18,224-230
+tests/integration/test_web_api.py
+  s_40e46f6941fc76::t_3904c193b69f45 3435,3484,3532,4035,4062,5790
+  s_1ea190f8b13f30::t_2e966e823f0a3d 3441,5727,5839,5896,5954,5961,6202,6278
+  s_40e46f6941fc76::t_b558163d3a350e 3570,4103,7958
+  s_40e46f6941fc76::t_f4a61d2e8bf042 3966
+  s_1ea190f8b13f30::t_f1e0d237ec0b9f 351-359,368-371,373-375,733,755,3542,3590
+src/market/service.py
+  s_1ea190f8b13f30::t_ed5522bdbd2ceb 97,105
+  s_1ea190f8b13f30::t_93615033adc6bf 648,654,657-667
+tests/unit/test_ops_desk_freshness.py
+  s_1ea190f8b13f30::t_389d3d82a945e8 1-29
+src/ops/phase3_recovery.py
+  s_1ea190f8b13f30::t_f6a87d06d7ee52 54,64,70,73,78-79,86,88-96,105,108,444
+  s_1ea190f8b13f30::t_1124d4b55a28f1 324,326,339-340
+tests/unit/test_execution_mode.py
+  s_40e46f6941fc76::t_5381bc3d2b1611 1-2,7-10,13-19
+tests/unit/test_defect_fixes.py
+  s_1ea190f8b13f30::t_08cddafa6f0d11 82-105
+src/core/runtime_settings.py
+  s_40e46f6941fc76::t_5381bc3d2b1611 9,54
+docs/superpowers/plans/2026-11-17-execution-environment.md
+  s_40e46f6941fc76::t_c2eb251d65cbcb 20,22,24,26,28-40
+  s_40e46f6941fc76::t_183beec51653c0 1-19,21,23,25,27
+src/exchange/factory.py
+  s_1ea190f8b13f30::t_10513305237acd 7,37-38,45-51,53
+src/exchange/live_sync.py
+  s_1ea190f8b13f30::t_5fd4a259fe6e9d 191-194
+src/exchange/base.py
+  s_1ea190f8b13f30::t_113d5cd53050cc 1373-1376,1379
+  s_1ea190f8b13f30::t_d341f79c24d7a9 867,870,872-876
+  s_1ea190f8b13f30::t_b1a78e178a655a 868
+tests/unit/test_multi_market_safeguards.py
+  s_1ea190f8b13f30::t_fe88ec8180badd 13-15,20-26,30-32
+  s_1ea190f8b13f30::t_dad6ee375b2e10 1-11,16-19,27-29,33-36,39-44,47-61
+  s_1ea190f8b13f30::t_4ced7ee176ce38 12
+  s_1ea190f8b13f30::t_f1832f0ca969db 37-38,45-46
+tests/integration/test_account_market_independence.py
+  s_1ea190f8b13f30::t_fe88ec8180badd 18-25,42-54,118-122,138-146,149-159,167-175,182-191,198-203
+frontend/src/views/Trades.vue
+  s_1ea190f8b13f30::t_fa643086bd49f2 231,233-235,237,239-241,316-322,324,341-410
+  s_1ea190f8b13f30::t_5fd4a259fe6e9d 326-335,337
+  s_1ea190f8b13f30::t_29a6723e88041e 325
+tests/unit/test_live_sync.py
+  s_1ea190f8b13f30::t_5fd4a259fe6e9d 81,83
+  s_1ea190f8b13f30::t_6abb380e75959d 60-80,82,84-88
+tests/unit/test_exchange_base.py
+  s_1ea190f8b13f30::t_494797c71741ce 1187-1204
+  s_1ea190f8b13f30::t_151f0cd172b52f 4366,4371,4377
+  s_1ea190f8b13f30::t_f1e0d237ec0b9f 154
+tests/unit/test_market_service.py
+  s_1ea190f8b13f30::t_8be76d92f5c21a 6,286-308
+  s_1ea190f8b13f30::t_841036ae8a8068 311-320,322-353,355-389,394-398,402-408,452-456,458-477,479-514,516-542
+  s_1ea190f8b13f30::t_462bcc4a10ce4e 391-393,399-401,409-451
+  s_1ea190f8b13f30::t_50ad0e3e35ccc6 321,354,390,457,478,515
+  s_1ea190f8b13f30::t_58457c9e8b59c1 309-310
+docs/observations/2026-11-17-20-strategy-sandbox.md
+  s_1ea190f8b13f30::t_3472c4062a00a8 3,5-6,8-10,12-13,15,17-20,24,30-49
+  s_1ea190f8b13f30::t_f1954919340cc6 1-2,4,7,14,16,21-23,25-29,50-63
+  s_1ea190f8b13f30::t_43cf0ddc8e861f 11
+  s_1ea190f8b13f30::t_405dd38fc2c0b3 64-65
+tests/unit/test_instrument_market.py
+  s_1ea190f8b13f30::t_fe88ec8180badd 4-16
+tests/integration/test_settings_environment.py
+  s_40e46f6941fc76::t_183beec51653c0 1-9,11-74,119-138
+  s_40e46f6941fc76::t_842346174e07ad 10,85-114
+  s_40e46f6941fc76::t_51c43215b9b9b9 75-84,115-118
+tests/unit/test_phase3_recovery.py
+  s_1ea190f8b13f30::t_47c18308f9f3ae 3-7,96,101-133,136-139
+  s_1ea190f8b13f30::t_cfce693db22069 84-95,97-100,140-141
+  s_1ea190f8b13f30::t_970c0c405e1305 134-135
+  s_1ea190f8b13f30::t_a7f13647eba70c 82-83
+tests/integration/test_strategy_market_routing.py
+  s_1ea190f8b13f30::t_e4b04e925e9b4a 127,131-151
+src/core/execution_mode.py
+  s_40e46f6941fc76::t_5381bc3d2b1611 10-24,27,33
+tests/integration/test_allocation_api.py
+  s_1ea190f8b13f30::t_0c7631821ff5ec 86-88
+  s_40e46f6941fc76::t_549315539eeafb 34,64,203,271,447,553
+  s_40e46f6941fc76::t_f4a61d2e8bf042 89-90,383-384
+tests/integration/test_allocation_readiness_api.py
+  s_40e46f6941fc76::t_f4a61d2e8bf042 303
+  s_40e46f6941fc76::t_842346174e07ad 300-302
+  s_40e46f6941fc76::t_549315539eeafb 53,384-385
+frontend/src/locales/zh-CN.ts
+  s_40e46f6941fc76::t_5381bc3d2b1611 452,456-458,461-465,485
+frontend/src/views/Settings.vue
+  s_40e46f6941fc76::t_5381bc3d2b1611 66,94,134-147,266,428,445-447,454-457
+docs/superpowers/plans/2026-11-17-market-selection.md
+  s_1ea190f8b13f30::t_c148c57775d20c 35-37,45-47,53-55,61-64,68-75,77-83
+  s_1ea190f8b13f30::t_323ac6df91fdc9 76,84-96
+src/order/manager.py
+  s_1ea190f8b13f30::t_3d1ae0cb57cdce 1718
+  s_1ea190f8b13f30::t_9d2e851e17574d 24,1273,1562-1566,1578,1614,1638,1651
+  s_1ea190f8b13f30::t_d2162df5671c2c 1592-1595,1597-1609
+  s_1ea190f8b13f30::t_7a2a1bf830dfda 1596
+src/web/api/strategies.py
+  s_1ea190f8b13f30::t_7245192183a78a 174
+  s_1ea190f8b13f30::t_1364b1026f3626 176-178
+  s_1ea190f8b13f30::t_6eee8b143cafeb 40,155-169,179
+  s_40e46f6941fc76::t_5381bc3d2b1611 23,253-256
+frontend/src/locales/en.ts
+  s_40e46f6941fc76::t_5381bc3d2b1611 453,457-459,462-466,486
+src/web/api/ops.py
+  s_1ea190f8b13f30::t_721e619d604de9 23,104-112,158-164
+tests/unit/test_order_router.py
+  s_1ea190f8b13f30::t_9d7990b62b8519 2869
+  s_1ea190f8b13f30::t_423734de950671 39-44
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "5481bc6af5ef574b1284623b881557c98a380fec",
+  "prompts": {},
+  "logical_commit_id": "5481bc6af5ef574b1284623b881557c98a380fec",
+  "sessions": {
+    "s_1ea190f8b13f30": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1e833-f553-7c22-a9be-ab5f0f9f5b79",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Zane <zane@bigo.sg>",
+      "total_additions": 1626,
+      "total_deletions": 217
+    },
+    "s_40e46f6941fc76": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1e8ca-5119-7272-81f3-46f166c1f6b5",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Zane <zane@bigo.sg>",
+      "total_additions": 348,
+      "total_deletions": 67
+    }
+  }
+}
