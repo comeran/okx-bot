@@ -1,0 +1,23 @@
+README.md
+  s_1ea190f8b13f30::t_c44f95f0590222 3,5,7,9-17,19,21-24,26,28,30,32-34,36,39-40,43-46,48,51,54,57,59,63,65,67,69-74,76,78-103,105-107,109-120,122,124,126-137,142,150,152-159,161,163-167,169,171,173,177,179,181-184,186,188-227,229
+  s_1ea190f8b13f30::t_284a70e5ac4103 61,175
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "ce6c386116a850d0112fd835405f14e0d717ee45",
+  "prompts": {},
+  "logical_commit_id": "ce6c386116a850d0112fd835405f14e0d717ee45",
+  "sessions": {
+    "s_1ea190f8b13f30": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1e833-f553-7c22-a9be-ab5f0f9f5b79",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Zane <zane@bigo.sg>",
+      "total_additions": 165,
+      "total_deletions": 144
+    }
+  }
+}
