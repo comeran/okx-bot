@@ -31,7 +31,7 @@ def remove_draft(client, revision):
 @pytest.fixture
 def allocation_client(monkeypatch):
     save_runtime_settings(AppConfig(mode="live", exchange=ExchangeConfig(
-        api_key="test-key", secret="test-secret", passphrase="test-passphrase", demo=True,
+        api_key="test-key", secret="test-secret", passphrase="test-passphrase", demo=False,
     )))
     runtime = strategies.StrategyRuntimeState()
     monkeypatch.setattr(strategies, "StrategyRuntimeState", lambda: runtime)
@@ -61,7 +61,7 @@ def test_draft_envelope_binds_both_scopes_from_one_settings_capture(
     client, _ = allocation_client
     captured = AppConfig(mode="live", exchange=ExchangeConfig(
         api_key="test-key" if configured else "", secret="test-secret" if configured else "",
-        passphrase="test-passphrase" if configured else "", demo=True,
+        passphrase="test-passphrase" if configured else "", demo=False,
     ))
     changed = AppConfig(mode="paper", exchange=ExchangeConfig(
         api_key="other-key", secret="other-secret", passphrase="other-passphrase", demo=False,
@@ -83,7 +83,11 @@ def test_draft_envelope_binds_both_scopes_from_one_settings_capture(
     assert "test-key" not in response.text
 
 
-def test_save_delete_recreate_is_draft_only_and_keeps_live_gate_closed(allocation_client):
+def test_save_delete_recreate_is_draft_only_and_keeps_live_gate_closed(
+    allocation_client, monkeypatch,
+):
+    # Exercise the ownership-required path without an inconsistent live/demo config.
+    monkeypatch.setattr(strategies, "live_trading_configured", lambda settings: False)
     client, _ = allocation_client
     before = client.get("/api/allocations/ma_cross").json()
     assert before["draft"] is None
@@ -196,7 +200,7 @@ def test_context_and_drafts_follow_server_credentials_and_environment(allocation
         "budget": 100, "expected_revision": 0,
     }).json()
     save_runtime_settings(AppConfig(mode="demo", exchange=ExchangeConfig(
-        api_key="other-key", secret="secret", passphrase="pass", demo=False,
+        api_key="other-key", secret="secret", passphrase="pass", demo=True,
     )))
     second = client.get("/api/allocations/ma_cross").json()
     assert second["draft"] is None
@@ -227,19 +231,23 @@ def test_strategy_registry_and_duplicate_symbol_are_validated(allocation_client)
     assert response.json()["detail"]["code"] == "symbol_conflict"
 
 
-def test_non_spot_context_is_unavailable(allocation_client):
+def test_allocation_context_uses_explicit_market_instead_of_legacy_setting(allocation_client):
     client, _ = allocation_client
     save_runtime_settings(AppConfig(exchange=ExchangeConfig(
         api_key="key", secret="secret", passphrase="pass", market_type="swap",
     )))
     context = client.get("/api/allocations/context").json()
-    assert context["available"] is False
-    assert context["reason"] == "unsupported_market"
+    assert context["available"] is True
+    assert context["market_type"] == "spot"
+    swap_context = client.get("/api/allocations/context", params={"market_type": "swap"}).json()
+    assert swap_context["available"] is True
+    assert swap_context["market_type"] == "swap"
+    assert swap_context["scope_id"] != context["scope_id"]
     assert client.put("/api/allocations/ma_cross", json={
         "expected_symbol": "BTC-USDT",
         "expected_scope_id": scope_id(client),
         "budget": 100, "expected_revision": 0,
-    }).status_code == 409
+    }).status_code == 200
 
 
 @pytest.mark.parametrize("change", ["credentials", "environment"])
@@ -260,7 +268,7 @@ def test_stale_account_context_cannot_create_or_delete_drafts(allocation_client,
             api_key="other-key" if change == "credentials" else "test-key",
             secret="test-secret",
             passphrase="test-passphrase",
-            demo=True,
+            demo=change == "environment",
         ),
     ))
     assert scope_id(client) != old_scope
@@ -372,7 +380,8 @@ def _paper_settings():
     )
 
 
-def test_local_budget_is_exclusive_and_live_activation_stays_closed(allocation_client):
+def test_local_budget_is_exclusive_and_live_activation_stays_closed(allocation_client, monkeypatch):
+    monkeypatch.setattr(strategies, "live_trading_configured", lambda settings: False)
     client, runtime = allocation_client
     blocked = client.post("/api/allocations/ma_cross/activate", json={
         "expected_revision": 0,
@@ -435,7 +444,7 @@ def test_local_budget_is_exclusive_and_live_activation_stays_closed(allocation_c
     save_runtime_settings(AppConfig(
         mode="live",
         exchange=ExchangeConfig(
-            api_key="test-key", secret="test-secret", passphrase="test-passphrase", demo=True,
+            api_key="test-key", secret="test-secret", passphrase="test-passphrase", demo=False,
         ),
         backtest=BacktestConfig(initial_capital=1000),
     ))
@@ -541,7 +550,7 @@ def test_exchange_balance_grants_live_ownership_only_when_it_covers_the_draft(
     ) is False
 
     save_runtime_settings(AppConfig(mode="demo", exchange=ExchangeConfig(
-        api_key="sandbox-key", secret="test-secret", passphrase="test-passphrase", demo=False,
+        api_key="sandbox-key", secret="test-secret", passphrase="test-passphrase", demo=True,
     )))
 
     async def sandbox_facts(*, symbol, scope_id, budget):
@@ -569,3 +578,36 @@ def test_exchange_balance_grants_live_ownership_only_when_it_covers_the_draft(
     assert strategies.has_live_strategy_ownership_mapping(
         Repository(), "ma_cross", "BTC-USDT",
     ) is True
+
+
+def test_acknowledged_budget_uses_exchange_balance(allocation_client, monkeypatch):
+    from src.web.api import allocations as allocation_api
+
+    client, _runtime = allocation_client
+    save_runtime_settings(AppConfig(mode="live", exchange=ExchangeConfig(
+        api_key="test-key", secret="test-secret", passphrase="test-passphrase", demo=False,
+    )))
+    assert client.put("/api/allocations/ma_cross", json={
+        "expected_symbol": "BTC-USDT",
+        "expected_scope_id": scope_id(client),
+        "budget": 25,
+        "expected_revision": 0,
+    }).status_code == 200
+
+    async def available():
+        return Decimal("80")
+
+    async def unused_facts(**_kwargs):
+        raise AssertionError("acknowledged budget must not use stored preflight")
+
+    monkeypatch.setattr(allocation_api, "fetch_exchange_available", available)
+    monkeypatch.setattr(allocation_api, "load_trusted_activation_facts", unused_facts)
+    started = client.post("/api/allocations/ma_cross/exchange-activate", json={
+        "expected_revision": 1,
+        "expected_scope_id": scope_id(client),
+        "expected_symbol": "BTC-USDT",
+        "acknowledge_budget": True,
+    })
+    assert started.status_code == 200
+    assert started.json()["funded_book"]["cash"] == "25"
+    assert started.json()["context"]["execution_ready"] is False

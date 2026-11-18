@@ -11,6 +11,7 @@ from src.exchange.okx_futures import OKXFuturesAdapter
 from src.exchange.okx_options import OKXOptionsAdapter
 from src.exchange.okx_spot import OKXSpotAdapter
 from src.exchange.okx_swap import OKXSwapAdapter
+from src.market.board import load_market_board
 
 logger = logging.getLogger(__name__)
 
@@ -239,3 +240,15 @@ async def get_tickers(
             raise HTTPException(status_code=502, detail=_MARKET_FETCH_ERROR_DETAIL) from exc
     finally:
         await adapter.close()
+
+
+@router.get("/board")
+async def get_market_board(symbol: str, market_type: str | None = None) -> dict[str, object]:
+    """盘口、逐笔、资金费率和持仓量。现货的后两项标记为不适用。"""
+    resolved = normalize_market_type(market_type)
+    from src.market.board import CcxtBoardReader
+
+    try:
+        return await load_market_board(symbol, resolved, CcxtBoardReader())
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=_MARKET_FETCH_ERROR_DETAIL) from exc

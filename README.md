@@ -92,6 +92,15 @@ for that integration. Unknown order outcomes retain reservations.
 
 ## Run locally
 
+Configure the OKX API key, secret, passphrase and demo/live environment once in
+Settings. Select the market in Market, the strategy editor or the manual order
+ticket. Each strategy's instrument identifies its market, so spot and derivative
+strategies can share the same credentials without changing a global setting.
+Account synchronization reads all four supported markets; actual access remains
+subject to the OKX account's permissions. Legacy settings containing
+`exchange.market_type` still load, but that field no longer controls routing and
+is omitted when settings are saved.
+
 Start the backend API on port 8080:
 
 ```bash

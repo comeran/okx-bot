@@ -174,10 +174,12 @@ async def _lifespan(_app: FastAPI):
     holder: dict[str, asyncio.Task[None] | None] = {"risk": None, "sync": None}
 
     async def start_risk() -> None:
-        from src.ops.phase3_recovery import sync_forever
+        from src.ops.phase3_recovery import default_private_fetch, sync_forever
 
         holder["risk"] = asyncio.create_task(supervise_forever())
-        holder["sync"] = asyncio.create_task(sync_forever())
+        holder["sync"] = asyncio.create_task(
+            sync_forever(fetch=default_private_fetch())
+        )
 
     async def stop_risk() -> None:
         for key in ("risk", "sync"):

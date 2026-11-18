@@ -25,7 +25,8 @@ def test_context_is_unverified_and_never_exposes_raw_credentials():
 
     assert context == {
         "account_scope_id": scope.account_scope_id,
-        "exchange": "okx", "environment": "sandbox", "market_type": "spot",
+        "exchange": "okx", "environment": "sandbox", "market_type": "all",
+        "market_types": ["spot", "swap", "future", "option"],
         "identity_verified": False, "available": True, "reason": None,
         "execution_ready": False,
     }
@@ -75,12 +76,12 @@ def test_missing_credentials_return_unavailable_context(field, value):
     assert context["execution_ready"] is False
 
 
-@pytest.mark.parametrize("market", ["swap", "future", "option", "", None])
-def test_unsupported_market_never_creates_execution_scope(market):
+@pytest.mark.parametrize("market", ["", None, "margin"])
+def test_legacy_market_does_not_limit_execution_scope(market):
     context, scope = scope_module().build_execution_context(configured(market_type=market))
-    assert scope is None
-    assert context["available"] is False
-    assert context["reason"] == "unsupported_market"
+    assert scope is not None
+    assert context["available"] is True
+    assert context["reason"] is None
 
 
 def test_context_normalizes_spot_capability_and_key_whitespace():
@@ -89,7 +90,7 @@ def test_context_normalizes_spot_capability_and_key_whitespace():
         api_key=" synthetic-key-A ", market_type=" SPOT ",
     ))
     assert same == first
-    assert context["market_type"] == "spot"
+    assert context["market_type"] == "all"
 
 
 @pytest.mark.parametrize("overrides", [

@@ -63,6 +63,17 @@ export async function activateStrategyAllocation(
   return response.data;
 }
 
+export async function exchangeActivateStrategyAllocation(
+  strategy: string,
+  update: Omit<StrategyAllocationUpdate, 'budget'> & { acknowledge_budget: true },
+): Promise<StrategyAllocationEnvelope> {
+  const response = await axios.post<StrategyAllocationEnvelope>(
+    `${allocationUrl(strategy)}/exchange-activate`,
+    update,
+  );
+  return response.data;
+}
+
 export async function releaseStrategyAllocation(
   strategy: string,
   update: Omit<StrategyAllocationUpdate, 'budget'>,

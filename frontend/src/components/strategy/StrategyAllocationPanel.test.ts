@@ -10,6 +10,7 @@ const api = vi.hoisted(() => ({
   start: vi.fn(),
   activate: vi.fn(),
   release: vi.fn(),
+  exchangeActivate: vi.fn(),
   readiness: vi.fn(),
 }));
 vi.mock('@/services/strategyAllocations', () => ({
@@ -18,6 +19,7 @@ vi.mock('@/services/strategyAllocations', () => ({
   deleteStrategyAllocation: api.remove,
   activateStrategyAllocation: api.activate,
   releaseStrategyAllocation: api.release,
+  exchangeActivateStrategyAllocation: api.exchangeActivate,
   getStrategyAllocationReadiness: api.readiness,
 }));
 vi.mock('@/services/strategies', () => ({ startStrategy: api.start }));
@@ -73,7 +75,7 @@ describe('StrategyAllocationPanel', () => {
     for (let i = 0; i < 4; i += 1) await wrapper.flush();
     expect(wrapper.text()).toContain('OKX live');
     expect(wrapper.text()).toContain('Exchange routing');
-    expect(wrapper.text()).toContain('Live activation stays closed');
+    expect(wrapper.text()).toContain('Start trading with the saved budget');
     expect(wrapper.text()).not.toContain('Local paper');
     expect(wrapper.text()).not.toContain('Activate local budget');
     wrapper.unmount();
@@ -340,7 +342,7 @@ describe('StrategyAllocationPanel', () => {
     expect(wrapper.text()).toContain('Strategy cash');
     expect(wrapper.text()).toContain('62');
     expect(wrapper.text()).toContain('Strategy realized PnL');
-    expect(wrapper.text()).toContain('Live opening stays closed');
+    expect(wrapper.text()).toContain('This cash belongs only to the current strategy.');
     expect(api.start).not.toHaveBeenCalled();
     wrapper.unmount();
   });

@@ -20,7 +20,7 @@ class MACrossStrategy(BaseStrategy):
         symbol: str = "BTC-USDT",
         fast_window: int = 10,
         slow_window: int = 30,
-        amount: float = 0.1,
+        amount: float = 0.0001,
     ) -> None:
         super().__init__()
         if not _is_integral_window(fast_window) or fast_window < 1:
@@ -123,7 +123,7 @@ def ma_cross_definition() -> StrategyDefinition:
                 "number",
                 label="Order amount",
                 description="Base asset amount submitted for each signal.",
-                default=0.1,
+                default=0.0001,
                 minimum=0,
                 step=0.01,
                 exclusive_min=True,

@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch, type Directive } from 'vue';
-import { ElMessage, ElMessageBox } from 'element-plus';
+import { computed, nextTick, ref, watch, type Directive } from 'vue';
+import { ElMessageBox } from 'element-plus';
 import { useI18n } from 'vue-i18n';
 
 import type {
@@ -9,7 +9,8 @@ import type {
   StrategyParameterDefinition,
   StrategyValidationIssue,
 } from '@/types/strategy';
-import { fetchTickers } from '@/services/market';
+import { useMarketSymbols } from '@/composables/useMarketSymbols';
+import { fallbackSymbolsByType, marketTypeForSymbol, marketTypeOptions, type MarketType } from '@/utils/market';
 import { fieldIssuesByPath, switchStrategyType } from '@/utils/strategyManagement';
 
 const model = defineModel<StrategyConfigPayload>({ required: true });
@@ -31,22 +32,27 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 const selectedType = ref(model.value.strategy_type);
-let componentActive = false;
 let typeRequestSequence = 0;
 const issueGroups = computed(() => fieldIssuesByPath(props.issues));
 const selectedDefinition = computed(() => props.definitions.find(
   (definition) => definition.strategy_type === model.value.strategy_type,
 ));
 const nameReadonly = computed(() => props.readonly || props.mode === 'edit');
-const fallbackSymbols = ['BTC-USDT', 'ETH-USDT', 'OKB-USDT', 'SOL-USDT', 'BTC-USDT-SWAP', 'ETH-USDT-SWAP', 'SOL-USDT-SWAP'];
+const selectedMarket = ref<MarketType>(marketTypeForSymbol(model.value.symbol) ?? 'spot');
+const { fetchedSymbols, symbolsLoading } = useMarketSymbols(selectedMarket);
+const marketValue = computed({
+  get: () => selectedMarket.value,
+  set: (value: MarketType) => {
+    if (marketTypeForSymbol(model.value.symbol) !== value) updateCommonField('symbol', '');
+    selectedMarket.value = value;
+  },
+});
 const canonicalTimeframes = ['1m', '5m', '15m', '1h', '4h', '1d'];
-const fetchedSymbols = ref<string[]>([]);
-const symbolsLoading = ref(false);
 const symbolOptions = computed(() => uniqueStrings([
-  ...fallbackSymbols,
+  ...fallbackSymbolsByType[selectedMarket.value],
   model.value.symbol,
   ...fetchedSymbols.value,
-]));
+]).filter((symbol) => marketTypeForSymbol(symbol) === selectedMarket.value));
 const timeframeOptions = computed(() => uniqueStrings([
   ...canonicalTimeframes,
   canonicalTimeframes.includes(model.value.timeframe) ? '' : model.value.timeframe,
@@ -69,13 +75,9 @@ const vComboboxAria: Directive<HTMLElement, ComboboxAriaBinding> = {
   updated: syncComboboxAria,
 };
 
-onMounted(() => {
-  componentActive = true;
-  void loadSymbolOptions();
-});
-
-onUnmounted(() => {
-  componentActive = false;
+watch(() => model.value.symbol, (symbol) => {
+  const market = marketTypeForSymbol(symbol);
+  if (market) selectedMarket.value = market;
 });
 
 watch(() => model.value.strategy_type, (value) => {
@@ -104,25 +106,6 @@ function syncComboboxAria(element: HTMLElement, binding: { value: ComboboxAriaBi
       else combobox.removeAttribute(attribute);
     }
   });
-}
-
-async function loadSymbolOptions(): Promise<void> {
-  symbolsLoading.value = true;
-  const results = await Promise.allSettled([
-    fetchTickers('spot'),
-    fetchTickers('swap'),
-  ]);
-  if (!componentActive) return;
-  const symbols = results.flatMap((result) => (
-    result.status === 'fulfilled'
-      ? result.value.map((ticker) => ticker.symbol).filter(Boolean)
-      : []
-  ));
-  fetchedSymbols.value = uniqueStrings(symbols);
-  if (results.some((result) => result.status === 'rejected')) {
-    ElMessage.warning(t('market.unableToLoadSymbols'));
-  }
-  symbolsLoading.value = false;
 }
 
 function updateCommonField<Key extends 'symbol' | 'timeframe'>(key: Key, value: StrategyConfigPayload[Key]): void {
@@ -250,6 +233,17 @@ function updateParameter(key: string, value: string | number | boolean | null | 
             {{ t('strategies.form.strategyTypeDescription') }}
           </p>
           <span :id="errorId('strategy_type')" class="sr-only">{{ fieldError('strategy_type') }}</span>
+        </el-form-item>
+      </el-col>
+
+      <el-col :xs="24" :sm="12">
+        <el-form-item :label="t('market.marketType')">
+          <el-select id="strategy-market" v-model="marketValue" class="strategy-form__control"
+            :aria-label="t('market.marketType')" :disabled="readonly">
+            <el-option v-for="market in marketTypeOptions" :key="market" :value="market"
+              :label="t(`settings.marketTypes.${market}`)" />
+          </el-select>
+          <p class="strategy-form__description">{{ t('market.sharedCredentials') }}</p>
         </el-form-item>
       </el-col>
 

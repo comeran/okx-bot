@@ -89,7 +89,7 @@ async def probe_saved_exchange_auth(
     try:
         client = okx_client.create_okx_client(
             api_key=exchange.api_key, secret=exchange.secret,
-            passphrase=exchange.passphrase, default_type=exchange.market_type,
+            passphrase=exchange.passphrase, default_type="spot",
             demo=exchange.demo,
         )
         payload = await asyncio.wait_for(
@@ -119,9 +119,13 @@ async def probe_saved_exchange_auth(
                 # Cleanup must not expose credentials carried by transport exceptions.
                 pass
 
-    # The scope fingerprint covers only the key. Compare all saved fields as well,
-    # after request and cleanup awaits, to reject same-key secret/passphrase races.
-    if load_settings().exchange != exchange:
+    # Recheck credentials/environment after awaits, including same-key secret
+    # rotation. A legacy market preference is unrelated to authentication.
+    current = load_settings().exchange
+    if any(
+        getattr(current, field) != getattr(exchange, field)
+        for field in ("api_key", "secret", "passphrase", "demo")
+    ):
         raise _scope_changed()
     result["checked_at"] = int(time.time() * 1000)
     return result

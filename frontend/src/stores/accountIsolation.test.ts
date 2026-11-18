@@ -114,6 +114,13 @@ describe('authoritative account context', () => {
 });
 
 describe('account bound dashboard', () => {
+  it('accepts account facts independently of a per-operation market', async () => {
+    api.context.mockResolvedValueOnce({ ...context(), market_type: 'all', market_types: ['spot', 'swap', 'future', 'option'] });
+    await ready();
+    const dashboard = useDashboardStore();
+    dashboard.addWebSocketMessage({ type: 'account', scope: 'exchange', context: context(), account: { equity: 10, daily_pnl: 0 } });
+    expect(dashboard.account?.equity).toBe(10);
+  });
   it.each(['trade', 'trades'])('rejects unbound %s events and snapshots before visible history', async (field) => {
     await ready();
     const dashboard = useDashboardStore();

@@ -151,7 +151,7 @@ def test_okx_adapter_factory_strips_only_for_credential_gate_not_forwarding():
         market_type = " spot "
         demo = False
 
-    create_okx_adapter(ExchangeConfig(), adapter_classes={"spot": constructor})
+    create_okx_adapter(ExchangeConfig(), adapter_classes={"spot": constructor}, market_type="spot")
 
     constructor.assert_called_once_with(" api-key ", " secret ", " passphrase ", demo=False)
 
@@ -1181,6 +1181,24 @@ async def test_okx_base_adapter_rejects_stop_order_without_trigger_price():
         )
 
     assert fake.create_order_calls == []
+
+
+@pytest.mark.asyncio
+async def test_account_freshness_uses_whole_account_timestamp_before_idle_usdt_timestamp():
+    adapter = OKXBaseAdapter("key", "secret", "pass", "spot", demo=True)
+    adapter._exchange.balance_response = {"info": {"data": [{
+        "uTime": "1700400000000",
+        "totalEq": "1000",
+        "details": [{
+            "ccy": "USDT", "cashBal": "1000", "availBal": "1000",
+            "uTime": "1700000000000",
+        }],
+    }]}}
+
+    snapshot = await adapter.fetch_account_snapshot()
+
+    assert snapshot.updated_at == 1700400000000
+    assert snapshot.cash_balance == 1000
 
 
 @pytest.mark.asyncio
@@ -4345,18 +4363,18 @@ async def test_okx_base_adapter_fails_closed_for_trigger_open_order_network_fail
 async def test_okx_base_adapter_surfaces_unsupported_trigger_endpoint_without_missing_order_result(
     caplog,
 ):
-    adapter = OKXBaseAdapter("", "", "", "option")
+    adapter = OKXBaseAdapter("", "", "", "swap")
     fake = FakeOKX.instances[0]
 
     async def fetch_open_orders(symbol=None, since=None, limit=None, params=None):
         if params == {"trigger": True}:
-            raise NotSupported("algo endpoint is unsupported for options")
+            raise NotSupported("algo endpoint is unsupported")
         return []
 
     fake.fetch_open_orders = fetch_open_orders
 
     with pytest.raises(NotSupported, match="algo endpoint is unsupported"):
-        await adapter.fetch_open_order_snapshots(["BTC-USD-260925-100000-C"])
+        await adapter.fetch_open_order_snapshots(["BTC-USDT-SWAP"])
 
     assert "Trigger open-order endpoint is not supported" in caplog.text
 

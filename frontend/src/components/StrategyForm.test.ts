@@ -198,6 +198,40 @@ function internalCombobox(wrapper: Awaited<ReturnType<typeof mount>>, selectId: 
 }
 
 describe('StrategyForm', () => {
+  it.each(['edit', 'clone'] as const)('loads the symbol market in %s mode and excludes other markets', async (mode) => {
+    fetchTickers.mockResolvedValue([{ symbol: 'BTC/USDT:USDT-271231' }, { symbol: 'BTC-USDT' }]);
+    const { wrapper } = await mountForm({ mode, model: draft({ symbol: 'BTC/USDT:USDT-271231' }) });
+    await wrapper.flush();
+    expect(control(wrapper, 'strategy-market').props.modelValue).toBe('future');
+    expect(fetchTickers).toHaveBeenCalledWith('future');
+    expect(selectOptionValues(wrapper, 'strategy-symbol')).toEqual(['BTC/USDT:USDT-271231']);
+    wrapper.unmount();
+  });
+
+  it('clears an incompatible symbol and fences late ticker responses when the market changes', async () => {
+    const old = deferred<Array<{ symbol: string }>>();
+    const latest = deferred<Array<{ symbol: string }>>();
+    fetchTickers.mockReturnValueOnce(old.promise).mockReturnValueOnce(latest.promise);
+    const { wrapper, model } = await mountForm({ model: draft({ symbol: 'BTC-USDT' }) });
+    await wrapper.invoke(control(wrapper, 'strategy-market'), 'onUpdate:modelValue', 'option');
+    expect(model().symbol).toBe('');
+    expect(fetchTickers).toHaveBeenLastCalledWith('option');
+    latest.resolve([{ symbol: 'BTC-USD-271231-100000-C' }, { symbol: 'ETH-USDT' }]);
+    await wrapper.flush();
+    old.resolve([{ symbol: 'LTC-USDT' }]);
+    await wrapper.flush();
+    expect(selectOptionValues(wrapper, 'strategy-symbol')).toEqual(['BTC-USD-271231-100000-C']);
+    expect(control(wrapper, 'strategy-symbol').props.loading).toBe(false);
+    expect(model()).not.toHaveProperty('market_type');
+    wrapper.unmount();
+  });
+
+  it('defaults a blank new strategy to spot', async () => {
+    const { wrapper } = await mountForm({ model: draft({ symbol: '' }) });
+    expect(control(wrapper, 'strategy-market').props.modelValue).toBe('spot');
+    expect(fetchTickers).toHaveBeenCalledWith('spot');
+    wrapper.unmount();
+  });
   beforeEach(() => {
     confirm.mockReset();
     confirm.mockResolvedValue(undefined);
@@ -293,7 +327,7 @@ describe('StrategyForm', () => {
     expect(control(wrapper, 'strategy-timeframe').type).toBe('el-select');
   });
 
-  it('combines fetched spot and swap symbols with fallbacks and the current value', async () => {
+  it('combines only the selected market symbols with its fallbacks and current value', async () => {
     fetchTickers.mockImplementation((marketType: string) => Promise.resolve(
       marketType === 'spot'
         ? [{ symbol: 'XRP-USDT' }, { symbol: 'BTC-USDT' }]
@@ -303,18 +337,12 @@ describe('StrategyForm', () => {
     const { wrapper } = await mountForm({ model: draft({ symbol: 'LEGACY-USDT-SWAP' }) });
     await wrapper.flush();
 
-    expect(fetchTickers).toHaveBeenCalledWith('spot');
     expect(fetchTickers).toHaveBeenCalledWith('swap');
     expect(selectOptionValues(wrapper, 'strategy-symbol')).toEqual([
-      'BTC-USDT',
-      'ETH-USDT',
-      'OKB-USDT',
-      'SOL-USDT',
       'BTC-USDT-SWAP',
       'ETH-USDT-SWAP',
       'SOL-USDT-SWAP',
       'LEGACY-USDT-SWAP',
-      'XRP-USDT',
       'XRP-USDT-SWAP',
     ]);
     expect(control(wrapper, 'strategy-symbol').props).toMatchObject({ filterable: true, 'allow-create': true, loading: false });
@@ -392,7 +420,7 @@ describe('StrategyForm', () => {
     });
   });
 
-  it('retains symbol fallbacks and successful ticker results when one ticker request fails', async () => {
+  it('retains selected-market fallbacks and the current value when tickers fail', async () => {
     fetchTickers.mockImplementation((marketType: string) => (
       marketType === 'spot'
         ? Promise.reject(new Error('spot unavailable'))
@@ -407,11 +435,7 @@ describe('StrategyForm', () => {
       'ETH-USDT',
       'OKB-USDT',
       'SOL-USDT',
-      'BTC-USDT-SWAP',
-      'ETH-USDT-SWAP',
-      'SOL-USDT-SWAP',
       'LEGACY-USDT',
-      'LTC-USDT-SWAP',
     ]);
     expect(warning).toHaveBeenCalledTimes(1);
     expect(warning).toHaveBeenCalledWith('market.unableToLoadSymbols');
@@ -419,23 +443,18 @@ describe('StrategyForm', () => {
 
   it('ignores pending ticker results after unmount', async () => {
     const spot = deferred<Array<{ symbol: string }>>();
-    const swap = deferred<Array<{ symbol: string }>>();
-    fetchTickers.mockImplementation((marketType: string) => (
-      marketType === 'spot' ? spot.promise : swap.promise
-    ));
+    fetchTickers.mockReturnValue(spot.promise);
 
     const { wrapper, formInstance } = await mountInstrumentedForm({ model: draft({ symbol: 'LEGACY-USDT' }) });
     const setupState = formInstance.setupState as unknown as { fetchedSymbols: string[]; symbolsLoading: boolean };
 
     expect(fetchTickers).toHaveBeenCalledWith('spot');
-    expect(fetchTickers).toHaveBeenCalledWith('swap');
     expect(control(wrapper, 'strategy-symbol').props.loading).toBe(true);
     expect(setupState.symbolsLoading).toBe(true);
     expect(setupState.fetchedSymbols).toEqual([]);
 
     wrapper.unmount();
     spot.reject(new Error('spot unavailable'));
-    swap.resolve([{ symbol: 'LTC-USDT-SWAP' }]);
     await wrapper.flush();
     await wrapper.flush();
 
@@ -461,7 +480,6 @@ describe('StrategyForm', () => {
     });
     await wrapper.flush();
 
-    expect(fetchTickers).toHaveBeenCalledWith('spot');
     expect(fetchTickers).toHaveBeenCalledWith('swap');
     expect(internalCombobox(wrapper, 'strategy-strategy-type').props).toMatchObject({
       'aria-describedby': 'strategy-strategy-type-description strategy-strategy-type-error',

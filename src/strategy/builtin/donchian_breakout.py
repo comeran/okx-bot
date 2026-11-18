@@ -16,7 +16,7 @@ class DonchianBreakoutStrategy(BaseStrategy):
         symbol: str = "BTC-USDT",
         entry_window: int = 20,
         exit_window: int = 10,
-        amount: float = 0.1,
+        amount: float = 0.0001,
     ) -> None:
         super().__init__()
         if not _is_integral(entry_window) or entry_window < 1:
@@ -103,7 +103,7 @@ def donchian_breakout_definition() -> StrategyDefinition:
                 "number",
                 label="Order amount",
                 description="Base asset amount submitted for each signal.",
-                default=0.1,
+                default=0.0001,
                 minimum=0,
                 step=0.01,
                 exclusive_min=True,

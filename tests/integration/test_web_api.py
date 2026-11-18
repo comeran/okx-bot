@@ -348,7 +348,15 @@ def test_private_sync_endpoint_uses_factory_market_type_aliases(monkeypatch, mar
     assert response.status_code == 200
 
 
-def test_private_sync_endpoint_rejects_unsupported_factory_market_type(monkeypatch):
+def test_private_sync_endpoint_ignores_legacy_market_for_mixed_instruments(monkeypatch):
+    seen = []
+
+    async def fake_sync(repository, adapter, **kwargs):
+        seen.append(kwargs["symbols"])
+        return SimpleNamespace(as_response=lambda: {})
+
+    monkeypatch.setattr(ops_api, "_create_adapter", lambda settings: SimpleNamespace())
+    monkeypatch.setattr(ops_api, "sync_private_state", fake_sync)
     monkeypatch.setattr(
         ops_api.settings_api,
         "_load_settings",
@@ -357,10 +365,14 @@ def test_private_sync_endpoint_rejects_unsupported_factory_market_type(monkeypat
     app = FastAPI()
     app.include_router(ops_api.create_router(), prefix="/api/ops")
 
-    response = TestClient(app).post("/api/ops/sync/private", json={}, params=private_scope_params())
+    response = TestClient(app).post(
+        "/api/ops/sync/private", params=private_scope_params(),
+        json={"symbols": ["BTC-USDT", "BTC-USDT-SWAP"]},
+    )
 
-    assert response.status_code == 409
-    assert response.json()["detail"]["code"] == "account_context_unavailable"
+    assert response.status_code == 200
+    assert response.json()["context"]["market_type"] == "all"
+    assert seen == [["BTC-USDT", "BTC-USDT-SWAP"]]
 
 
 @pytest.mark.parametrize("error", [TimeoutError("timed out"), ConnectionError("offline")])
@@ -672,6 +684,7 @@ async def test_registered_builtin_types_are_not_implicit_runtime_strategies(app)
         "rsi_mean_reversion",
         "bollinger_mean_reversion",
         "donchian_breakout",
+        "rule",
     ]
 
     transport = ASGITransport(app=app)
@@ -717,6 +730,7 @@ async def test_legacy_ma_cross_runtime_defaults_to_1m_subscription_and_latest_pr
 
     def capture_order_manager(**kwargs):
         captured["latest_price"] = kwargs["latest_price"]
+        captured["market_type"] = kwargs["market_type"]
         return CapturingOrderManager()
 
     monkeypatch.setattr(strategy_api, "Repository", FakeRepository, raising=False)
@@ -738,6 +752,7 @@ async def test_legacy_ma_cross_runtime_defaults_to_1m_subscription_and_latest_pr
         ("BTC-USDT", "1m")
     ]
     assert captured["latest_price"]("BTC-USDT") == 123.45
+    assert captured["market_type"] == "spot"
 
 
 @pytest.mark.asyncio
@@ -805,7 +820,7 @@ async def test_strategy_config_api_saves_and_lists_configs(monkeypatch):
         "strategy_type": "ma_cross",
         "symbol": "BTC-USDT",
         "timeframe": "1h",
-        "params": {"fast_window": 5, "slow_window": 20, "amount": 0.1},
+        "params": {"fast_window": 5, "slow_window": 20, "amount": 0.0001},
         "enabled": True,
         "created_at": 1700000000000,
         "updated_at": 1700000000000,
@@ -984,7 +999,7 @@ async def test_strategy_config_crud_clone_validate_and_yaml_use_normalized_confi
     assert duplicate_resp.status_code == 409
     assert get_resp.status_code == 200
     assert update_resp.status_code == 200
-    assert update_resp.json()["params"] == {"fast_window": 6, "slow_window": 20, "amount": 0.1}
+    assert update_resp.json()["params"] == {"fast_window": 6, "slow_window": 20, "amount": 0.0001}
     assert clone_resp.status_code == 201
     assert clone_resp.json()["name"] == "ma_cross_clone"
     assert clone_resp.json()["enabled"] is False
@@ -1321,7 +1336,7 @@ async def test_clone_config_to_different_strategy_type_without_params_uses_targe
         "period": 14,
         "oversold": 30,
         "overbought": 70,
-        "amount": 0.1,
+        "amount": 0.0001,
     }
     transport = ASGITransport(app=app)
 
@@ -3417,13 +3432,13 @@ def test_create_order_manager_maps_demo_runtime_to_sandbox_adapter(monkeypatch):
         lambda: AppConfig(
             mode="demo",
             exchange=ExchangeConfig(
-                api_key="key", secret="secret", passphrase="pass", demo=False,
+                api_key="key", secret="secret", passphrase="pass", demo=True,
             ),
         ),
     )
     monkeypatch.setattr(strategy_api, "OKXSpotAdapter", SentinelAdapter)
 
-    manager = strategy_api.create_order_manager()
+    manager = strategy_api.create_order_manager(market_type="spot")
 
     assert manager.router.mode == "live"
     assert constructed == [True]
@@ -3466,7 +3481,7 @@ def test_create_order_manager_rejects_live_missing_credentials_before_dependenci
         "load_runtime_settings",
         lambda: AppConfig(
             mode="live",
-            exchange=ExchangeConfig(api_key="key", secret="", passphrase="pass"),
+            exchange=ExchangeConfig(api_key="key", secret="", passphrase="pass", demo=False),
         ),
     )
     monkeypatch.setattr(strategy_api, "Repository", SentinelRepository)
@@ -3514,7 +3529,7 @@ def test_create_order_manager_live_selects_okx_adapter(
                 secret="secret",
                 passphrase="pass",
                 market_type=market_type,
-                demo=True,
+                demo=False,
             ),
             risk=RiskConfig(
                 allow_live_open_orders=True,
@@ -3524,7 +3539,7 @@ def test_create_order_manager_live_selects_okx_adapter(
     )
     monkeypatch.setattr(strategy_api, adapter_name, SentinelAdapter)
 
-    manager = strategy_api.create_order_manager(order_router_mode="live")
+    manager = strategy_api.create_order_manager(order_router_mode="live", market_type=market_type)
 
     assert manager.router.mode == "live"
     assert manager.router.live is not None
@@ -3552,7 +3567,7 @@ async def test_create_order_manager_live_syncs_with_router_adapter(monkeypatch):
                 secret="secret",
                 passphrase="pass",
                 market_type="swap",
-                demo=True,
+                demo=False,
             ),
         ),
     )
@@ -3572,6 +3587,7 @@ async def test_create_order_manager_live_syncs_with_router_adapter(monkeypatch):
         repository=repository,
         on_risk_event=on_risk_event,
         order_router_mode="live",
+        market_type="swap",
     )
 
     await manager.post_live_order_sync("ma_cross", "BTC-USDT-SWAP")
@@ -3892,9 +3908,6 @@ async def test_refresh_live_state_endpoint_maps_unsupported_provider_capability_
     "exchange",
     [
         ExchangeConfig(api_key="", secret="", passphrase="", market_type="spot", demo=True),
-        ExchangeConfig(
-            api_key="key", secret="secret", passphrase="pass", market_type="unknown", demo=True
-        ),
     ],
 )
 async def test_refresh_live_state_endpoint_maps_invalid_live_configuration_to_422(
@@ -3950,6 +3963,7 @@ async def test_refresh_live_state_endpoint_rejects_strategy_owned_live_state(mon
 
 @pytest.mark.asyncio
 async def test_start_strategy_refreshes_live_state_before_order_manager(monkeypatch):
+    monkeypatch.setattr(strategy_api, "live_trading_configured", lambda settings: False)
     class FakeRepository:
         def get_strategy_configs(self):
             return []
@@ -4018,7 +4032,7 @@ async def test_start_strategy_refreshes_live_state_before_order_manager(monkeypa
                 secret="secret",
                 passphrase="pass",
                 market_type="swap",
-                demo=True,
+                demo=False,
             ),
         ),
     )
@@ -4045,7 +4059,7 @@ async def test_live_order_refresh_ignores_each_strategy_owner_for_exchange_state
     monkeypatch.setattr(
         strategy_api,
         "load_runtime_settings",
-        lambda: AppConfig(mode="live", exchange=ExchangeConfig(demo=True)),
+        lambda: AppConfig(mode="live", exchange=ExchangeConfig(demo=False)),
     )
     monkeypatch.setattr(strategy_api, "create_live_order_handler", lambda settings: object())
     monkeypatch.setattr(strategy_api, "refresh_okx_live_state", fake_refresh)
@@ -4086,7 +4100,7 @@ async def test_start_strategy_rejects_live_missing_credentials_before_creating_r
     monkeypatch.setattr(
         strategy_api,
         "load_runtime_settings",
-        lambda: AppConfig(mode="live"),
+        lambda: AppConfig(mode="live", exchange=ExchangeConfig(demo=False)),
     )
     monkeypatch.setattr(
         strategy_api,
@@ -5710,6 +5724,7 @@ async def test_start_strategy_clears_stale_error_before_successful_restart(monke
 
     class PassiveStrategy(BaseStrategy):
         name = "passive"
+        symbol = "BTC-USDT"
 
         async def on_bar(self, bar):
             pass
@@ -5772,7 +5787,7 @@ async def test_live_strategy_start_disables_paper_mark_to_market_hook(monkeypatc
 
     class Settings:
         mode = "live"
-        exchange = SimpleNamespace(market_type="spot")
+        exchange = SimpleNamespace(market_type="spot", demo=False)
 
     engine_kwargs = []
 
@@ -5821,6 +5836,7 @@ async def test_concurrent_start_strategy_requests_create_one_engine(monkeypatch)
 
     class PassiveStrategy(BaseStrategy):
         name = "passive"
+        symbol = "BTC-USDT"
 
         async def on_bar(self, bar):
             pass
@@ -5877,6 +5893,7 @@ async def test_stale_engine_error_does_not_stop_restarted_strategy(monkeypatch):
 
     class PassiveStrategy(BaseStrategy):
         name = "passive"
+        symbol = "BTC-USDT"
 
         async def on_bar(self, bar):
             pass
@@ -5934,12 +5951,14 @@ async def test_stopping_strategy_does_not_release_market_data_while_another_star
 
     class FirstStrategy(BaseStrategy):
         name = "first"
+        symbol = "BTC-USDT"
 
         async def on_bar(self, bar):
             pass
 
     class SecondStrategy(BaseStrategy):
         name = "second"
+        symbol = "BTC-USDT"
 
         async def on_bar(self, bar):
             pass
@@ -6180,6 +6199,7 @@ async def test_start_strategy_refreshes_market_data_service_after_all_strategies
 async def test_start_and_stop_strategy_runs_bot_engine_lifecycle(monkeypatch):
     class LifecycleStrategy(BaseStrategy):
         events: list[str] = []
+        symbol = "BTC-USDT"
 
         async def on_init(self):
             self.events.append("started")
@@ -6255,6 +6275,7 @@ async def test_start_strategy_wires_repository_backed_order_manager(monkeypatch)
 
     class BuyingStrategy(BaseStrategy):
         name = "buyer"
+        symbol = "BTC-USDT"
 
         async def on_init(self):
             await self.buy("BTC-USDT", 0.1, price=50000.0)
@@ -7767,7 +7788,6 @@ async def test_get_and_update_settings(app):
         "secret_set": True,
         "passphrase": "",
         "passphrase_set": True,
-        "market_type": "spot",
         "demo": True,
     }
     assert saved["backtest"]["initial_capital"] == 250000
@@ -7818,7 +7838,6 @@ async def test_settings_defaults_load_project_config_environment(monkeypatch):
         "secret_set": True,
         "passphrase": "",
         "passphrase_set": True,
-        "market_type": "spot",
         "demo": True,
     }
     assert settings["notify"] == {
@@ -7872,7 +7891,6 @@ async def test_settings_round_trip_keeps_existing_secrets(tmp_path, monkeypatch)
         "api_key": "real-api-key",
         "secret": "real-secret-value",
         "passphrase": "real-passphrase",
-        "market_type": "spot",
         "demo": True,
     }
     assert persisted["notify"] == {
@@ -7937,8 +7955,7 @@ async def test_settings_persist_across_app_instances(tmp_path, monkeypatch):
         "secret_set": True,
         "passphrase": "",
         "passphrase_set": True,
-        "market_type": "spot",
-        "demo": True,
+        "demo": False,
     }
     assert saved["backtest"]["initial_capital"] == 300000
     assert saved["risk"]["max_total_position_pct"] == 0.5
@@ -7957,7 +7974,6 @@ async def test_settings_persist_across_app_instances(tmp_path, monkeypatch):
     "payload",
     [
         {"mode": "turbo"},
-        {"exchange": {"market_type": "futures2"}},
         {"backtest": {"initial_capital": 0}},
         {"risk": {"max_daily_loss_pct": -0.1}},
         {"web": {"host": "127.0.0.1", "port": 70000}},

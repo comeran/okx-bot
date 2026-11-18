@@ -31,7 +31,6 @@ const form = reactive<AppSettingsUpdate>({
     api_key: '',
     secret: '',
     passphrase: '',
-    market_type: 'spot',
     demo: true,
   },
   backtest: {
@@ -64,8 +63,7 @@ function buildUpdatePayload(): AppSettingsUpdate {
       api_key: form.exchange.api_key,
       secret: form.exchange.secret,
       passphrase: form.exchange.passphrase,
-      market_type: form.exchange.market_type,
-      demo: form.exchange.demo,
+      demo: exchangeDemoForMode(form.mode, form.exchange.demo),
     },
     backtest: {
       initial_capital: form.backtest.initial_capital,
@@ -93,12 +91,11 @@ function buildUpdatePayload(): AppSettingsUpdate {
 
 function cloneSettings(settings: AppSettingsView): AppSettingsUpdate {
   return {
-    mode: settings.mode,
+    mode: hasEnvironmentConflict(settings) ? '' : settings.mode,
     exchange: {
       api_key: '',
       secret: '',
       passphrase: '',
-      market_type: settings.exchange.market_type,
       demo: settings.exchange.demo,
     },
     backtest: {
@@ -134,9 +131,20 @@ const staleData = computed(() => hasLoadedSettings.value && Boolean(loadError.va
 const actionDisabled = computed(() => loading.value || saving.value);
 const canPersist = computed(() => hasLoadedSettings.value && !loadError.value);
 const authenticationCheckDisabled = computed(() => actionDisabled.value || !canPersist.value
-  || isDirty.value || accountContext.loading || accountContext.authenticationChecking);
-const allowedModes = ['backtest', 'paper', 'live'] as const;
-const allowedMarketTypes = ['spot', 'swap', 'future', 'option'] as const;
+  || isDirty.value || hasValidationErrors.value || accountContext.loading || accountContext.authenticationChecking);
+const allowedModes = ['backtest', 'paper', 'demo', 'live'] as const;
+const environmentConflict = computed(() => settingsView.value && hasEnvironmentConflict(settingsView.value));
+const exchangeEnvironment = computed(() => exchangeDemoForMode(form.mode, form.exchange.demo) ? 'sandbox' : 'live');
+
+function exchangeDemoForMode(mode: string, legacyDemo: boolean): boolean {
+  if (mode === 'demo') return true;
+  if (mode === 'live') return false;
+  return legacyDemo;
+}
+
+function hasEnvironmentConflict(settings: AppSettingsView): boolean {
+  return exchangeDemoForMode(settings.mode, settings.exchange.demo) !== settings.exchange.demo;
+}
 
 type SettingsSectionKey = 'runtime' | 'exchange' | 'backtest' | 'risk' | 'notifications' | 'web';
 
@@ -170,14 +178,6 @@ function validateSettings(settings: AppSettingsUpdate): SettingsValidationState 
 
   if (!allowedModes.includes(settings.mode as typeof allowedModes[number])) {
     addValidationError(state, 'runtime', t('settings.validation.requiredField', { field: t('settings.mode') }));
-  }
-
-  if (!allowedMarketTypes.includes(settings.exchange.market_type as typeof allowedMarketTypes[number])) {
-    addValidationError(
-      state,
-      'exchange',
-      t('settings.validation.requiredField', { field: t('settings.marketType') }),
-    );
   }
 
   if (!isFiniteNumber(settings.backtest.initial_capital) || settings.backtest.initial_capital < 0) {
@@ -263,11 +263,10 @@ const mobileActionsStyle = {
 
 function applySettings(settings: AppSettingsView): void {
   settingsView.value = settings;
-  form.mode = settings.mode;
+  form.mode = hasEnvironmentConflict(settings) ? '' : settings.mode;
   form.exchange.api_key = '';
   form.exchange.secret = '';
   form.exchange.passphrase = '';
-  form.exchange.market_type = settings.exchange.market_type;
   form.exchange.demo = settings.exchange.demo;
   form.backtest = { ...settings.backtest };
   form.risk = { ...settings.risk };
@@ -426,6 +425,7 @@ onBeforeRouteLeave(async () => confirmIfDirty());
                     <el-select v-model="form.mode" class="settings-form__control">
                       <el-option :label="t('settings.modes.backtest')" value="backtest" />
                       <el-option :label="t('settings.modes.paper')" value="paper" />
+                      <el-option :label="t('settings.modes.demo')" value="demo" />
                       <el-option :label="t('settings.modes.live')" value="live" />
                     </el-select>
                   </el-form-item>
@@ -441,29 +441,20 @@ onBeforeRouteLeave(async () => confirmIfDirty());
               </span>
             </template>
             <template #content>
+              <p class="settings-page__hint">{{ t('market.sharedCredentials') }}</p>
+              <p v-if="environmentConflict" class="settings-page__validation" role="alert">
+                {{ t('settings.environmentConflict') }}
+              </p>
               <div v-if="validationState.exchange.length" class="settings-page__validation" role="alert" aria-live="polite">
                 <p v-for="(error, index) in validationState.exchange" :key="`exchange-${index}-${error}`" class="settings-page__validation-item">
                   {{ error }}
                 </p>
               </div>
 
-              <el-row :gutter="16">
-                <el-col :xs="24" :md="8">
-                  <el-form-item :label="t('settings.marketType')">
-                    <el-select v-model="form.exchange.market_type" class="settings-form__control">
-                      <el-option :label="t('settings.marketTypes.spot')" value="spot" />
-                      <el-option :label="t('settings.marketTypes.swap')" value="swap" />
-                      <el-option :label="t('settings.marketTypes.future')" value="future" />
-                      <el-option :label="t('settings.marketTypes.option')" value="option" />
-                    </el-select>
-                  </el-form-item>
-                </el-col>
-                <el-col :xs="24" :md="8">
-                  <el-form-item :label="t('settings.okxDemo')">
-                    <el-switch v-model="form.exchange.demo" />
-                  </el-form-item>
-                </el-col>
-              </el-row>
+              <p class="settings-page__hint" data-testid="exchange-environment">
+                {{ t('settings.exchangeEnvironment') }}：{{ t(`settings.environments.${exchangeEnvironment}`) }}
+                {{ t('settings.environmentDerived') }}
+              </p>
 
               <el-row :gutter="16">
                 <el-col :xs="24" :md="8">

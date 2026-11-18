@@ -51,6 +51,26 @@ export async function flattenPositions(): Promise<EmergencyOrderResult> {
   return response.data;
 }
 
+export async function stopEngine(): Promise<Record<string, unknown>> {
+  const response = await axios.post<Record<string, unknown>>('/api/ops/stop-engine');
+  return response.data;
+}
+
+export async function recoverControls(): Promise<Record<string, unknown>> {
+  const response = await axios.post<Record<string, unknown>>('/api/ops/recover');
+  return response.data;
+}
+
+export async function spotPreflight(body: {
+  symbol: string;
+  side: 'buy' | 'sell';
+  amount: string;
+  price: string;
+}): Promise<Record<string, unknown>> {
+  const response = await axios.post<Record<string, unknown>>('/api/ops/spot/preflight', body);
+  return response.data;
+}
+
 export interface DeskState {
   unresolved_live_orders: number;
   price_age_ms: number | null;

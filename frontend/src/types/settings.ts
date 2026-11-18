@@ -5,7 +5,6 @@ export interface ExchangeSettingsView {
   secret_set: boolean;
   passphrase: string;
   passphrase_set: boolean;
-  market_type: string;
   demo: boolean;
 }
 
@@ -13,7 +12,6 @@ export interface ExchangeSettingsUpdate {
   api_key: string;
   secret: string;
   passphrase: string;
-  market_type: string;
   demo: boolean;
 }
 

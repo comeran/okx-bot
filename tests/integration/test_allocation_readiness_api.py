@@ -50,7 +50,7 @@ def configured(monkeypatch):
             api_key="test-key",
             secret="test-secret",
             passphrase="test-passphrase",
-            demo=True,
+            demo=False,
         ),
     )
     save_runtime_settings(config)
@@ -297,7 +297,10 @@ def row_counts(repository):
         }
 
 
-def test_repeated_get_has_no_financial_writes_or_private_calls(configured, deny_network_requests):
+def test_repeated_get_has_no_financial_writes_or_private_calls(
+    configured, deny_network_requests, monkeypatch,
+):
+    monkeypatch.setattr(strategies, "live_trading_configured", lambda settings: False)
     state = configured
     master_before = row_counts(Repository())
     facts_before = row_counts(state.facts)
@@ -378,7 +381,8 @@ def test_gather_rechecks_configuration_and_draft_before_return(configured, monke
             if change == "key":
                 state.config.exchange.api_key = "changed-key"
             elif change == "environment":
-                state.config.exchange.demo = False
+                state.config.mode = "demo"
+                state.config.exchange.demo = True
             else:
                 state.config.exchange.secret = "changed-secret"
             save_runtime_settings(state.config)

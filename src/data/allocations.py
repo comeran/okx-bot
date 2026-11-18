@@ -34,8 +34,10 @@ class AllocationScope:
     exchange: str = "okx"
 
     def __post_init__(self) -> None:
-        if self.exchange != "okx" or self.market_type != "spot":
-            raise ValueError("Allocation drafts support OKX spot only")
+        from src.core.execution_scope import tradable_market
+
+        if self.exchange != "okx" or tradable_market(self.market_type) != self.market_type:
+            raise ValueError("Allocation drafts support OKX spot, swap, future, and option")
         if self.environment not in {"sandbox", "live"}:
             raise ValueError("Invalid exchange environment")
         if not re.fullmatch(r"[0-9a-f]{64}", self.account_fingerprint):
@@ -103,11 +105,24 @@ class AllocationAuditRecord(SQLModel, table=True):
     timestamp: int
 
 
+def instrument_symbol(symbol: str, market_type: str = "spot") -> tuple[str, str]:
+    """按账户市场校验合约，并取出报价币。"""
+    from src.core.execution_scope import tradable_market
+
+    market = tradable_market(market_type)
+    if market is None:
+        raise ValueError("Allocation drafts require a supported market")
+    normalized = canonical_symbol(symbol, market_type=market)
+    if not is_supported_canonical_symbol(normalized, market_type=market):
+        raise ValueError("Allocation drafts require one supported instrument")
+    parts = normalized.split("-")
+    if len(parts) < 2 or not parts[1]:
+        raise ValueError("Allocation drafts require one supported instrument")
+    return normalized, parts[1]
+
+
 def spot_symbol(symbol: str) -> tuple[str, str]:
-    normalized = canonical_symbol(symbol, market_type="spot")
-    if not is_supported_canonical_symbol(normalized, market_type="spot"):
-        raise ValueError("Allocation drafts require one spot symbol")
-    return normalized, normalized.split("-")[1]
+    return instrument_symbol(symbol, "spot")
 
 
 def _revision(value: int) -> None:
@@ -187,7 +202,7 @@ class AllocationStore:
             raise ValueError("Budget must be a positive finite number")
         if not strategy.strip() or strategy.startswith("__"):
             raise ValueError("A strategy name is required")
-        symbol, currency = spot_symbol(symbol)
+        symbol, currency = instrument_symbol(symbol, scope.market_type)
         try:
             with Session(self.engine) as session, session.begin():
                 record = self._record(session, scope, strategy)

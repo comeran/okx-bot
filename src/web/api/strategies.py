@@ -11,6 +11,7 @@ from dataclasses import is_dataclass, replace
 from typing import Any, Protocol
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
+from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from src.core.config import BacktestConfig
@@ -19,7 +20,9 @@ from src.core.execution_mode import (
     account_environment,
     adapter_uses_sandbox,
     normalized_mode,
+    validate_execution_environment,
 )
+from src.core.execution_scope import tradable_market
 from src.core.runtime_settings import load_runtime_settings
 from src.core.types import Order, OrderStatus, OrderType
 from src.data.models import StrategyConfigRecord
@@ -27,12 +30,14 @@ from src.data.paper_book import PaperBook
 from src.data.repository import Repository
 from src.exchange.factory import create_okx_adapter
 from src.exchange.live_sync import refresh_okx_live_state
+from src.exchange.markets import market_type_for_symbol
 from src.exchange.okx_futures import OKXFuturesAdapter
 from src.exchange.okx_options import OKXOptionsAdapter
 from src.exchange.okx_spot import OKXSpotAdapter
 from src.exchange.okx_swap import OKXSwapAdapter
 from src.market.service import MarketDataService
 from src.notify.telegram import RiskEventTelegramNotifier, TelegramNotifier
+from src.ops.phase4_controls import record_source_heartbeat
 from src.ops.private_sync import sync_private_state
 from src.order.lifecycle import record_transition
 from src.order.manager import PRICE_FRESHNESS_UNTRACKED, UnifiedOrderManager
@@ -146,16 +151,32 @@ def paper_backtest_config() -> BacktestConfig:
 
 
 def create_market_data_service() -> MarketDataService:
-    from src.market.public_stream import OkxPublicCandleStream
-
     exchange = load_runtime_settings().exchange
+    last_heartbeat_at = 0
+
+    def record_market_observation(symbol: str, timeframe: str, observed_at: int) -> None:
+        nonlocal last_heartbeat_at
+        del symbol, timeframe
+        if observed_at - last_heartbeat_at < 5_000:
+            return
+        try:
+            record_source_heartbeat(
+                Repository(), "market", observed_at=observed_at, status="fresh",
+            )
+            last_heartbeat_at = observed_at
+        except Exception:
+            logger.warning("记录行情新鲜度失败", exc_info=True)
+
     return MarketDataService(
         exchange.api_key,
         exchange.secret,
         exchange.passphrase,
-        default_type=exchange.market_type,
+        default_type="spot",
         demo=exchange.demo,
-        public_stream=OkxPublicCandleStream(demo=exchange.demo),
+        # The legacy public stream shares one recv socket across subscriptions
+        # and can return only subscription acknowledgements during warmup.
+        # Use the existing rate-limited REST feed until it supports multiplexing.
+        on_price_observed=record_market_observation,
     )
 
 
@@ -195,8 +216,44 @@ def resolve_order_router_mode(mode: object) -> str:
     raise ValueError(f"Unsupported strategy runtime mode: {mode}")
 
 
+def claim_live_symbol(repository, *, strategy: str, symbol: str, scope_id: str) -> None:
+    """第一份策略占住这个现货。同一账户上的第二份策略不能再占。"""
+    with repository.engine.connect() as connection:
+        row = connection.execute(text(
+            "SELECT strategy FROM strategy_ownership "
+            "WHERE environment = 'live' AND symbol = :symbol AND strategy != :strategy"
+        ), {"symbol": symbol, "strategy": strategy}).first()
+    if row is not None:
+        raise ValueError("symbol_owned")
+    repository.upsert_strategy_ownership(
+        scope=scope_id,
+        strategy=strategy,
+        symbol=symbol,
+        environment="live",
+        budget=0,
+        available=0,
+        updated_at=int(time.time() * 1000),
+    )
+
+
+def live_trading_configured(settings: object) -> bool:
+    """实盘模式、模拟盘关闭、密钥齐全时，配置本身就允许实盘开仓。"""
+    if normalized_mode(getattr(settings, "mode", "")) != "live":
+        return False
+    exchange = getattr(settings, "exchange", None)
+    if exchange is None or bool(getattr(exchange, "demo", True)):
+        return False
+    return all(
+        str(getattr(exchange, name, "")).strip()
+        for name in ("api_key", "secret", "passphrase")
+    )
+
+
 def current_order_router_mode() -> str:
-    mode = normalized_mode(load_runtime_settings().mode)
+    settings = load_runtime_settings()
+    mode = normalized_mode(settings.mode)
+    exchange = getattr(settings, "exchange", None)
+    validate_execution_environment(mode, getattr(exchange, "demo", True))
     if mode == "demo":
         return "live"
     return resolve_order_router_mode(mode)
@@ -247,7 +304,15 @@ def _release_strategy_execution_lease(name: str) -> None:
         logger.exception("释放策略运行租约失败")
 
 
-def create_live_order_handler(settings: object) -> OrderHandler:
+def _live_identity_lookup(settings, repository):
+    from src.ops.phase3_recovery import build_live_identity_lookup
+
+    return build_live_identity_lookup(settings, repository)
+
+
+def create_live_order_handler(
+    settings: object, market_type: str | None = None,
+) -> OrderHandler:
     exchange = settings.exchange
     demo = adapter_uses_sandbox(getattr(settings, "mode", ""), getattr(exchange, "demo", True))
     if is_dataclass(exchange) and getattr(exchange, "demo", None) is not demo:
@@ -262,6 +327,7 @@ def create_live_order_handler(settings: object) -> OrderHandler:
             "option": OKXOptionsAdapter,
             "options": OKXOptionsAdapter,
         },
+        market_type=market_type,
     )
 
 
@@ -273,6 +339,7 @@ def create_order_manager(
     kill_switch_checker: KillSwitchChecker | None = None,
     order_router_mode: object = _UNSET_ORDER_ROUTER_MODE,
     price_observed_at: Callable[[str], int | None] | None = None,
+    market_type: str | None = None,
 ) -> UnifiedOrderManager:
     settings = load_runtime_settings()
     resolved_mode = (
@@ -280,8 +347,14 @@ def create_order_manager(
         if order_router_mode is _UNSET_ORDER_ROUTER_MODE
         else resolve_order_router_mode(order_router_mode)
     )
+    market = None if market_type is None else tradable_market(market_type)
+    if market_type is not None and market is None:
+        raise ValueError(f"Unsupported strategy market: {market_type}")
     if resolved_mode == "live":
-        live_handler = create_live_order_handler(settings)
+        live_handler = (
+            create_live_order_handler(settings)
+            if market is None else create_live_order_handler(settings, market_type=market)
+        )
         handler = None
     else:
         live_handler = None
@@ -295,7 +368,7 @@ def create_order_manager(
         def read_paper_scope() -> str | None:
             from src.web.api.allocations import allocation_context
 
-            _context, scope = allocation_context()
+            _context, scope = allocation_context(settings, market_type=market)
             if scope is None:
                 return None
             return scope.scope_id
@@ -308,6 +381,14 @@ def create_order_manager(
     )
     backtest_config = paper_backtest_config()
     risk_config = settings.risk
+    configured_live = live_trading_configured(settings) and resolved_mode == "live"
+    sandbox_live = normalized_mode(settings.mode) == "demo" and resolved_mode == "live"
+    if sandbox_live or configured_live:
+        allow_open = True
+    elif resolved_mode == "live":
+        allow_open = risk_config.allow_live_open_orders
+    else:
+        allow_open = False
 
     async def live_state_refresher(strategy_name: str, symbol: str) -> None:
         await refresh_okx_live_state(
@@ -330,10 +411,12 @@ def create_order_manager(
         )
 
     def _funding_scope() -> str | None:
+        if market is None:
+            return None
         try:
             from src.web.api.allocations import allocation_context
 
-            _context, scope = allocation_context()
+            _context, scope = allocation_context(settings, market_type=market)
         except Exception:
             return None
         if scope is None:
@@ -352,31 +435,30 @@ def create_order_manager(
         price_provider=latest_price,
         kill_switch_checker=kill_switch_checker,
         live_safeguards=resolved_mode == "live",
-        live_market_type=settings.exchange.market_type if resolved_mode == "live" else "",
+        live_market_type=(market or "") if resolved_mode == "live" else "",
         live_state_refresher=live_state_refresher if resolved_mode == "live" else None,
         post_live_order_sync=post_live_order_sync if resolved_mode == "live" else None,
-        allow_live_open_orders=(
-            True
-            if normalized_mode(settings.mode) == "demo" and resolved_mode == "live"
-            else risk_config.allow_live_open_orders if resolved_mode == "live" else False
-        ),
+        allow_live_open_orders=allow_open,
         live_max_order_notional=(
-            risk_config.live_max_order_notional if resolved_mode == "live" else 0.0
+            20.0
+            if configured_live and float(risk_config.live_max_order_notional) <= 0
+            else risk_config.live_max_order_notional if resolved_mode == "live" else 0.0
         ),
         paper_book=paper_book,
         paper_scope_id=read_paper_scope,
         opening_pause_checker=_opening_orders_paused(order_repository),
         price_observed_at_provider=price_observed_at,
         max_price_age_ms=risk_config.max_price_age_ms,
-        require_position_ownership=not (
-            normalized_mode(settings.mode) == "demo" and resolved_mode == "live"
-        ),
+        require_position_ownership=not (sandbox_live or configured_live),
         funding_environment=(
             account_environment(settings.mode, settings.exchange.demo)
             if resolved_mode == "live" else None
         ),
         funding_scope_id=_funding_scope if resolved_mode == "live" else None,
         runtime_risk_checker=_stored_runtime_risk(order_repository),
+        identity_lookup=(
+            None if live_handler is None else _live_identity_lookup(settings, order_repository)
+        ),
     )
 
 
@@ -398,6 +480,9 @@ def _stored_runtime_risk(repository):
 def create_strategy_registry() -> StrategyRegistry:
     registry = StrategyRegistry()
     register_builtin_strategies(registry)
+    from src.strategy.rule import register_rule
+
+    register_rule(registry)
     return registry
 
 
@@ -1436,9 +1521,29 @@ def create_router(
                         lease_acquired = True
                     strategy = create_strategy(name)
                     runtime_settings = load_runtime_settings()
+                    if live_trading_configured(runtime_settings):
+                        try:
+                            claim_live_symbol(
+                                repository,
+                                strategy=name,
+                                symbol=strategy.symbol,
+                                scope_id="live-account",
+                            )
+                        except ValueError as exc:
+                            if str(exc) != "symbol_owned":
+                                raise
+                            raise HTTPException(
+                                status_code=409,
+                                detail={
+                                    "code": "symbol_owned",
+                                    "message": "Another strategy already uses this spot symbol",
+                                    "reason_code": "symbol_owned",
+                                },
+                            ) from exc
                     needs_live_ownership = (
                         order_router_mode == "live"
                         and normalized_mode(getattr(runtime_settings, "mode", "")) != "demo"
+                        and not live_trading_configured(runtime_settings)
                     )
                     if needs_live_ownership and not has_live_strategy_ownership_mapping(
                         repository, name, strategy.symbol
@@ -1495,6 +1600,7 @@ def create_router(
                                 kill_switch_checker=lambda: kill_switch_engaged(repository),
                                 order_router_mode=order_router_mode,
                                 price_observed_at=price_observed_at_for_strategy(strategy),
+                                market_type=market_type_for_symbol(strategy.symbol),
                             )
                         )
                     transferred = False

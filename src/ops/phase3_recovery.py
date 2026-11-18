@@ -1,6 +1,6 @@
 """有限重试的私有同步、未知单身份解释，以及重启前的运行状态核对。
 
-默认不访问交易所。同步函数由调用方注入。解释未知单只更新已有订单，不会另下一笔。
+纸面和回测不访问交易所。模拟盘和实盘只读余额或按客户单号核对已有订单，不会另下一笔。
 """
 
 from __future__ import annotations
@@ -14,6 +14,8 @@ from collections.abc import Callable
 from sqlalchemy import text
 
 from src.data.models import OrderRecord
+from src.exchange.base import canonical_symbol
+from src.exchange.markets import market_type_for_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +51,7 @@ def run_bounded_sync(
     fetch: Callable[[], dict],
     *,
     max_attempts: int = 3,
-    now_ms: int,
+    now_ms: int | Callable[[], int],
     max_age_ms: int = 30_000,
 ) -> dict[str, object]:
     """失败时最多重试 max_attempts 次。成功也不把覆盖标成完整。"""
@@ -59,28 +61,39 @@ def run_bounded_sync(
         try:
             page = fetch()
         except Exception:
+            checked_at = now_ms() if callable(now_ms) else now_ms
             last_error = "sync_failed"
             logger.warning("私有同步第 %s 次失败", attempt)
             _write_freshness(
                 repository, status="retrying", attempts=attempt, fresh=False,
                 cursor_ms=_stored_cursor(repository), observed_at=None,
-                updated_at=now_ms,
+                updated_at=checked_at,
             )
             continue
+        checked_at = now_ms() if callable(now_ms) else now_ms
         observed = page.get("observed_at")
         cursor = page.get("cursor_ms")
         fresh = (
             type(observed) is int
-            and type(now_ms) is int
-            and 0 <= now_ms - observed <= max_age_ms
+            and type(checked_at) is int
+            and 0 <= checked_at - observed <= max_age_ms
         )
         status = "fresh" if fresh else "stale"
         _write_freshness(
             repository, status=status, attempts=attempt, fresh=fresh,
             cursor_ms=None if cursor is None else int(cursor),
             observed_at=None if observed is None else int(observed),
-            updated_at=now_ms,
+            updated_at=checked_at,
         )
+        if fresh and cursor is not None:
+            from src.ops.phase4_controls import record_source_heartbeat
+
+            # A skipped paper/backtest page has no cursor and cannot attest
+            # that a private account read actually completed.
+            for source in ("account", "private_sync"):
+                record_source_heartbeat(
+                    repository, source, observed_at=observed, status="fresh",
+                )
         return {
             "status": status,
             "attempts": attempt,
@@ -89,9 +102,10 @@ def run_bounded_sync(
             "complete": False,
         }
     cursor = _stored_cursor(repository)
+    checked_at = now_ms() if callable(now_ms) else now_ms
     _write_freshness(
         repository, status="failed", attempts=max_attempts, fresh=False,
-        cursor_ms=cursor, observed_at=None, updated_at=now_ms,
+        cursor_ms=cursor, observed_at=None, updated_at=checked_at,
     )
     return {
         "status": "failed",
@@ -299,6 +313,118 @@ def resume_allowed(repository, name: str, owner: str) -> bool:
     return not unresolved_live_order_ids(repository)
 
 
+def default_private_fetch(loader=None, factory=None):
+    """纸面和回测不连交易所。模拟盘和实盘只读余额，不下单。"""
+    load = loader or _load_settings
+    build = factory or _sync_exchange
+
+    def fetch() -> dict[str, object]:
+        settings = load()
+        mode = str(getattr(settings, "mode", "") or "").strip().lower()
+        started_at = int(time.time() * 1000)
+        if mode not in {"demo", "live"}:
+            return {"observed_at": started_at, "cursor_ms": None, "complete": False}
+        client = build(settings)
+        try:
+            header = str((getattr(client, "headers", {}) or {}).get("x-simulated-trading", ""))
+            if mode == "demo" and header != "1":
+                raise RuntimeError("simulated header missing")
+            if mode == "live" and header == "1":
+                raise RuntimeError("live client is simulated")
+            client.fetch_balance()
+        finally:
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
+        observed_at = int(time.time() * 1000)
+        return {"observed_at": observed_at, "cursor_ms": observed_at, "complete": False}
+
+    return fetch
+
+
+def _load_settings():
+    from src.core.runtime_settings import load_runtime_settings
+
+    return load_runtime_settings()
+
+
+def _sync_exchange(settings):
+    import ccxt
+
+    from src.core.execution_mode import adapter_uses_sandbox
+
+    exchange = settings.exchange
+    client = ccxt.okx({
+        "apiKey": exchange.api_key,
+        "secret": exchange.secret,
+        "password": exchange.passphrase,
+        "options": {"defaultType": "spot"},
+    })
+    if adapter_uses_sandbox(settings.mode, bool(exchange.demo)):
+        client.set_sandbox_mode(True)
+    return client
+
+
+def build_live_identity_lookup(settings, repository, factory=None):
+    """用客户单号向交易所核对已有订单。查不到就抛出，保持拦截。"""
+    build = factory or _sync_exchange
+
+    def lookup(client_order_id: str) -> dict[str, object]:
+        matches = [
+            order for order in repository.get_orders()
+            if str(getattr(order, "client_order_id", "") or "") == client_order_id
+        ]
+        if len(matches) != 1:
+            raise RuntimeError("local order is not unique")
+        client = build(settings)
+        try:
+            mode = str(getattr(settings, "mode", "") or "").strip().lower()
+            header = str((getattr(client, "headers", {}) or {}).get("x-simulated-trading", ""))
+            if mode == "demo" and header != "1":
+                raise RuntimeError("simulated header missing")
+            if mode == "live" and header == "1":
+                raise RuntimeError("live client is simulated")
+            stored_symbol = str(getattr(matches[0], "symbol", "") or "")
+            market = market_type_for_symbol(stored_symbol)
+            symbol = canonical_symbol(stored_symbol, market_type=market)
+            if market == "spot":
+                symbol = symbol.replace("-", "/")
+            options = getattr(client, "options", None)
+            if isinstance(options, dict):
+                options["defaultType"] = market
+            found = client.fetch_order(
+                client_order_id,
+                symbol,
+                {"clOrdId": client_order_id},
+            )
+        finally:
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
+        if not isinstance(found, dict):
+            raise RuntimeError("exchange order was not found")
+        reported = str(found.get("status") or "").lower()
+        filled = float(found.get("filled") or 0)
+        status = {
+            "closed": "filled",
+            "filled": "filled",
+            "canceled": "cancelled",
+            "cancelled": "cancelled",
+            "rejected": "rejected",
+            "open": "partially_filled" if filled else "pending",
+            "pending": "pending",
+        }.get(reported)
+        if status is None:
+            raise RuntimeError("exchange status is unknown")
+        return {
+            "status": status,
+            "filled_amount": filled,
+            "exchange_order_id": str(found.get("id") or ""),
+        }
+
+    return lookup
+
+
 async def sync_forever(
     interval_s: float | None = None,
     fetch: Callable[[], dict] | None = None,
@@ -315,7 +441,7 @@ async def sync_forever(
                 from src.data.repository import Repository
 
                 run_bounded_sync(
-                    Repository(), fetch, now_ms=int(time.time() * 1000),
+                    Repository(), fetch, now_ms=lambda: int(time.time() * 1000),
                 )
         except Exception:
             logger.exception("私有同步失败")

@@ -1,5 +1,6 @@
 import axios from 'axios';
 
+import type { MarketType } from '@/utils/market';
 import type { StrategyPerformance } from '@/types/strategyPerformance';
 import type { ExchangeSnapshot, ExecutionContext } from '@/types/executionContext';
 
@@ -28,6 +29,55 @@ export async function fetchTradingContext(): Promise<ExecutionContext> {
 export async function fetchExchangeSnapshot(accountScopeId: string): Promise<ExchangeSnapshot> {
   return (await axios.get<ExchangeSnapshot>('/api/trading/snapshot', {
     params: { expected_account_scope_id: accountScopeId },
+  })).data;
+}
+
+export interface ManualOrderRequest {
+  symbol: string;
+  market_type?: MarketType;
+  side: 'buy' | 'sell';
+  order_type: 'market' | 'limit';
+  amount: number;
+  price?: number | null;
+}
+
+export interface RestingOrder {
+  id?: string;
+  order_id?: string;
+  symbol?: string;
+  side?: string;
+  type?: string;
+  amount?: number;
+  price?: number | null;
+  status?: string;
+}
+
+export async function fetchTradingOrders(): Promise<RestingOrder[]> {
+  return (await axios.get<RestingOrder[]>('/api/trading/orders')).data;
+}
+
+export async function submitManualOrder(body: ManualOrderRequest): Promise<Record<string, unknown>> {
+  return (await axios.post<Record<string, unknown>>('/api/trading/orders', body)).data;
+}
+
+export async function cancelTradingOrder(orderId: string, symbol: string): Promise<Record<string, unknown>> {
+  return (await axios.post<Record<string, unknown>>(
+    `/api/trading/orders/${encodeURIComponent(orderId)}/cancel`,
+    null,
+    { params: { symbol } },
+  )).data;
+}
+
+export async function amendTradingOrder(orderId: string, symbol: string, price: number): Promise<Record<string, unknown>> {
+  return (await axios.post<Record<string, unknown>>(
+    `/api/trading/orders/${encodeURIComponent(orderId)}/amend`,
+    { symbol, price },
+  )).data;
+}
+
+export async function refreshLiveState(): Promise<Record<string, unknown>> {
+  return (await axios.post<Record<string, unknown>>('/api/trading/live-state/refresh', null, {
+    params: { strategy: '__exchange__' },
   })).data;
 }
 

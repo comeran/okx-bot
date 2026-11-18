@@ -132,17 +132,21 @@ class YAMLStrategy(BaseStrategy):
                 self._indicator_values[name] = value
 
         order = None
+        try:
+            amount = float(self.params.get("amount", 0.0001))
+        except (TypeError, ValueError):
+            amount = 0.0001
         buy_conditions = self.conditions.get("buy", [])
         if buy_conditions and all(
             parse_condition(expr, self._indicator_values) for expr in buy_conditions
         ):
-            order = await self.buy(self.symbol, 0.1)
+            order = await self.buy(self.symbol, amount)
 
         sell_conditions = self.conditions.get("sell", [])
         if sell_conditions and all(
             parse_condition(expr, self._indicator_values) for expr in sell_conditions
         ):
-            sell_order = await self.sell(self.symbol, 0.1)
+            sell_order = await self.sell(self.symbol, amount)
             order = order or sell_order
 
         return order

@@ -5,12 +5,15 @@ from typing import Any
 
 import yaml
 
+from src.core.execution_mode import sandbox_for_mode
+
 
 @dataclass
 class ExchangeConfig:
     api_key: str = ""
     secret: str = ""
     passphrase: str = ""
+    # Read legacy files; operation routing derives its market from the instrument.
     market_type: str = "spot"
     demo: bool = True
 
@@ -131,15 +134,20 @@ def load_config(path: str) -> AppConfig:
     risk = _section(config, "risk")
     notify = _section(config, "notify")
     web = _section(config, "web")
+    mode = _parse_str(config.get("mode"), "backtest")
+    mode_demo = sandbox_for_mode(mode)
 
     return AppConfig(
-        mode=_parse_str(config.get("mode"), "backtest"),
+        mode=mode,
         exchange=ExchangeConfig(
             api_key=_parse_str(exchange.get("api_key"), ""),
             secret=_parse_str(exchange.get("secret"), ""),
             passphrase=_parse_str(exchange.get("passphrase"), ""),
             market_type=_parse_str(exchange.get("market_type"), "spot"),
-            demo=_parse_bool(exchange.get("demo"), True, "exchange.demo"),
+            demo=_parse_bool(
+                exchange.get("demo"), mode_demo if mode_demo is not None else True,
+                "exchange.demo",
+            ),
         ),
         backtest=BacktestConfig(
             initial_capital=_parse_float(

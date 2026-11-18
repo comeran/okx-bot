@@ -41,8 +41,7 @@ function createSettingsView(overrides: Partial<AppSettingsView> = {}): AppSettin
       secret_set: true,
       passphrase: 'hidden-passphrase',
       passphrase_set: true,
-      market_type: 'spot',
-      demo: true,
+      demo: overrides.mode !== 'live',
     },
     backtest: {
       initial_capital: 100000,
@@ -77,7 +76,6 @@ function createUpdatePayload(overrides: Partial<AppSettingsUpdate> = {}): AppSet
       api_key: '',
       secret: '',
       passphrase: '',
-      market_type: 'spot',
       demo: true,
     },
     backtest: {
@@ -171,6 +169,56 @@ function validationText(key: string, field: string): string {
 let serverSettings = createSettingsView();
 
 describe('Settings view', () => {
+  it.each([['demo', true], ['live', false]] as const)(
+    'derives the exchange environment when choosing %s', async (mode, demo) => {
+      const wrapper = await mount(Settings, { components });
+      await wrapper.flush();
+      expect(wrapper.findAll((node) => node.type === 'el-option').map((node) => node.props.value)).toContain('demo');
+      expect(wrapper.findAll((node) => node.type === 'el-switch')).toHaveLength(1);
+      await wrapper.invoke(control(wrapper, 'el-select'), 'onUpdate:modelValue', mode);
+      expect(textContent(wrapper.getByTestId('exchange-environment'))).toContain(
+        demo ? 'settings.environments.sandbox' : 'settings.environments.live',
+      );
+      await wrapper.trigger(control(wrapper, 'el-button', 1), 'click');
+      expect(mocks.updateSettings.mock.calls[0][0]).toMatchObject({ mode, exchange: { demo } });
+      wrapper.unmount();
+    },
+  );
+
+  it.each([['live', true], ['demo', false]] as const)(
+    'requires an explicit mode choice to repair legacy %s settings', async (mode, demo) => {
+      const saved = createSettingsView();
+      saved.mode = mode;
+      saved.exchange.demo = demo;
+      mocks.getSettings.mockResolvedValueOnce(saved);
+      const wrapper = await mount(Settings, { components });
+      await wrapper.flush();
+      expect(wrapper.text()).toContain('settings.environmentConflict');
+      expect(control(wrapper, 'el-select').props.modelValue).toBe('');
+      expect(control(wrapper, 'el-button', 1).props.disabled).toBe(true);
+      expect(wrapper.getByTestId('exchange-auth-check').props.disabled).toBe(true);
+      await wrapper.invoke(control(wrapper, 'el-select'), 'onUpdate:modelValue', 'demo');
+      await wrapper.trigger(control(wrapper, 'el-button', 1), 'click');
+      expect(mocks.updateSettings.mock.calls[0][0]).toMatchObject({ mode: 'demo', exchange: { demo: true } });
+      wrapper.unmount();
+    },
+  );
+
+  it('saves credentials and environment without the legacy account market field', async () => {
+    serverSettings = createSettingsView();
+    (serverSettings.exchange as unknown as Record<string, unknown>).market_type = 'option';
+    mocks.getSettings.mockResolvedValueOnce(serverSettings);
+    const wrapper = await mount(Settings, { components });
+    await wrapper.flush();
+    await wrapper.invoke(control(wrapper, 'el-input', 0), 'onUpdate:modelValue', 'new-key');
+    await wrapper.trigger(control(wrapper, 'el-button', 1), 'click');
+    expect(mocks.updateSettings).toHaveBeenCalledTimes(1);
+    expect(mocks.updateSettings.mock.calls[0][0].exchange).toEqual({
+      api_key: 'new-key', secret: '', passphrase: '', demo: true,
+    });
+    expect(wrapper.findAll((node) => node.type === 'el-select')).toHaveLength(1);
+    wrapper.unmount();
+  });
   it('keeps the sticky header and mobile action style contract in the SFC stylesheet', () => {
     expect(settingsSource).toContain('.settings-page__header {');
     expect(settingsSource).toContain('.settings-page__header-actions {');
@@ -220,7 +268,6 @@ describe('Settings view', () => {
           secret_set: Boolean(settings.exchange.secret || serverSettings.exchange.secret),
           passphrase: settings.exchange.passphrase || serverSettings.exchange.passphrase,
           passphrase_set: Boolean(settings.exchange.passphrase || serverSettings.exchange.passphrase),
-          market_type: settings.exchange.market_type,
           demo: settings.exchange.demo,
         },
         backtest: settings.backtest,
@@ -425,13 +472,6 @@ describe('Settings view', () => {
         await wrapper.invoke(control(wrapper, 'el-select', 0), 'onUpdate:modelValue', 'invalid');
       },
       expected: validationText('settings.validation.requiredField', 'settings.mode'),
-    },
-    {
-      name: 'rejects an invalid exchange market type',
-      mutate: async (wrapper: Awaited<ReturnType<typeof mount>>) => {
-        await wrapper.invoke(control(wrapper, 'el-select', 1), 'onUpdate:modelValue', 'invalid');
-      },
-      expected: validationText('settings.validation.requiredField', 'settings.marketType'),
     },
     {
       name: 'rejects a negative initial capital',

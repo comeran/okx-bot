@@ -6,7 +6,7 @@ import { useI18n } from 'vue-i18n';
 import AppPageHeader from '@/components/ui/AppPageHeader.vue';
 import MarketChartPanel from '@/components/market/MarketChartPanel.vue';
 import MarketQueryPanel from '@/components/market/MarketQueryPanel.vue';
-import { fetchKlines, fetchTickers } from '@/services/market';
+import { fetchKlines, fetchMarketBoard, fetchTickers, type MarketBoard } from '@/services/market';
 import type { Kline, MarketTicker } from '@/types/market';
 import { buildMarketKlineQuery, fallbackSymbolsByType, formatMarketDateTime } from '@/utils/market';
 
@@ -28,6 +28,8 @@ interface ChartQuerySummary {
 
 const klines = ref<Kline[]>([]);
 const tickers = ref<MarketTicker[]>([]);
+const board = ref<MarketBoard | null>(null);
+const boardError = ref('');
 const loading = ref(false);
 const tickersLoading = ref(false);
 const errorMessage = ref('');
@@ -35,6 +37,27 @@ const rangeQuery = ref(false);
 const chartQuery = ref<ChartQuerySummary | null>(null);
 let klineRequestId = 0;
 let tickerRequestId = 0;
+let boardRequestId = 0;
+
+function statText(stat: MarketBoard['funding_rate'] | undefined, value: number | null | undefined): string {
+  if (!stat || stat.available === false) return t('market.notApplicable');
+  return value === null || value === undefined ? t('market.notApplicable') : String(value);
+}
+
+async function loadBoard() {
+  const requestId = ++boardRequestId;
+  const currentSymbol = symbol.value.trim();
+  if (!currentSymbol) return;
+  boardError.value = '';
+  try {
+    const next = await fetchMarketBoard(currentSymbol, marketType.value);
+    if (requestId === boardRequestId) board.value = next;
+  } catch {
+    if (requestId !== boardRequestId) return;
+    board.value = null;
+    boardError.value = t('market.boardError');
+  }
+}
 
 const displayChartQuery = computed(() => chartQuery.value ?? {
   marketType: marketType.value,
@@ -149,6 +172,7 @@ async function loadKlines() {
 
 function handleSubmit() {
   void loadKlines();
+  void loadBoard();
 }
 
 watch(marketType, (nextMarketType, previousMarketType) => {
@@ -162,11 +186,13 @@ watch(marketType, (nextMarketType, previousMarketType) => {
   tickers.value = [];
   void loadTickers();
   void loadKlines();
+  void loadBoard();
 });
 
 onMounted(() => {
   void loadTickers();
   void loadKlines();
+  void loadBoard();
 });
 </script>
 
@@ -203,6 +229,35 @@ onMounted(() => {
       {{ t(`settings.marketTypes.${chartQuery.marketType}`) }} · {{ chartQuery.symbol }} · {{ chartQuery.timeframe }}
       <span class="market-view__status-range">· {{ displayChartRangeSummary }}</span>
     </p>
+
+    <section class="market-view__board" data-testid="market-board">
+      <h2>{{ t('market.boardTitle') }}</h2>
+      <p v-if="boardError" role="alert">{{ boardError }}</p>
+      <template v-else-if="board">
+        <p>{{ t('market.fundingRate') }}: {{ statText(board.funding_rate, board.funding_rate.rate) }}</p>
+        <p>{{ t('market.openInterest') }}: {{ statText(board.open_interest, board.open_interest.amount) }}</p>
+        <div class="market-view__book">
+          <div>
+            <h3>{{ t('market.bids') }}</h3>
+            <p v-for="(level, index) in board.order_book.bids.slice(0, 8)" :key="`bid-${index}`">
+              {{ level.price }} × {{ level.amount }}
+            </p>
+          </div>
+          <div>
+            <h3>{{ t('market.asks') }}</h3>
+            <p v-for="(level, index) in board.order_book.asks.slice(0, 8)" :key="`ask-${index}`">
+              {{ level.price }} × {{ level.amount }}
+            </p>
+          </div>
+          <div>
+            <h3>{{ t('market.recentTrades') }}</h3>
+            <p v-for="(trade, index) in board.trades.slice(0, 8)" :key="`trade-${index}`">
+              {{ trade.side }} {{ trade.price }} × {{ trade.amount }}
+            </p>
+          </div>
+        </div>
+      </template>
+    </section>
   </section>
 </template>
 
@@ -216,5 +271,17 @@ onMounted(() => {
 .market-view__status {
   margin: 0;
   color: var(--ui-color-text-secondary);
+}
+
+.market-view__board h2,
+.market-view__board h3,
+.market-view__board p {
+  margin: 0;
+}
+
+.market-view__book {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--ui-space-16);
 }
 </style>

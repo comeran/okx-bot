@@ -8,6 +8,7 @@ import { matchesExecutionContext, useAccountContextStore } from '@/stores/accoun
 import {
   activateStrategyAllocation,
   deleteStrategyAllocation,
+  exchangeActivateStrategyAllocation,
   getStrategyAllocation,
   releaseStrategyAllocation,
   saveStrategyAllocation,
@@ -31,6 +32,10 @@ const stopped = computed(() => (
 ));
 const reservation = computed(() => allocation.value?.reservation ?? null);
 const localPaper = computed(() => allocation.value?.context.execution_mode === 'paper');
+const exchangeAccount = computed(() => {
+  const mode = allocation.value?.context.execution_mode;
+  return mode === 'demo' || mode === 'live';
+});
 const baseEditable = computed(() => Boolean(
   allocation.value?.context.available
   && allocation.value.context.scope_id
@@ -43,6 +48,9 @@ const baseEditable = computed(() => Boolean(
 const canEdit = computed(() => baseEditable.value && reservation.value == null);
 const canActivate = computed(() => Boolean(
   localPaper.value && canEdit.value && allocation.value?.draft,
+));
+const canStartWithBudget = computed(() => Boolean(
+  exchangeAccount.value && canEdit.value && allocation.value?.draft,
 ));
 const canRelease = computed(() => Boolean(
   localPaper.value && reservation.value && stopped.value
@@ -66,8 +74,7 @@ function applyEnvelope(envelope: StrategyAllocationEnvelope): void {
   const context = accountContext.context;
   const unavailableMatch = context && !context.available && !envelope.execution_context?.available
     && !envelope.context.available && envelope.execution_context?.account_scope_id === null
-    && envelope.execution_context.environment === context.environment
-    && envelope.execution_context.market_type === context.market_type;
+    && envelope.execution_context.environment === context.environment;
   if (!matchesExecutionContext(context, envelope.execution_context) && !unavailableMatch) {
     throw new Error(t('strategies.allocation.loadFailed'));
   }
@@ -190,6 +197,33 @@ async function activate(): Promise<void> {
   }
 }
 
+async function startWithBudget(): Promise<void> {
+  if (!canStartWithBudget.value || !allocation.value?.draft || !allocation.value.context.scope_id) return;
+  const sequence = ++requestSequence;
+  const strategy = props.strategyName;
+  const revision = allocation.value.draft.revision;
+  const scopeId = allocation.value.context.scope_id;
+  const symbol = allocation.value.symbol;
+  busy.value = true;
+  error.value = '';
+  notice.value = '';
+  try {
+    const result = await exchangeActivateStrategyAllocation(strategy, {
+      expected_revision: revision,
+      expected_scope_id: scopeId,
+      expected_symbol: symbol,
+      acknowledge_budget: true,
+    });
+    if (sequence !== requestSequence) return;
+    applyEnvelope(result);
+    notice.value = t('strategies.allocation.started');
+  } catch (cause) {
+    if (sequence === requestSequence) showFailure(cause, t('strategies.allocation.startFailed'));
+  } finally {
+    if (sequence === requestSequence) busy.value = false;
+  }
+}
+
 async function release(): Promise<void> {
   if (!canRelease.value || !reservation.value || !allocation.value?.context.scope_id) return;
   const sequence = ++requestSequence;
@@ -227,7 +261,7 @@ onBeforeUnmount(() => { requestSequence += 1; });
   <SectionCard :title="t('strategies.allocation.title')" :description="strategyName" class="allocation-panel">
     <p class="allocation-panel__warning">{{ t('strategies.allocation.draftOnly') }}</p>
     <p class="allocation-panel__warning">{{ t('strategies.allocation.pending') }}</p>
-    <p v-if="allocation?.context.execution_mode === 'live'" class="allocation-panel__warning">
+    <p v-if="exchangeAccount" class="allocation-panel__warning">
       {{ t('strategies.allocation.liveStillClosed') }}
     </p>
     <p v-if="reservation" class="allocation-panel__warning">{{ t('strategies.allocation.reservedHint') }}</p>
@@ -288,6 +322,7 @@ onBeforeUnmount(() => { requestSequence += 1; });
           <button type="submit" data-testid="allocation-save" :disabled="!canEdit">{{ t('strategies.allocation.save') }}</button>
           <button type="button" data-testid="allocation-delete" :disabled="!canEdit || !allocation.draft" @click="remove">{{ t('strategies.allocation.remove') }}</button>
           <button v-if="localPaper && allocation.draft && !reservation" type="button" data-testid="allocation-activate" :disabled="!canActivate" @click="activate">{{ t('strategies.allocation.activate') }}</button>
+          <button v-if="exchangeAccount && allocation.draft && !reservation" type="button" data-testid="allocation-exchange-activate" :disabled="!canStartWithBudget" @click="startWithBudget">{{ t('strategies.allocation.startWithBudget') }}</button>
           <button v-if="localPaper && reservation" type="button" data-testid="allocation-release" :disabled="!canRelease" @click="release">{{ t('strategies.allocation.release') }}</button>
         </div>
       </form>
