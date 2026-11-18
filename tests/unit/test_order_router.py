@@ -36,6 +36,12 @@ class MockHandler(OrderHandler):
         return True
 
 
+def test_generated_client_order_ids_fit_okx_ascii_alphanumeric_contract():
+    identifiers = {UnifiedOrderManager._new_client_order_id() for _ in range(100)}
+    assert len(identifiers) == 100
+    assert all(value.isascii() and value.isalnum() and len(value) <= 32 for value in identifiers)
+
+
 class FakeRepository:
     def __init__(self):
         self.orders = []
@@ -2860,6 +2866,7 @@ async def test_live_spot_sell_rejects_amount_above_available_position_when_open_
         updated_at=1700000000000,
         source="live_exchange",
         runtime_mode="live",
+        assets=[{"ccy": "BTC", "cash_bal": 1.0, "avail_bal": 1.0}],
     )
     repository.positions[("ma_cross", "BTC-USDT")] = PositionRecord(
         strategy="ma_cross",

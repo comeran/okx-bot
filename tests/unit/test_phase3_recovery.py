@@ -1,5 +1,10 @@
 """第三阶段剩余三条：有限重试的私有同步、按身份解释未知单、重启前核对运行状态。"""
 
+import asyncio
+
+import pytest
+from sqlalchemy import text
+
 from src.data.models import OrderRecord
 from src.data.repository import Repository
 from src.ops.lifecycle import graceful_shutdown, startup_reconcile
@@ -74,6 +79,64 @@ def test_bounded_sync_retries_and_publishes_freshness(tmp_path) -> None:
     assert failed["fresh"] is False
     assert failed["complete"] is False
     assert failed["cursor_ms"] == 50
+
+
+def test_bounded_sync_can_sample_clock_after_fetch(tmp_path) -> None:
+    repository = Repository(db_path=str(tmp_path / "bot.db"))
+    result = run_bounded_sync(
+        repository,
+        lambda: {"cursor_ms": 10, "observed_at": 1_005},
+        now_ms=lambda: 1_005,
+        max_age_ms=30_000,
+    )
+
+    assert result["status"] == "fresh"
+    with repository.engine.connect() as connection:
+        account = connection.execute(
+            text(
+                "SELECT observed_at, status FROM source_heartbeat WHERE source = 'account'"
+            )
+        ).first()
+    assert account == (1_005, "fresh")
+
+
+def test_bounded_sync_does_not_attest_skipped_or_future_private_page(tmp_path) -> None:
+    repository = Repository(db_path=str(tmp_path / "bot.db"))
+    for cursor, observed in ((None, 1_000), (10, 1_005)):
+        result = run_bounded_sync(
+            repository,
+            lambda: {"cursor_ms": cursor, "observed_at": observed},
+            now_ms=1_000,
+        )
+        assert result["fresh"] is (observed <= 1_000)
+    with repository.engine.connect() as connection:
+        assert connection.execute(text("SELECT COUNT(*) FROM source_heartbeat")).scalar() == 0
+
+
+@pytest.mark.asyncio
+async def test_sync_worker_samples_clock_after_actual_fetch(tmp_path, monkeypatch) -> None:
+    from src.data import repository as repository_module
+    from src.ops import phase3_recovery
+
+    repository = Repository(db_path=str(tmp_path / "bot.db"))
+    monkeypatch.setattr(repository_module, "Repository", lambda: repository)
+    clock = {"now": 1.0, "sleeps": 0}
+    monkeypatch.setattr(phase3_recovery.time, "time", lambda: clock["now"])
+
+    async def sleep(_interval):
+        clock["sleeps"] += 1
+        if clock["sleeps"] > 1:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(phase3_recovery.asyncio, "sleep", sleep)
+
+    def fetch():
+        clock["now"] = 2.0
+        return {"cursor_ms": 10, "observed_at": 2_000}
+
+    with pytest.raises(asyncio.CancelledError):
+        await phase3_recovery.sync_forever(interval_s=1, fetch=fetch)
+    assert sync_freshness(repository)["fresh"] is True
 
 
 def test_unknown_submit_and_cancel_are_explained_without_a_second_order(tmp_path) -> None:

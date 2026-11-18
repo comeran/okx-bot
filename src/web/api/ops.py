@@ -20,6 +20,7 @@ from ccxt.base.errors import (
 )
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, StringConstraints, field_validator
+from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
 from src.core.private_facts import MAX_NUMERIC_TEXT_LENGTH, canonical_spot_symbol
@@ -100,7 +101,15 @@ def current_timestamp_ms() -> int:
 
 def _desk_price_age() -> int | None:
     try:
-        latest = Repository().latest_market_timestamp()
+        from src.ops.phase4_controls import ensure_control_tables
+
+        repository = Repository()
+        ensure_control_tables(repository.engine)
+        with repository.engine.connect() as connection:
+            heartbeat = connection.execute(text(
+                "SELECT observed_at FROM source_heartbeat WHERE source = 'market'"
+            )).scalar_one_or_none()
+        latest = heartbeat if heartbeat is not None else repository.latest_market_timestamp()
     except Exception:
         logger.warning("读取行情时间失败", exc_info=True)
         return None
@@ -146,8 +155,13 @@ def _desk_runtime_risk(repository) -> dict[str, object]:
 def _desk_sources(repository) -> dict[str, str]:
     try:
         from src.ops.phase4_controls import source_freshness
+        from src.risk.supervisor import _limits
 
-        return source_freshness(repository, now_ms=current_timestamp_ms(), max_age_ms=15_000)
+        return source_freshness(
+            repository,
+            now_ms=current_timestamp_ms(),
+            max_age_ms=int(_limits()["max_price_age_ms"]),
+        )
     except Exception:
         logger.warning("读取来源心跳失败", exc_info=True)
         return {"market": "unknown", "account": "unknown", "private_sync": "unknown"}

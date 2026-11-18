@@ -31,7 +31,7 @@ def remove_draft(client, revision):
 @pytest.fixture
 def allocation_client(monkeypatch):
     save_runtime_settings(AppConfig(mode="live", exchange=ExchangeConfig(
-        api_key="test-key", secret="test-secret", passphrase="test-passphrase", demo=True,
+        api_key="test-key", secret="test-secret", passphrase="test-passphrase", demo=False,
     )))
     runtime = strategies.StrategyRuntimeState()
     monkeypatch.setattr(strategies, "StrategyRuntimeState", lambda: runtime)
@@ -61,7 +61,7 @@ def test_draft_envelope_binds_both_scopes_from_one_settings_capture(
     client, _ = allocation_client
     captured = AppConfig(mode="live", exchange=ExchangeConfig(
         api_key="test-key" if configured else "", secret="test-secret" if configured else "",
-        passphrase="test-passphrase" if configured else "", demo=True,
+        passphrase="test-passphrase" if configured else "", demo=False,
     ))
     changed = AppConfig(mode="paper", exchange=ExchangeConfig(
         api_key="other-key", secret="other-secret", passphrase="other-passphrase", demo=False,
@@ -83,7 +83,11 @@ def test_draft_envelope_binds_both_scopes_from_one_settings_capture(
     assert "test-key" not in response.text
 
 
-def test_save_delete_recreate_is_draft_only_and_keeps_live_gate_closed(allocation_client):
+def test_save_delete_recreate_is_draft_only_and_keeps_live_gate_closed(
+    allocation_client, monkeypatch,
+):
+    # Exercise the ownership-required path without an inconsistent live/demo config.
+    monkeypatch.setattr(strategies, "live_trading_configured", lambda settings: False)
     client, _ = allocation_client
     before = client.get("/api/allocations/ma_cross").json()
     assert before["draft"] is None
@@ -196,7 +200,7 @@ def test_context_and_drafts_follow_server_credentials_and_environment(allocation
         "budget": 100, "expected_revision": 0,
     }).json()
     save_runtime_settings(AppConfig(mode="demo", exchange=ExchangeConfig(
-        api_key="other-key", secret="secret", passphrase="pass", demo=False,
+        api_key="other-key", secret="secret", passphrase="pass", demo=True,
     )))
     second = client.get("/api/allocations/ma_cross").json()
     assert second["draft"] is None
@@ -264,7 +268,7 @@ def test_stale_account_context_cannot_create_or_delete_drafts(allocation_client,
             api_key="other-key" if change == "credentials" else "test-key",
             secret="test-secret",
             passphrase="test-passphrase",
-            demo=True,
+            demo=change == "environment",
         ),
     ))
     assert scope_id(client) != old_scope
@@ -376,7 +380,8 @@ def _paper_settings():
     )
 
 
-def test_local_budget_is_exclusive_and_live_activation_stays_closed(allocation_client):
+def test_local_budget_is_exclusive_and_live_activation_stays_closed(allocation_client, monkeypatch):
+    monkeypatch.setattr(strategies, "live_trading_configured", lambda settings: False)
     client, runtime = allocation_client
     blocked = client.post("/api/allocations/ma_cross/activate", json={
         "expected_revision": 0,
@@ -439,7 +444,7 @@ def test_local_budget_is_exclusive_and_live_activation_stays_closed(allocation_c
     save_runtime_settings(AppConfig(
         mode="live",
         exchange=ExchangeConfig(
-            api_key="test-key", secret="test-secret", passphrase="test-passphrase", demo=True,
+            api_key="test-key", secret="test-secret", passphrase="test-passphrase", demo=False,
         ),
         backtest=BacktestConfig(initial_capital=1000),
     ))
@@ -545,7 +550,7 @@ def test_exchange_balance_grants_live_ownership_only_when_it_covers_the_draft(
     ) is False
 
     save_runtime_settings(AppConfig(mode="demo", exchange=ExchangeConfig(
-        api_key="sandbox-key", secret="test-secret", passphrase="test-passphrase", demo=False,
+        api_key="sandbox-key", secret="test-secret", passphrase="test-passphrase", demo=True,
     )))
 
     async def sandbox_facts(*, symbol, scope_id, budget):

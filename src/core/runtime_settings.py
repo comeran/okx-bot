@@ -6,6 +6,7 @@ from pathlib import Path
 import yaml
 
 from src.core.config import AppConfig, load_config
+from src.core.execution_mode import validate_execution_environment
 
 SETTINGS_PATH_ENV = "OKX_BOT_SETTINGS_PATH"
 DEFAULT_SETTINGS_PATH = Path("data/settings.local.yaml")
@@ -50,6 +51,7 @@ def _persisted_secret(value: str, env_name: str) -> str:
 
 
 def save_runtime_settings(settings: AppConfig) -> None:
+    validate_execution_environment(settings.mode, settings.exchange.demo)
     settings_path = runtime_settings_path()
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     document = {

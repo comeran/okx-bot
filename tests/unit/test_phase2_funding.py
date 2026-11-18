@@ -14,6 +14,7 @@ from src.data.funded_allocation import (
     assert_funded_draft_editable,
     strategy_book,
 )
+from src.data.models import AccountRecord, PositionRecord
 from src.data.repository import Repository
 from src.order.manager import UnifiedOrderManager
 from src.order.router import OrderHandler, OrderRouter
@@ -284,6 +285,66 @@ def _manager(
     )
     manager.risk_reasons = reasons
     return manager
+
+
+@pytest.mark.asyncio
+async def test_funded_spot_round_trip_uses_balance_inventory_without_derivative_positions():
+    repository = Repository()
+    _activate(repository, environment="sandbox", scope_id="scope-sandbox", facts=_facts(
+        "100", 1_000_000, "scope-sandbox",
+    ))
+    account = AccountRecord(
+        strategy="__exchange__", source="live_exchange", runtime_mode="live",
+        initial_equity=1000, equity=1000, cash_balance=1000,
+        realized_pnl=0, unrealized_pnl=0, daily_pnl=0, fees_paid=0,
+        updated_at=1_000_000,
+        assets=[{"ccy": "BTC", "cash_bal": 1, "avail_bal": 1}],
+    )
+    repository.upsert_account(account)
+    handler = _FillHandler()
+    manager = _manager(
+        repository, handler, environment="sandbox", scope="scope-sandbox",
+        allow_open=True, safeguards=False,
+    )
+    manager.live_safeguards = True
+    # An account balance never grants ownership of pre-existing coins.
+    unowned = await manager.submit(
+        "BTC-USDT", OrderSide.SELL, OrderType.MARKET, .001,
+        price=10_000, strategy_name="alpha",
+    )
+    assert unowned.status is OrderStatus.REJECTED
+    assert manager.risk_reasons[-1] == "Funded base budget exceeded"
+    bought = await manager.submit(
+        "BTC-USDT", OrderSide.BUY, OrderType.MARKET, .001,
+        price=10_000, strategy_name="alpha",
+    )
+    assert bought.status is OrderStatus.FILLED
+    assert repository.get_positions("__exchange__", "BTC-USDT") == []
+    repository.upsert_position(PositionRecord(
+        strategy="__exchange__", source="live_exchange", runtime_mode="live",
+        symbol="BTC-USDT", side="long", amount=10, entry_price=10_000,
+        timestamp=1_000_000,
+    ))
+    for assets in ([], [{"ccy": "USDT", "avail_bal": 1000}],
+                   [{"ccy": "BTC", "cash_bal": 1, "avail_bal": 0}]):
+        account.updated_at += 1
+        account.assets = assets
+        repository.upsert_account(account)
+        unavailable = await manager.submit(
+            "BTC-USDT", OrderSide.SELL, OrderType.MARKET, .001,
+            price=12_000, strategy_name="alpha",
+        )
+        assert unavailable.status is OrderStatus.REJECTED
+        assert len(handler.submitted) == 1
+    account.updated_at += 1
+    account.assets = [{"ccy": "BTC", "cash_bal": 1, "avail_bal": 1}]
+    repository.upsert_account(account)
+    sold = await manager.submit(
+        "BTC-USDT", OrderSide.SELL, OrderType.MARKET, .001,
+        price=12_000, strategy_name="alpha",
+    )
+    assert sold.status is OrderStatus.FILLED
+    assert strategy_book(repository, "scope-sandbox", "alpha", "sandbox").base_position == 0
 
 
 @pytest.mark.asyncio

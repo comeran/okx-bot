@@ -228,17 +228,17 @@ onBeforeUnmount(() => {
             <el-option v-for="symbol in ticketSymbols" :key="symbol" :value="symbol" :label="symbol" />
           </el-select>
         </label>
-        <label>
+        <label class="trades-view__choice">
           {{ t('trades.table.side') }}
-          <span data-testid="manual-side">{{ ticket.side }}</span>
-          <button type="button" data-testid="manual-buy" @click="ticket.side = 'buy'">{{ t('trades.table.buy') }}</button>
-          <button type="button" data-testid="manual-sell" @click="ticket.side = 'sell'">{{ t('trades.table.sell') }}</button>
+          <span class="sr-only" data-testid="manual-side">{{ ticket.side }}</span>
+          <button type="button" data-testid="manual-buy" :aria-pressed="ticket.side === 'buy'" @click="ticket.side = 'buy'">{{ t('trades.table.buy') }}</button>
+          <button type="button" data-testid="manual-sell" :aria-pressed="ticket.side === 'sell'" @click="ticket.side = 'sell'">{{ t('trades.table.sell') }}</button>
         </label>
-        <label>
+        <label class="trades-view__choice">
           {{ t('trades.orderType') }}
-          <span data-testid="manual-type">{{ ticket.orderType }}</span>
-          <button type="button" data-testid="manual-limit" @click="ticket.orderType = 'limit'">{{ t('trades.limit') }}</button>
-          <button type="button" data-testid="manual-market" @click="ticket.orderType = 'market'">{{ t('trades.marketOrder') }}</button>
+          <span class="sr-only" data-testid="manual-type">{{ ticket.orderType }}</span>
+          <button type="button" data-testid="manual-limit" :aria-pressed="ticket.orderType === 'limit'" @click="ticket.orderType = 'limit'">{{ t('trades.limit') }}</button>
+          <button type="button" data-testid="manual-market" :aria-pressed="ticket.orderType === 'market'" @click="ticket.orderType = 'market'">{{ t('trades.marketOrder') }}</button>
         </label>
         <label>
           {{ t('trades.table.amount') }}
@@ -309,7 +309,6 @@ onBeforeUnmount(() => {
   min-width: 0;
 }
 
-.trades-view__ticket,
 .trades-view__order {
   display: flex;
   flex-wrap: wrap;
@@ -317,8 +316,97 @@ onBeforeUnmount(() => {
   align-items: end;
 }
 
+.trades-view__ticket {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--ui-space-16);
+  align-items: end;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .trades-view__ticket label {
   display: grid;
   gap: var(--ui-space-4);
+  min-width: 0;
+  color: var(--ui-color-text-secondary);
+  font-size: 13px;
+}
+
+.trades-view__ticket :deep(.el-select) {
+  width: 100%;
+  min-width: 0;
+}
+
+.trades-view__ticket input,
+.trades-view__ticket button {
+  box-sizing: border-box;
+  min-width: 0;
+  min-height: 36px;
+  padding: 7px 12px;
+  border: 1px solid var(--el-border-color);
+  border-radius: var(--ui-radius-4);
+  font: inherit;
+  color: var(--ui-color-text);
+  background: var(--ui-color-surface);
+}
+
+.trades-view__ticket button {
+  cursor: pointer;
+}
+
+.trades-view__ticket label.trades-view__choice {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.trades-view__choice button {
+  grid-row: 2;
+}
+
+.trades-view__choice button[aria-pressed="true"] {
+  border-color: var(--ui-color-primary);
+  background: var(--ui-color-primary-soft);
+  color: var(--ui-color-primary);
+}
+
+.trades-view__ticket > button {
+  grid-column: 1 / -1;
+  justify-self: end;
+  min-width: 160px;
+  border-color: var(--ui-color-primary);
+  background: var(--ui-color-primary);
+  color: white;
+  font-weight: 600;
+}
+
+.trades-view__ticket button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.trades-view__ticket input:focus-visible,
+.trades-view__ticket button:focus-visible {
+  outline: 2px solid var(--ui-color-primary);
+  outline-offset: 2px;
+}
+
+@media (max-width: 600px) {
+  .trades-view__ticket {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .trades-view__ticket > button {
+    justify-self: stretch;
+  }
 }
 </style>

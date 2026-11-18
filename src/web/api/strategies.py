@@ -20,6 +20,7 @@ from src.core.execution_mode import (
     account_environment,
     adapter_uses_sandbox,
     normalized_mode,
+    validate_execution_environment,
 )
 from src.core.execution_scope import tradable_market
 from src.core.runtime_settings import load_runtime_settings
@@ -36,6 +37,7 @@ from src.exchange.okx_spot import OKXSpotAdapter
 from src.exchange.okx_swap import OKXSwapAdapter
 from src.market.service import MarketDataService
 from src.notify.telegram import RiskEventTelegramNotifier, TelegramNotifier
+from src.ops.phase4_controls import record_source_heartbeat
 from src.ops.private_sync import sync_private_state
 from src.order.lifecycle import record_transition
 from src.order.manager import PRICE_FRESHNESS_UNTRACKED, UnifiedOrderManager
@@ -149,16 +151,32 @@ def paper_backtest_config() -> BacktestConfig:
 
 
 def create_market_data_service() -> MarketDataService:
-    from src.market.public_stream import OkxPublicCandleStream
-
     exchange = load_runtime_settings().exchange
+    last_heartbeat_at = 0
+
+    def record_market_observation(symbol: str, timeframe: str, observed_at: int) -> None:
+        nonlocal last_heartbeat_at
+        del symbol, timeframe
+        if observed_at - last_heartbeat_at < 5_000:
+            return
+        try:
+            record_source_heartbeat(
+                Repository(), "market", observed_at=observed_at, status="fresh",
+            )
+            last_heartbeat_at = observed_at
+        except Exception:
+            logger.warning("记录行情新鲜度失败", exc_info=True)
+
     return MarketDataService(
         exchange.api_key,
         exchange.secret,
         exchange.passphrase,
-        default_type="auto",
+        default_type="spot",
         demo=exchange.demo,
-        public_stream=OkxPublicCandleStream(demo=exchange.demo),
+        # The legacy public stream shares one recv socket across subscriptions
+        # and can return only subscription acknowledgements during warmup.
+        # Use the existing rate-limited REST feed until it supports multiplexing.
+        on_price_observed=record_market_observation,
     )
 
 
@@ -232,7 +250,10 @@ def live_trading_configured(settings: object) -> bool:
 
 
 def current_order_router_mode() -> str:
-    mode = normalized_mode(load_runtime_settings().mode)
+    settings = load_runtime_settings()
+    mode = normalized_mode(settings.mode)
+    exchange = getattr(settings, "exchange", None)
+    validate_execution_environment(mode, getattr(exchange, "demo", True))
     if mode == "demo":
         return "live"
     return resolve_order_router_mode(mode)

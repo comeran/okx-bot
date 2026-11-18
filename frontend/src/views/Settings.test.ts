@@ -41,7 +41,7 @@ function createSettingsView(overrides: Partial<AppSettingsView> = {}): AppSettin
       secret_set: true,
       passphrase: 'hidden-passphrase',
       passphrase_set: true,
-      demo: true,
+      demo: overrides.mode !== 'live',
     },
     backtest: {
       initial_capital: 100000,
@@ -169,6 +169,41 @@ function validationText(key: string, field: string): string {
 let serverSettings = createSettingsView();
 
 describe('Settings view', () => {
+  it.each([['demo', true], ['live', false]] as const)(
+    'derives the exchange environment when choosing %s', async (mode, demo) => {
+      const wrapper = await mount(Settings, { components });
+      await wrapper.flush();
+      expect(wrapper.findAll((node) => node.type === 'el-option').map((node) => node.props.value)).toContain('demo');
+      expect(wrapper.findAll((node) => node.type === 'el-switch')).toHaveLength(1);
+      await wrapper.invoke(control(wrapper, 'el-select'), 'onUpdate:modelValue', mode);
+      expect(textContent(wrapper.getByTestId('exchange-environment'))).toContain(
+        demo ? 'settings.environments.sandbox' : 'settings.environments.live',
+      );
+      await wrapper.trigger(control(wrapper, 'el-button', 1), 'click');
+      expect(mocks.updateSettings.mock.calls[0][0]).toMatchObject({ mode, exchange: { demo } });
+      wrapper.unmount();
+    },
+  );
+
+  it.each([['live', true], ['demo', false]] as const)(
+    'requires an explicit mode choice to repair legacy %s settings', async (mode, demo) => {
+      const saved = createSettingsView();
+      saved.mode = mode;
+      saved.exchange.demo = demo;
+      mocks.getSettings.mockResolvedValueOnce(saved);
+      const wrapper = await mount(Settings, { components });
+      await wrapper.flush();
+      expect(wrapper.text()).toContain('settings.environmentConflict');
+      expect(control(wrapper, 'el-select').props.modelValue).toBe('');
+      expect(control(wrapper, 'el-button', 1).props.disabled).toBe(true);
+      expect(wrapper.getByTestId('exchange-auth-check').props.disabled).toBe(true);
+      await wrapper.invoke(control(wrapper, 'el-select'), 'onUpdate:modelValue', 'demo');
+      await wrapper.trigger(control(wrapper, 'el-button', 1), 'click');
+      expect(mocks.updateSettings.mock.calls[0][0]).toMatchObject({ mode: 'demo', exchange: { demo: true } });
+      wrapper.unmount();
+    },
+  );
+
   it('saves credentials and environment without the legacy account market field', async () => {
     serverSettings = createSettingsView();
     (serverSettings.exchange as unknown as Record<string, unknown>).market_type = 'option';

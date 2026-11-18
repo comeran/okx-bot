@@ -21,6 +21,7 @@ from src.data.models import OrderRecord
 from src.data.paper_book import normalize_spot_symbol
 from src.exchange.base import canonical_symbol
 from src.exchange.errors import AcceptedUnknownOrderResultError
+from src.exchange.markets import market_type_for_symbol
 from src.order.accounting import PaperAccountingService
 from src.order.lifecycle import record_transition
 from src.order.router import OrderRouter
@@ -1269,7 +1270,7 @@ class UnifiedOrderManager:
                         size = 1.0
                     else:
                         size = contract_size(linear_position, default=None)
-                elif self.router.mode == "live" and self.live_market_type != "spot":
+                elif self.router.mode == "live" and self._order_market_type(order) != "spot":
                     raise ValueError("missing contract_size metadata") from exc
                 else:
                     return order_notional(order, price)
@@ -1558,6 +1559,11 @@ class UnifiedOrderManager:
             effective_price=order_price,
         )
 
+    def _order_market_type(self, order: Order) -> str:
+        if self.live_market_type and self.live_market_type != "auto":
+            return self.live_market_type
+        return market_type_for_symbol(order.symbol)
+
     def _check_live_order_safety(
         self,
         order: Order,
@@ -1569,6 +1575,7 @@ class UnifiedOrderManager:
             return RiskGateResult(False, "Live safeguards require account state")
         if order_price is None or order_price <= 0:
             return RiskGateResult(False, "Live safeguards require a current price")
+        market_type = self._order_market_type(order)
 
         current_amount_by_side = {
             "long": sum(
@@ -1582,11 +1589,29 @@ class UnifiedOrderManager:
                 if str(getattr(position, "side", "")).lower() == "short"
             ),
         }
+        if market_type == "spot":
+            base_currency = canonical_symbol(order.symbol, market_type="spot").split("-")[0]
+            # Cash inventory is returned in balances, never in the derivatives
+            # positions endpoint. Funded ownership is checked before this gate.
+            current_amount_by_side = {"long": 0.0, "short": 0.0}
+            asset = next((
+                row for row in (getattr(account, "assets", None) or [])
+                if isinstance(row, Mapping)
+                and str(row.get("ccy", "")).upper() == base_currency
+            ), None)
+            if asset is not None:
+                try:
+                    available = float(asset.get("avail_bal", 0))
+                except (TypeError, ValueError, OverflowError):
+                    available = 0.0
+                current_amount_by_side["long"] = (
+                    available if math.isfinite(available) and available > 0 else 0.0
+                )
         has_position = any(amount > 0 for amount in current_amount_by_side.values())
         reducing_side = "short" if order.side == OrderSide.BUY else "long"
         increasing_side = "long" if order.side == OrderSide.BUY else "short"
         if (
-            self.live_market_type == "spot"
+            market_type == "spot"
             and order.side == OrderSide.SELL
             and has_position
             and order.amount > current_amount_by_side["long"]
@@ -1610,7 +1635,7 @@ class UnifiedOrderManager:
             and sum(resulting_amount) < sum(current_amount_by_side.values())
         )
         if is_reducing:
-            if self.live_market_type != "spot":
+            if market_type != "spot":
                 order.reduce_only = True
                 order.params = {**order.params, "reduceOnly": True}
             return RiskGateResult(True, effective_price=order_price)
@@ -1623,7 +1648,7 @@ class UnifiedOrderManager:
                 effective_price=order_price,
             )
 
-        if self.live_market_type == "spot" and order.side == OrderSide.SELL and not has_position:
+        if market_type == "spot" and order.side == OrderSide.SELL and not has_position:
             return RiskGateResult(
                 False,
                 "Live spot sell requires existing position",
@@ -1690,7 +1715,7 @@ class UnifiedOrderManager:
 
     @staticmethod
     def _new_client_order_id() -> str:
-        return f"bot-{uuid.uuid4().hex[:24]}"
+        return f"bot{uuid.uuid4().hex[:24]}"
 
     def _normalize_successful_submit_status(self, order: Order) -> bool:
         if order.status is not OrderStatus.REJECTED:

@@ -124,11 +124,31 @@ async def test_order_managers_bind_handler_safeguards_and_funding_to_selected_ma
 
 
 @pytest.mark.asyncio
-async def test_shared_strategy_market_data_has_no_legacy_default(monkeypatch):
+async def test_shared_strategy_market_data_resolves_native_instruments_across_markets(monkeypatch):
     monkeypatch.setattr(strategies, "load_runtime_settings", lambda: configured_settings())
     service = strategies.create_market_data_service()
     try:
-        assert service._exchange.options["defaultType"] == "auto"
+        instruments = [
+            ("BTC-USDT", "BTC/USDT", "spot"),
+            ("BTC-USDT-SWAP", "BTC/USDT:USDT", "swap"),
+            ("BTC-USD-261225", "BTC/USD:BTC-261225", "future"),
+            ("BTC-USD-261225-90000-C", "BTC/USD:BTC-261225-90000-C", "option"),
+        ]
+        markets = {
+            unified: {
+                "id": native, "symbol": unified, "type": market,
+                **{kind: market == kind for kind in ("spot", "swap", "future", "option")},
+            }
+            for native, unified, market in instruments
+        }
+        service._exchange.markets = markets
+        service._exchange.markets_by_id = {
+            market["id"]: [market] for market in markets.values()
+        }
+        for native, expected_unified, expected_market in instruments:
+            resolved = service._exchange.market(native)
+            assert resolved["symbol"] == expected_unified
+            assert resolved["type"] == expected_market
     finally:
         await service.stop()
 

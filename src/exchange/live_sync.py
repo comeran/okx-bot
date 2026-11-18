@@ -188,6 +188,10 @@ class LiveStateSyncService:
                     if all(timestamp > 0 for timestamp in position_timestamps)
                     else 0
                 )
+                if position_snapshot_timestamp > 0:
+                    # Cross-market rows may be newer than the oldest covered
+                    # snapshot. Only archive positions within that coverage.
+                    refresh_timestamp = min(refresh_timestamp, position_snapshot_timestamp)
             elif complete_position_snapshot and position_snapshot_timestamp > 0:
                 refresh_timestamp = position_snapshot_timestamp
             else:

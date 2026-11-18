@@ -4,7 +4,7 @@ import logging
 import time
 from typing import Literal
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
 from src.core.config import (
@@ -15,6 +15,7 @@ from src.core.config import (
     RiskConfig,
     WebConfig,
 )
+from src.core.execution_mode import sandbox_for_mode, validate_execution_environment
 from src.core.runtime_settings import load_runtime_settings, save_runtime_settings
 from src.data.repository import Repository
 from src.web.exchange_auth import probe_saved_exchange_auth
@@ -220,6 +221,13 @@ def create_router(broadcast=None) -> APIRouter:
 
     @router.put("")
     async def update_settings(update: SettingsUpdate) -> dict[str, object]:
+        expected_demo = sandbox_for_mode(update.mode)
+        if expected_demo is not None and "demo" not in update.exchange.model_fields_set:
+            update.exchange.demo = expected_demo
+        try:
+            validate_execution_environment(update.mode, update.exchange.demo)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
         settings.mode = update.mode
         settings.exchange.api_key = _merge_secret(
             settings.exchange.api_key,

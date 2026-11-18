@@ -51,7 +51,7 @@ def run_bounded_sync(
     fetch: Callable[[], dict],
     *,
     max_attempts: int = 3,
-    now_ms: int,
+    now_ms: int | Callable[[], int],
     max_age_ms: int = 30_000,
 ) -> dict[str, object]:
     """失败时最多重试 max_attempts 次。成功也不把覆盖标成完整。"""
@@ -61,28 +61,39 @@ def run_bounded_sync(
         try:
             page = fetch()
         except Exception:
+            checked_at = now_ms() if callable(now_ms) else now_ms
             last_error = "sync_failed"
             logger.warning("私有同步第 %s 次失败", attempt)
             _write_freshness(
                 repository, status="retrying", attempts=attempt, fresh=False,
                 cursor_ms=_stored_cursor(repository), observed_at=None,
-                updated_at=now_ms,
+                updated_at=checked_at,
             )
             continue
+        checked_at = now_ms() if callable(now_ms) else now_ms
         observed = page.get("observed_at")
         cursor = page.get("cursor_ms")
         fresh = (
             type(observed) is int
-            and type(now_ms) is int
-            and 0 <= now_ms - observed <= max_age_ms
+            and type(checked_at) is int
+            and 0 <= checked_at - observed <= max_age_ms
         )
         status = "fresh" if fresh else "stale"
         _write_freshness(
             repository, status=status, attempts=attempt, fresh=fresh,
             cursor_ms=None if cursor is None else int(cursor),
             observed_at=None if observed is None else int(observed),
-            updated_at=now_ms,
+            updated_at=checked_at,
         )
+        if fresh and cursor is not None:
+            from src.ops.phase4_controls import record_source_heartbeat
+
+            # A skipped paper/backtest page has no cursor and cannot attest
+            # that a private account read actually completed.
+            for source in ("account", "private_sync"):
+                record_source_heartbeat(
+                    repository, source, observed_at=observed, status="fresh",
+                )
         return {
             "status": status,
             "attempts": attempt,
@@ -91,9 +102,10 @@ def run_bounded_sync(
             "complete": False,
         }
     cursor = _stored_cursor(repository)
+    checked_at = now_ms() if callable(now_ms) else now_ms
     _write_freshness(
         repository, status="failed", attempts=max_attempts, fresh=False,
-        cursor_ms=cursor, observed_at=None, updated_at=now_ms,
+        cursor_ms=cursor, observed_at=None, updated_at=checked_at,
     )
     return {
         "status": "failed",
@@ -309,9 +321,9 @@ def default_private_fetch(loader=None, factory=None):
     def fetch() -> dict[str, object]:
         settings = load()
         mode = str(getattr(settings, "mode", "") or "").strip().lower()
-        now = int(time.time() * 1000)
+        started_at = int(time.time() * 1000)
         if mode not in {"demo", "live"}:
-            return {"observed_at": now, "cursor_ms": None, "complete": False}
+            return {"observed_at": started_at, "cursor_ms": None, "complete": False}
         client = build(settings)
         try:
             header = str((getattr(client, "headers", {}) or {}).get("x-simulated-trading", ""))
@@ -324,7 +336,8 @@ def default_private_fetch(loader=None, factory=None):
             close = getattr(client, "close", None)
             if callable(close):
                 close()
-        return {"observed_at": now, "cursor_ms": now, "complete": False}
+        observed_at = int(time.time() * 1000)
+        return {"observed_at": observed_at, "cursor_ms": observed_at, "complete": False}
 
     return fetch
 
@@ -428,7 +441,7 @@ async def sync_forever(
                 from src.data.repository import Repository
 
                 run_bounded_sync(
-                    Repository(), fetch, now_ms=int(time.time() * 1000),
+                    Repository(), fetch, now_ms=lambda: int(time.time() * 1000),
                 )
         except Exception:
             logger.exception("私有同步失败")

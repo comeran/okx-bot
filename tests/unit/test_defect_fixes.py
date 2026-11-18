@@ -79,6 +79,30 @@ def test_private_fetch_reads_sandbox_balance_when_the_header_is_simulated():
     assert client.closed is True
 
 
+def test_private_fetch_timestamps_success_after_balance_read(monkeypatch):
+    import src.ops.phase3_recovery as recovery
+
+    class Client:
+        headers = {"x-simulated-trading": "1"}
+
+        def fetch_balance(self):
+            return {}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(recovery.time, "time", lambda: 100.1)
+    page = default_private_fetch(
+        loader=lambda: AppConfig(
+            mode="demo",
+            exchange=ExchangeConfig(api_key="k", secret="s", passphrase="p"),
+        ),
+        factory=lambda _settings: Client(),
+    )()
+    assert page["observed_at"] == 100100
+    assert page["cursor_ms"] == 100100
+
+
 def test_serve_command_restarts_the_app_factory():
     command = serve_command()
     assert command[0:3] == ["uv", "run", "uvicorn"]

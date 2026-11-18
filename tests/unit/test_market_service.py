@@ -3,7 +3,7 @@ import contextlib
 import threading
 from collections import deque
 from math import inf
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from ccxt.base.errors import NotSupported
@@ -283,6 +283,261 @@ async def test_poll_once_skips_open_candle_without_advancing_timestamp():
     assert [bar.timestamp for bar in bars] == [1700000000000, 1700000060000]
     assert bars[-1].close == 51200.0
     assert callback.await_count == 2
+
+
+async def test_poll_once_reports_a_fresh_closed_bar_to_the_risk_heartbeat():
+    with patch("src.market.service.create_okx_client") as ccxt:
+        exchange = AsyncMock()
+        exchange.watch_ohlcv.return_value = [
+            [1700000000000, 50000, 51000, 49000, 50500, 100.5],
+        ]
+        ccxt.return_value = exchange
+        subscriber = AsyncMock()
+        observed = Mock()
+        service = MarketDataService(
+            "api-key",
+            "secret",
+            "passphrase",
+            on_price_observed=observed,
+        )
+        service._current_time = lambda: 1700000060
+        service.subscribe("BTC-USDT-SWAP", "1m", subscriber)
+
+        await service._poll_once("BTC-USDT-SWAP", "1m")
+
+    observed.assert_called_once_with("BTC-USDT-SWAP", "1m", 1700000060000)
+
+
+@pytest.mark.parametrize(
+    ("timeframe", "first_time", "second_time", "expected_times"),
+    [
+        ("1m", 1700000060, 1700000080, [1700000060000, 1700000080000]),
+        ("5m", 1700000300, 1700000320, [1700000300000, 1700000320000]),
+    ],
+)
+async def test_repeated_fresh_rest_polls_refresh_heartbeat_without_redelivering_bars(
+    monkeypatch, timeframe, first_time, second_time, expected_times,
+):
+    exchange = Mock(fetch_ohlcv=AsyncMock(), spec=["fetch_ohlcv"])
+    exchange.fetch_ohlcv.return_value = [
+        [1700000000000, 50000, 51000, 49000, 50500, 100.5],
+    ]
+    observations: list[tuple[str, str, int]] = []
+    delivered: list[int] = []
+
+    async def subscriber(bar: Bar) -> None:
+        delivered.append(bar.timestamp)
+
+    now = first_time
+    monkeypatch.setattr("src.market.service.time.time", lambda: now)
+    service = MarketDataService(
+        "api-key", "secret", "passphrase", exchange=exchange,
+        on_price_observed=lambda *observation: observations.append(observation),
+    )
+    service.subscribe("BTC-USDT-SWAP", timeframe, subscriber)
+
+    await service._poll_once("BTC-USDT-SWAP", timeframe)
+    first_price_observed_at = service.price_observed_at("BTC-USDT-SWAP", timeframe)
+    now = second_time
+    await service._poll_once("BTC-USDT-SWAP", timeframe)
+
+    assert observations == [
+        ("BTC-USDT-SWAP", timeframe, expected_times[0]),
+        ("BTC-USDT-SWAP", timeframe, expected_times[1]),
+    ]
+    assert delivered == [1700000000000]
+    assert service.latest_price("BTC-USDT-SWAP", timeframe) == 50500
+    assert service.price_observed_at("BTC-USDT-SWAP", timeframe) == first_price_observed_at
+
+
+async def test_current_open_candle_refreshes_heartbeat_without_delivering_a_bar():
+    exchange = Mock(fetch_ohlcv=AsyncMock(), spec=["fetch_ohlcv"])
+    exchange.fetch_ohlcv.return_value = [
+        [1700000060000, 50000, 51000, 49000, 50500, 100.5],
+    ]
+    observations: list[int] = []
+    delivered: list[int] = []
+
+    async def subscriber(bar: Bar) -> None:
+        delivered.append(bar.timestamp)
+
+    service = MarketDataService(
+        "api-key", "secret", "passphrase", exchange=exchange,
+        on_price_observed=lambda _symbol, _timeframe, timestamp: observations.append(timestamp),
+    )
+    service._current_time = lambda: 1700000080
+    service.subscribe("BTC-USDT-SWAP", "1m", subscriber)
+
+    await service._poll_once("BTC-USDT-SWAP", "1m")
+
+    assert observations == [1700000080000]
+    assert delivered == []
+    assert service.get_recent_bars("BTC-USDT-SWAP", "1m") == []
+    assert service.latest_price("BTC-USDT-SWAP", "1m") is None
+
+
+@pytest.mark.parametrize(
+    ("rows", "error_type"),
+    [
+        ([], None),
+        ([[1700000000000, 50000, 51000, 49000, 50500, 100.5]], None),
+        ([[1700000240000, 50000, 51000, 49000, 50500, 100.5]], None),
+        ([[1700000060000, 50000, 51000, 49000, 50500, 100.5], ["bad"]], ValueError),
+    ],
+    ids=["empty", "stale", "future", "malformed-batch"],
+)
+async def test_unusable_market_responses_do_not_refresh_heartbeat(rows, error_type):
+    exchange = Mock(fetch_ohlcv=AsyncMock(), spec=["fetch_ohlcv"])
+    exchange.fetch_ohlcv.return_value = [
+        [1700000000000, 50000, 51000, 49000, 50500, 100.5],
+    ]
+    observations: list[int] = []
+    service = MarketDataService(
+        "api-key", "secret", "passphrase", exchange=exchange,
+        on_price_observed=lambda _symbol, _timeframe, timestamp: observations.append(timestamp),
+    )
+    service._current_time = lambda: 1700000060
+    await service._poll_once("BTC-USDT-SWAP", "1m")
+    exchange.fetch_ohlcv.return_value = rows
+    service._current_time = lambda: 1700000120
+
+    if error_type is None:
+        await service._poll_once("BTC-USDT-SWAP", "1m")
+    else:
+        with pytest.raises(error_type):
+            await service._poll_once("BTC-USDT-SWAP", "1m")
+
+    assert observations == [1700000060000]
+
+
+async def test_backfilled_candles_do_not_refresh_heartbeat_for_a_future_only_response():
+    exchange = Mock(fetch_ohlcv=AsyncMock(), spec=["fetch_ohlcv"])
+    exchange.fetch_ohlcv.side_effect = [
+        [[1700000240000, 50000, 51000, 49000, 50500, 100.5]],
+        [[1700000060000, 50000, 51000, 49000, 50500, 100.5]],
+        [],
+    ]
+    observations: list[int] = []
+    service = MarketDataService(
+        "api-key", "secret", "passphrase", exchange=exchange,
+        on_price_observed=lambda _symbol, _timeframe, timestamp: observations.append(timestamp),
+    )
+    service._current_time = lambda: 1700000120
+    service._required_bars["BTC-USDT-SWAP:1m"] = 3
+
+    await service._poll_once("BTC-USDT-SWAP", "1m")
+
+    assert observations == []
+    assert [bar.timestamp for bar in service.get_recent_bars("BTC-USDT-SWAP", "1m")] == [
+        1700000060000,
+    ]
+
+
+async def test_backfill_provider_failure_does_not_refresh_heartbeat():
+    exchange = Mock(fetch_ohlcv=AsyncMock(), spec=["fetch_ohlcv"])
+    exchange.fetch_ohlcv.side_effect = [
+        [[1700000060000, 50000, 51000, 49000, 50500, 100.5]],
+        RuntimeError("backfill provider unavailable"),
+    ]
+    observations: list[int] = []
+    service = MarketDataService(
+        "api-key", "secret", "passphrase", exchange=exchange,
+        on_price_observed=lambda _symbol, _timeframe, timestamp: observations.append(timestamp),
+    )
+    service._current_time = lambda: 1700000120
+    service._required_bars["BTC-USDT-SWAP:1m"] = 3
+
+    with pytest.raises(RuntimeError, match="backfill provider unavailable"):
+        await service._poll_once("BTC-USDT-SWAP", "1m")
+
+    assert observations == []
+
+
+async def test_provider_failure_does_not_refresh_a_previously_fresh_heartbeat():
+    exchange = Mock(fetch_ohlcv=AsyncMock(), spec=["fetch_ohlcv"])
+    exchange.fetch_ohlcv.side_effect = [
+        [[1700000000000, 50000, 51000, 49000, 50500, 100.5]],
+        RuntimeError("provider unavailable"),
+    ]
+    observations: list[int] = []
+    service = MarketDataService(
+        "api-key", "secret", "passphrase", exchange=exchange,
+        on_price_observed=lambda _symbol, _timeframe, timestamp: observations.append(timestamp),
+    )
+    service._current_time = lambda: 1700000060
+    await service._poll_once("BTC-USDT-SWAP", "1m")
+    service._current_time = lambda: 1700000080
+
+    with pytest.raises(RuntimeError, match="provider unavailable"):
+        await service._poll_once("BTC-USDT-SWAP", "1m")
+
+    assert observations == [1700000060000]
+
+
+async def test_subscriber_failure_keeps_receipt_heartbeat_and_retries_delivery():
+    exchange = Mock(fetch_ohlcv=AsyncMock(), spec=["fetch_ohlcv"])
+    exchange.fetch_ohlcv.return_value = [
+        [1700000000000, 50000, 51000, 49000, 50500, 100.5],
+    ]
+    observations: list[int] = []
+    attempts: list[int] = []
+
+    async def subscriber(bar: Bar) -> None:
+        attempts.append(bar.timestamp)
+        if len(attempts) == 1:
+            raise RuntimeError("subscriber failed once")
+
+    service = MarketDataService(
+        "api-key", "secret", "passphrase", exchange=exchange,
+        on_price_observed=lambda _symbol, _timeframe, timestamp: observations.append(timestamp),
+    )
+    service._current_time = lambda: 1700000060
+    service.subscribe("BTC-USDT-SWAP", "1m", subscriber)
+
+    with pytest.raises(_CallbackDispatchError, match="subscriber failed once"):
+        await service._poll_once("BTC-USDT-SWAP", "1m")
+
+    assert observations == [1700000060000]
+    assert service.get_recent_bars("BTC-USDT-SWAP", "1m") == []
+    assert service.get_feed_health("BTC-USDT-SWAP", "1m").status != "ready"
+
+    service._current_time = lambda: 1700000080
+    await service._poll_once("BTC-USDT-SWAP", "1m")
+
+    assert observations == [1700000060000, 1700000080000]
+    assert attempts == [1700000000000, 1700000000000]
+    assert [bar.timestamp for bar in service.get_recent_bars("BTC-USDT-SWAP", "1m")] == [
+        1700000000000,
+    ]
+
+
+async def test_heartbeat_callback_failure_does_not_stop_candle_delivery_or_poll_health():
+    exchange = Mock(fetch_ohlcv=AsyncMock(), spec=["fetch_ohlcv"])
+    exchange.fetch_ohlcv.return_value = [
+        [1700000000000, 50000, 51000, 49000, 50500, 100.5],
+    ]
+    delivered: list[int] = []
+    attempts: list[int] = []
+
+    async def subscriber(bar: Bar) -> None:
+        delivered.append(bar.timestamp)
+
+    def observe(_symbol: str, _timeframe: str, timestamp: int) -> None:
+        attempts.append(timestamp)
+        raise RuntimeError("heartbeat sink unavailable")
+
+    service = MarketDataService(
+        "api-key", "secret", "passphrase", exchange=exchange, on_price_observed=observe,
+    )
+    service._current_time = lambda: 1700000060
+    service.subscribe("BTC-USDT-SWAP", "1m", subscriber)
+    await service._poll_once("BTC-USDT-SWAP", "1m")
+    service._current_time = lambda: 1700000080
+    await service._poll_once("BTC-USDT-SWAP", "1m")
+
+    assert attempts == [1700000060000, 1700000080000]
+    assert delivered == [1700000000000]
+    assert service.get_feed_health("BTC-USDT-SWAP", "1m").status == "ready"
 
 
 async def test_poll_once_skips_bars_already_seen_for_subscription():

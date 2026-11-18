@@ -94,6 +94,7 @@ class MarketDataService:
         *,
         public_stream: object | None = None,
         exchange: object | None = None,
+        on_price_observed: Callable[[str, str, int], None] | None = None,
     ):
         self._api_key = api_key
         self._secret = secret
@@ -101,6 +102,7 @@ class MarketDataService:
         self._default_type = default_type
         self._demo = demo
         self._public_stream = public_stream
+        self._on_price_observed = on_price_observed
         self._exchange = exchange if exchange is not None else self._create_exchange()
         self._exchange_usable = True
         self._retired_exchanges: list[object] = []
@@ -643,15 +645,26 @@ class MarketDataService:
 
         callback_errors: list[Exception] = []
         try:
-            parsed_bars = self._parse_ohlcv_rows(rows, key)
+            observed_bars = self._parse_ohlcv_rows(rows, key)
             parsed_bars = await self._backfill_bars(
                 fetch_ohlcv if callable(fetch_ohlcv) else None,
                 symbol,
                 timeframe,
                 key,
-                parsed_bars,
+                observed_bars,
             )
             parsed_bars.sort(key=lambda bar: bar.timestamp)
+            observed_at = int(self._current_time() * 1000)
+            if self._on_price_observed is not None and any(
+                bar.timestamp <= observed_at and self._is_fresh_bar(bar.timestamp, timeframe)
+                for bar in observed_bars
+            ):
+                try:
+                    self._on_price_observed(symbol, timeframe, observed_at)
+                except Exception:
+                    # Receipt freshness is independent of subscriber delivery.
+                    # A local freshness sink must never stop a valid market poll.
+                    logger.warning("行情新鲜度写入失败", exc_info=True)
             failed_callbacks: set[int] = set()
             for bar in parsed_bars:
                 if bar.timestamp <= self._last_bar_timestamps.get(key, 0):

@@ -864,11 +864,16 @@ class OKXBaseAdapter(ExchangeAdapter):
         fallback_total = self._safe_float(self._balance_value(balance, currency, "total"))
         fallback_free = self._safe_float(self._balance_value(balance, currency, "free"))
         assets_equity = sum(asset.eq_utd for asset in assets)
+        # The currency detail timestamp only changes when that asset changes.
+        # This snapshot covers the whole account and uses its account-level uTime.
         updated_at = self._safe_int(
-            row.get("uTime") if row is not None else None,
+            account_row.get("uTime"),
             self._safe_int(
-                account_row.get("uTime"),
-                self._safe_int(info.get("uTime"), self._safe_int(info.get("ts"))),
+                info.get("uTime"),
+                self._safe_int(
+                    info.get("ts"),
+                    self._safe_int(row.get("uTime") if row is not None else None),
+                ),
             ),
         )
         return AccountSnapshot(
@@ -1365,12 +1370,13 @@ class OKXBaseAdapter(ExchangeAdapter):
         if symbols == []:
             return []
         orders: list[ExchangeOrderSnapshot] = []
+        providers = [("ordinary", None)]
+        # OKX algo pending accepts SPOT, MARGIN, SWAP and FUTURES, but not OPTION.
+        if _canonical_market_type(self._default_type) != "option":
+            providers.append(("trigger", {"trigger": True}))
         for symbol in symbols if symbols is not None else [None]:
             ccxt_symbol = self._to_ccxt_symbol(symbol) if symbol is not None else None
-            for provider_name, params in (
-                ("ordinary", None),
-                ("trigger", {"trigger": True}),
-            ):
+            for provider_name, params in providers:
                 try:
                     if ccxt_symbol is None:
                         rows = (

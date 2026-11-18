@@ -63,7 +63,7 @@ function buildUpdatePayload(): AppSettingsUpdate {
       api_key: form.exchange.api_key,
       secret: form.exchange.secret,
       passphrase: form.exchange.passphrase,
-      demo: form.exchange.demo,
+      demo: exchangeDemoForMode(form.mode, form.exchange.demo),
     },
     backtest: {
       initial_capital: form.backtest.initial_capital,
@@ -91,7 +91,7 @@ function buildUpdatePayload(): AppSettingsUpdate {
 
 function cloneSettings(settings: AppSettingsView): AppSettingsUpdate {
   return {
-    mode: settings.mode,
+    mode: hasEnvironmentConflict(settings) ? '' : settings.mode,
     exchange: {
       api_key: '',
       secret: '',
@@ -131,8 +131,20 @@ const staleData = computed(() => hasLoadedSettings.value && Boolean(loadError.va
 const actionDisabled = computed(() => loading.value || saving.value);
 const canPersist = computed(() => hasLoadedSettings.value && !loadError.value);
 const authenticationCheckDisabled = computed(() => actionDisabled.value || !canPersist.value
-  || isDirty.value || accountContext.loading || accountContext.authenticationChecking);
-const allowedModes = ['backtest', 'paper', 'live'] as const;
+  || isDirty.value || hasValidationErrors.value || accountContext.loading || accountContext.authenticationChecking);
+const allowedModes = ['backtest', 'paper', 'demo', 'live'] as const;
+const environmentConflict = computed(() => settingsView.value && hasEnvironmentConflict(settingsView.value));
+const exchangeEnvironment = computed(() => exchangeDemoForMode(form.mode, form.exchange.demo) ? 'sandbox' : 'live');
+
+function exchangeDemoForMode(mode: string, legacyDemo: boolean): boolean {
+  if (mode === 'demo') return true;
+  if (mode === 'live') return false;
+  return legacyDemo;
+}
+
+function hasEnvironmentConflict(settings: AppSettingsView): boolean {
+  return exchangeDemoForMode(settings.mode, settings.exchange.demo) !== settings.exchange.demo;
+}
 
 type SettingsSectionKey = 'runtime' | 'exchange' | 'backtest' | 'risk' | 'notifications' | 'web';
 
@@ -251,7 +263,7 @@ const mobileActionsStyle = {
 
 function applySettings(settings: AppSettingsView): void {
   settingsView.value = settings;
-  form.mode = settings.mode;
+  form.mode = hasEnvironmentConflict(settings) ? '' : settings.mode;
   form.exchange.api_key = '';
   form.exchange.secret = '';
   form.exchange.passphrase = '';
@@ -413,6 +425,7 @@ onBeforeRouteLeave(async () => confirmIfDirty());
                     <el-select v-model="form.mode" class="settings-form__control">
                       <el-option :label="t('settings.modes.backtest')" value="backtest" />
                       <el-option :label="t('settings.modes.paper')" value="paper" />
+                      <el-option :label="t('settings.modes.demo')" value="demo" />
                       <el-option :label="t('settings.modes.live')" value="live" />
                     </el-select>
                   </el-form-item>
@@ -429,19 +442,19 @@ onBeforeRouteLeave(async () => confirmIfDirty());
             </template>
             <template #content>
               <p class="settings-page__hint">{{ t('market.sharedCredentials') }}</p>
+              <p v-if="environmentConflict" class="settings-page__validation" role="alert">
+                {{ t('settings.environmentConflict') }}
+              </p>
               <div v-if="validationState.exchange.length" class="settings-page__validation" role="alert" aria-live="polite">
                 <p v-for="(error, index) in validationState.exchange" :key="`exchange-${index}-${error}`" class="settings-page__validation-item">
                   {{ error }}
                 </p>
               </div>
 
-              <el-row :gutter="16">
-                <el-col :xs="24" :md="8">
-                  <el-form-item :label="t('settings.okxDemo')">
-                    <el-switch v-model="form.exchange.demo" />
-                  </el-form-item>
-                </el-col>
-              </el-row>
+              <p class="settings-page__hint" data-testid="exchange-environment">
+                {{ t('settings.exchangeEnvironment') }}：{{ t(`settings.environments.${exchangeEnvironment}`) }}
+                {{ t('settings.environmentDerived') }}
+              </p>
 
               <el-row :gutter="16">
                 <el-col :xs="24" :md="8">

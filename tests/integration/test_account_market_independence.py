@@ -15,10 +15,14 @@ from src.web.exchange_auth import probe_saved_exchange_auth
 
 
 def configured(market="spot"):
-    return AppConfig(exchange=ExchangeConfig(
-        api_key="synthetic-key", secret="synthetic-secret",
-        passphrase="synthetic-passphrase", market_type=market,
-    ))
+    return AppConfig(
+        exchange=ExchangeConfig(
+            api_key="synthetic-key",
+            secret="synthetic-secret",
+            passphrase="synthetic-passphrase",
+            market_type=market,
+        )
+    )
 
 
 def test_legacy_market_does_not_limit_account_context_or_change_identity():
@@ -35,10 +39,19 @@ def test_legacy_market_does_not_limit_account_context_or_change_identity():
 
 def test_old_settings_load_but_new_saves_omit_global_market(monkeypatch, tmp_path):
     path = tmp_path / "settings.yaml"
-    path.write_text(yaml.safe_dump({"exchange": {
-        "api_key": "synthetic-key", "secret": "synthetic-secret",
-        "passphrase": "synthetic-passphrase", "market_type": "swap", "demo": True,
-    }}))
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "exchange": {
+                    "api_key": "synthetic-key",
+                    "secret": "synthetic-secret",
+                    "passphrase": "synthetic-passphrase",
+                    "market_type": "swap",
+                    "demo": True,
+                }
+            }
+        )
+    )
     monkeypatch.setenv("OKX_BOT_SETTINGS_PATH", str(path))
     config = load_runtime_settings()
     assert config.exchange.api_key == "synthetic-key"
@@ -102,9 +115,11 @@ def manual_client(monkeypatch):
     class Manager:
         async def submit(self, **kwargs):
             submitted.append(kwargs)
-            return SimpleNamespace(id="synthetic-order", status="open", **{
-                key: kwargs[key] for key in ("symbol", "amount", "price")
-            })
+            return SimpleNamespace(
+                id="synthetic-order",
+                status="open",
+                **{key: kwargs[key] for key in ("symbol", "amount", "price")},
+            )
 
         async def cancel(self, order_id, symbol):
             submitted.append({"order_id": order_id, "symbol": symbol})
@@ -120,18 +135,28 @@ def manual_client(monkeypatch):
     return TestClient(app), markets, submitted
 
 
-@pytest.mark.parametrize("symbol,market", [
-    ("BTC-USDT", "spot"),
-    ("BTC-USDT-SWAP", "swap"),
-    ("BTC-USDT-271231", "future"),
-    ("BTC-USD-271231-100000-C", "option"),
-])
+@pytest.mark.parametrize(
+    "symbol,market",
+    [
+        ("BTC-USDT", "spot"),
+        ("BTC-USDT-SWAP", "swap"),
+        ("BTC-USDT-271231", "future"),
+        ("BTC-USD-271231-100000-C", "option"),
+    ],
+)
 def test_manual_orders_route_by_requested_instrument(manual_client, symbol, market):
     client, markets, submitted = manual_client
-    response = client.post("/trading/orders", json={
-        "symbol": symbol, "market_type": market, "side": "buy", "order_type": "limit",
-        "amount": 1, "price": 100,
-    })
+    response = client.post(
+        "/trading/orders",
+        json={
+            "symbol": symbol,
+            "market_type": market,
+            "side": "buy",
+            "order_type": "limit",
+            "amount": 1,
+            "price": 100,
+        },
+    )
     assert response.status_code == 200
     assert markets == [market]
     assert submitted[0]["symbol"] == symbol
@@ -139,28 +164,43 @@ def test_manual_orders_route_by_requested_instrument(manual_client, symbol, mark
 
 def test_legacy_manual_payload_infers_market_without_global_setting(manual_client):
     client, markets, _ = manual_client
-    response = client.post("/trading/orders", json={
-        "symbol": "BTC-USDT-SWAP", "side": "buy", "amount": 1, "price": 100,
-    })
+    response = client.post(
+        "/trading/orders",
+        json={
+            "symbol": "BTC-USDT-SWAP",
+            "side": "buy",
+            "amount": 1,
+            "price": 100,
+        },
+    )
     assert response.status_code == 200
     assert markets == ["swap"]
 
 
 def test_market_mismatch_is_rejected_before_manager_creation(manual_client):
     client, markets, submitted = manual_client
-    response = client.post("/trading/orders", json={
-        "symbol": "BTC-USDT", "market_type": "swap", "side": "buy",
-        "amount": 1, "price": 100,
-    })
+    response = client.post(
+        "/trading/orders",
+        json={
+            "symbol": "BTC-USDT",
+            "market_type": "swap",
+            "side": "buy",
+            "amount": 1,
+            "price": 100,
+        },
+    )
     assert response.status_code == 422
     assert markets == submitted == []
 
 
 def test_cancellation_infers_market_from_order_symbol(manual_client):
     client, markets, submitted = manual_client
-    response = client.post("/trading/orders/synthetic-order/cancel", params={
-        "symbol": "BTC-USDT-SWAP",
-    })
+    response = client.post(
+        "/trading/orders/synthetic-order/cancel",
+        params={
+            "symbol": "BTC-USDT-SWAP",
+        },
+    )
     assert response.status_code == 200
     assert markets == ["swap"]
     assert submitted == [{"order_id": "synthetic-order", "symbol": "BTC-USDT-SWAP"}]

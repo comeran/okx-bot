@@ -57,6 +57,35 @@ class FakeAdapter:
 
 
 @pytest.mark.asyncio
+async def test_aggregate_snapshot_coverage_limits_cross_market_stale_cleanup():
+    repository = Repository()
+    repository.upsert_position(PositionRecord(
+        strategy="__exchange__", source="live_exchange", runtime_mode="live",
+        symbol="BTC-USDT-SWAP", side="long", amount=1,
+        entry_price=100, timestamp=150, updated_at=150,
+    ))
+    adapter = FakeAdapter()
+    adapter.position_response = PositionSnapshotResult(
+        [PositionSnapshot(
+            symbol="BTC-USDT-271231", side=PositionSide.LONG, amount=1,
+            entry_price=100, timestamp=200, updated_at=200,
+        )],
+        complete_snapshot=True, snapshot_timestamp=100,
+    )
+    await LiveStateSyncService(adapter, repository, timestamp_ms=lambda: 300).refresh(
+        "__exchange__",
+    )
+    retained = repository.get_position(
+        "__exchange__", "BTC-USDT-SWAP", "long",
+        source="live_exchange", runtime_mode="live",
+        include_inactive=True,
+    )
+    assert retained is not None
+    assert retained.active is True
+    assert retained.stale_at is None
+
+
+@pytest.mark.asyncio
 async def test_live_state_sync_does_not_archive_positions_from_unmarked_partial_response():
     engine = repository_module.create_engine("sqlite:///:memory:", echo=False)
     repository = Repository(engine)
